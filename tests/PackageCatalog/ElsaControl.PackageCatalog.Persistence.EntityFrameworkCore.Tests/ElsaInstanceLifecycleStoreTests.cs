@@ -2717,6 +2717,21 @@ public sealed partial class ElsaInstanceLifecycleStoreTests : IClassFixture<Dele
         Assert.NotNull(predecessor.ProviderSubmissionInFlightAt);
         Assert.Null(predecessor.FailureCode);
         Assert.Null(await CreateStore(db).TryClaimNextDeletionAsync("deletion-worker", Now.AddMinutes(2)));
+        db.ChangeTracker.Clear();
+        var deletionBatch = await new ElsaInstanceDeletionWorker(
+                CreateStore(db),
+                new ThrowingCleanupPort(),
+                new FixedTimeProvider(Now.AddMinutes(2)))
+            .ProcessAvailableAsync("deletion-worker-local-absent");
+        Assert.Empty(deletionBatch.Results);
+        Assert.Equal(0, deletionBatch.ProviderInvocations);
+        db.ChangeTracker.Clear();
+        var deleteOp = await db.ElsaInstanceOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == deletion.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, deleteOp.State);
+        Assert.Null(deleteOp.DeletionDiagnosticCode);
+        Assert.NotEqual(ElsaObservedLifecycle.Deleted,
+            (await db.ElsaInstances.AsNoTracking().SingleAsync(x => x.Id == accepted.Instance.Id)).ObservedLifecycle);
         var pending = Assert.Single(await CreateStore(db).ListPendingProviderOperationsAsync(16));
         Assert.NotNull(pending.Submission);
     }

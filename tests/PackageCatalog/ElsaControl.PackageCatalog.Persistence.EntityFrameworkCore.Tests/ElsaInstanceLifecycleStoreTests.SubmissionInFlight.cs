@@ -55,6 +55,21 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         Assert.NotNull(predecessor.ProviderSubmissionInFlightAt);
         Assert.Null(predecessor.FailureCode);
         Assert.Null(await CreateStore(deleter).TryClaimNextDeletionAsync("deletion-worker", Now.AddMinutes(2)));
+        deleter.ChangeTracker.Clear();
+        var deletionBatch = await new ElsaInstanceDeletionWorker(
+                CreateStore(deleter),
+                new ThrowingCleanupPort(),
+                new FixedTimeProvider(Now.AddMinutes(2)))
+            .ProcessAvailableAsync("deletion-worker-local-absent");
+        Assert.Empty(deletionBatch.Results);
+        Assert.Equal(0, deletionBatch.ProviderInvocations);
+        deleter.ChangeTracker.Clear();
+        var deleteOp = await deleter.ElsaInstanceOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == deletion.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, deleteOp.State);
+        Assert.Null(deleteOp.DeletionDiagnosticCode);
+        Assert.NotEqual(ElsaObservedLifecycle.Deleted,
+            (await deleter.ElsaInstances.AsNoTracking().SingleAsync(x => x.Id == instanceId)).ObservedLifecycle);
     }
 
     private static CatalogDbContext CreateSqlServerContext(string connectionString) =>

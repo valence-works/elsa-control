@@ -365,6 +365,28 @@ public static class ElsaInstanceOperationGuard
         submissionInFlightAt is not null;
 
     /// <summary>
+    /// Local <c>deletion.local.absent</c> finalization is only valid when the
+    /// instance has no owned-resource projections and no Create submit is still
+    /// writing Azure provenance. Stores may return false for additional reasons.
+    /// </summary>
+    public static bool CanFinalizeDeletionLocally(
+        ElsaObservedLifecycle observedLifecycle,
+        bool hasCurrentDeploymentReference,
+        bool hasPlacementAssignmentReference,
+        bool hasElsaTenantReference,
+        bool hasAzureProvenance,
+        bool hasSubmissionInFlight)
+    {
+        ElsaInstanceValue.RequireEnum(observedLifecycle, nameof(observedLifecycle));
+        return observedLifecycle != ElsaObservedLifecycle.Unknown &&
+            !hasCurrentDeploymentReference &&
+            !hasPlacementAssignmentReference &&
+            !hasElsaTenantReference &&
+            !hasAzureProvenance &&
+            !hasSubmissionInFlight;
+    }
+
+    /// <summary>
     /// Desired lifecycle used when replaying a queued predecessor whose instance
     /// is now Deleting. Stop and an already-stopped instance stay Stopped so a
     /// Reconcile/Retry accepted while stopped is not replayed as Running.

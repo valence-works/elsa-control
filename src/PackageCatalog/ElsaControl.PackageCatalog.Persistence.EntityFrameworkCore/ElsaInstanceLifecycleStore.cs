@@ -1716,10 +1716,19 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                     ? currentRecoveryRows[0].Id
                     : (Guid?)null;
                 var mappedInstance = MapInstance(instance);
+                var hasSubmissionInFlight = await dbContext.ElsaInstanceOperations.AsNoTracking()
+                    .AnyAsync(x => x.WorkspaceId == instance.WorkspaceId &&
+                                   x.InstanceId == instance.Id &&
+                                   x.ProviderSubmissionInFlightAt != null,
+                        cancellationToken);
                 var local = recoveryRequestId is null &&
-                    mappedInstance.ObservedLifecycle != ElsaObservedLifecycle.Unknown &&
-                    mappedInstance.CurrentDeploymentReference is null && mappedInstance.PlacementAssignmentReference is null &&
-                    mappedInstance.ElsaTenantReference is null;
+                    ElsaInstanceOperationGuard.CanFinalizeDeletionLocally(
+                        mappedInstance.ObservedLifecycle,
+                        mappedInstance.CurrentDeploymentReference is not null,
+                        mappedInstance.PlacementAssignmentReference is not null,
+                        mappedInstance.ElsaTenantReference is not null,
+                        await HasAzureProvenanceAsync(instance.WorkspaceId, instance.Id, cancellationToken),
+                        hasSubmissionInFlight);
 
                 claimedOperationId = operation.Id;
                 claimedWorkerId = workerId;
@@ -1862,10 +1871,17 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                     commit.ExpectedInstanceVersion, commit.ExpectedAttemptNumber, commit.WorkerId, commit.LeaseToken, commit.LeaseVersion);
                 var currentAggregate = MapInstance(instance);
                 if (commit.ProofKind == ElsaInstanceDeletionProofKind.LocalNoOwnedResources &&
-                    (currentAggregate.ObservedLifecycle == ElsaObservedLifecycle.Unknown ||
-                     currentAggregate.CurrentDeploymentReference is not null ||
-                     currentAggregate.PlacementAssignmentReference is not null ||
-                     currentAggregate.ElsaTenantReference is not null))
+                    !ElsaInstanceOperationGuard.CanFinalizeDeletionLocally(
+                        currentAggregate.ObservedLifecycle,
+                        currentAggregate.CurrentDeploymentReference is not null,
+                        currentAggregate.PlacementAssignmentReference is not null,
+                        currentAggregate.ElsaTenantReference is not null,
+                        await HasAzureProvenanceAsync(instance.WorkspaceId, instance.Id, cancellationToken),
+                        await dbContext.ElsaInstanceOperations.AsNoTracking().AnyAsync(x =>
+                            x.WorkspaceId == instance.WorkspaceId &&
+                            x.InstanceId == instance.Id &&
+                            x.ProviderSubmissionInFlightAt != null,
+                            cancellationToken)))
                     throw Conflict("Local deletion proof is not valid for this instance.");
                 var correlatedRun = await EnsureTerminalDeletionRunAsync(
                     commit.ExpectedRunId, commit.WorkspaceId, commit.InstanceId, cancellationToken);

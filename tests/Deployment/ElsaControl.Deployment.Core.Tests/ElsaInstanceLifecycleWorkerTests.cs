@@ -304,6 +304,49 @@ public sealed class ElsaInstanceLifecycleWorkerTests
     }
 
     [Fact]
+    public async Task Delete_during_submit_does_not_finalize_as_local_absent()
+    {
+        var authority = new InMemoryElsaInstanceDeleteConfirmationAuthority();
+        var store = new InMemoryElsaInstanceLifecycleStore(new StaticTimeProvider(Now), authority);
+        var service = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
+        var accepted = await service.CreateAsync(CreateRequest("claims-inflight-local-absent", "create-inflight-local-absent"));
+        store.RegisterResolutionInput(accepted.Operation.Id, ResolutionInput(accepted.Instance));
+        var submitStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseSubmit = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var workerTask = new ElsaInstanceLifecycleWorker(
+                store,
+                new RecordingResolver(SuccessfulResolution(WorkspaceId, accepted.Instance.Id)),
+                new StaticTimeProvider(Now),
+                new BlockingSubmissionPort(store, submitStarted, releaseSubmit),
+                store)
+            .ProcessAvailableAsync("lifecycle-worker-1");
+
+        await submitStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var deletion = await DeleteAsync(
+            service, authority, accepted.Instance.Id, store.Instances.Single().Version, "delete-during-submit-local-absent");
+        var cleanup = new RecordingCleanupPort();
+        var deletionBatch = await new ElsaInstanceDeletionWorker(
+                store,
+                cleanup,
+                new StaticTimeProvider(Now.AddMinutes(1)))
+            .ProcessAvailableAsync("deletion-worker-local-absent");
+
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation,
+            store.Operations.Single(x => x.Id == deletion.Operation.Id).State);
+        Assert.Equal(ElsaInstanceOperationState.Queued,
+            store.Operations.Single(x => x.Id == accepted.Operation.Id).State);
+        Assert.Empty(deletionBatch.Results);
+        Assert.Equal(0, deletionBatch.ProviderInvocations);
+        Assert.Equal(0, cleanup.Calls);
+        Assert.Null(await store.TryClaimNextDeletionAsync("deletion-worker-local-absent-2", Now.AddMinutes(1)));
+
+        releaseSubmit.SetResult();
+        await workerTask.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.NotEqual(ElsaInstanceOperationState.Succeeded,
+            store.Operations.Single(x => x.Id == deletion.Operation.Id).State);
+    }
+
+    [Fact]
     public async Task Submission_in_flight_crash_stays_replayable_until_reconciliation()
     {
         var authority = new InMemoryElsaInstanceDeleteConfirmationAuthority();
@@ -1021,6 +1064,19 @@ public sealed class ElsaInstanceLifecycleWorkerTests
             ElsaInstancePlanResolutionRequest request,
             CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("resolver exploded");
+    }
+
+    private sealed class RecordingCleanupPort : IElsaInstanceProviderCleanupPort
+    {
+        public int Calls { get; private set; }
+
+        public Task<ElsaInstanceCleanupObservation> CleanupAsync(
+            ElsaInstanceCleanupRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            Calls++;
+            throw new InvalidOperationException("Provider cleanup must not run while a Create submit is in flight.");
+        }
     }
 
     private sealed class BlockingSubmissionPort(

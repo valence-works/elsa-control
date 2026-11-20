@@ -608,6 +608,39 @@ public sealed class ElsaInstanceContractTests
     }
 
     [Fact]
+    public void Local_deletion_finalization_waits_for_in_flight_submit_and_azure_provenance()
+    {
+        Assert.True(ElsaInstanceOperationGuard.CanFinalizeDeletionLocally(
+            ElsaObservedLifecycle.Pending,
+            hasCurrentDeploymentReference: false,
+            hasPlacementAssignmentReference: false,
+            hasElsaTenantReference: false,
+            hasAzureProvenance: false,
+            hasSubmissionInFlight: false));
+        Assert.False(ElsaInstanceOperationGuard.CanFinalizeDeletionLocally(
+            ElsaObservedLifecycle.Pending,
+            hasCurrentDeploymentReference: false,
+            hasPlacementAssignmentReference: false,
+            hasElsaTenantReference: false,
+            hasAzureProvenance: false,
+            hasSubmissionInFlight: true));
+        Assert.False(ElsaInstanceOperationGuard.CanFinalizeDeletionLocally(
+            ElsaObservedLifecycle.Pending,
+            hasCurrentDeploymentReference: false,
+            hasPlacementAssignmentReference: false,
+            hasElsaTenantReference: false,
+            hasAzureProvenance: true,
+            hasSubmissionInFlight: false));
+        Assert.False(ElsaInstanceOperationGuard.CanFinalizeDeletionLocally(
+            ElsaObservedLifecycle.Unknown,
+            hasCurrentDeploymentReference: false,
+            hasPlacementAssignmentReference: false,
+            hasElsaTenantReference: false,
+            hasAzureProvenance: false,
+            hasSubmissionInFlight: false));
+    }
+
+    [Fact]
     public void Invalid_enum_values_fail_closed_in_transition_guards()
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => ElsaInstanceStateMachine.CanTransition(

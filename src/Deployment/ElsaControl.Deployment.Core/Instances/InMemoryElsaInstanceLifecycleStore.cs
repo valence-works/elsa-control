@@ -1327,9 +1327,15 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                     .OrderByDescending(x => x.Run.CreatedAt)
                     .Select(x => (Guid?)x.Run.Id)
                     .FirstOrDefault();
-                var local = instance.ObservedLifecycle != ElsaObservedLifecycle.Unknown &&
-                    instance.CurrentDeploymentReference is null && instance.PlacementAssignmentReference is null &&
-                    instance.ElsaTenantReference is null;
+                var hasSubmissionInFlight = _operations.Values.Any(predecessor =>
+                    predecessor.InstanceId == instance.Id && _submissionInFlight.ContainsKey(predecessor.Id));
+                var local = ElsaInstanceOperationGuard.CanFinalizeDeletionLocally(
+                    instance.ObservedLifecycle,
+                    instance.CurrentDeploymentReference is not null,
+                    instance.PlacementAssignmentReference is not null,
+                    instance.ElsaTenantReference is not null,
+                    _azureProvenanceInstanceIds.Contains(instance.Id),
+                    hasSubmissionInFlight);
                 return Task.FromResult<ElsaInstanceDeletionWorkItem?>(new(
                     outbox, operation, instance, local, correlatedRun, claim.Token, claim.Version)
                 {
@@ -1434,11 +1440,16 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
             EnsureDeletionOwnership(commit.WorkspaceId, commit.InstanceId, commit.OperationId, commit.OutboxId,
                 commit.ExpectedInstanceVersion, commit.ExpectedAttemptNumber, commit.WorkerId, commit.LeaseToken, commit.LeaseVersion);
             var currentInstance = _instances[commit.InstanceId];
+            var hasSubmissionInFlight = _operations.Values.Any(predecessor =>
+                predecessor.InstanceId == commit.InstanceId && _submissionInFlight.ContainsKey(predecessor.Id));
             if (commit.ProofKind == ElsaInstanceDeletionProofKind.LocalNoOwnedResources &&
-                (currentInstance.ObservedLifecycle == ElsaObservedLifecycle.Unknown ||
-                 currentInstance.CurrentDeploymentReference is not null ||
-                 currentInstance.PlacementAssignmentReference is not null ||
-                 currentInstance.ElsaTenantReference is not null))
+                !ElsaInstanceOperationGuard.CanFinalizeDeletionLocally(
+                    currentInstance.ObservedLifecycle,
+                    currentInstance.CurrentDeploymentReference is not null,
+                    currentInstance.PlacementAssignmentReference is not null,
+                    currentInstance.ElsaTenantReference is not null,
+                    _azureProvenanceInstanceIds.Contains(commit.InstanceId),
+                    hasSubmissionInFlight))
                 throw new ElsaInstanceLifecycleConflictException("Local deletion proof is not valid for this instance.");
             if (commit.ExpectedRunId is { } runId && (!_deploymentRuns.TryGetValue(runId, out var run) ||
                 run.InstanceId != commit.InstanceId || run.Run.Status is WorkspaceDeploymentRunStatus.Queued or WorkspaceDeploymentRunStatus.Running or WorkspaceDeploymentRunStatus.RecoveryRequired))
