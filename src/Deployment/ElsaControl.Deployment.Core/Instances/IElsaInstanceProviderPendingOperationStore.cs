@@ -30,4 +30,10 @@ public sealed record ElsaInstanceProviderPendingOperation(
     /// This differs from a valid observation-only item with no submission.
     /// </summary>
     public bool HandoffInvalid { get; init; }
+
+    /// <summary>
+    /// Distinct value-free reason for <see cref="HandoffInvalid"/>. Absent when the
+    /// item is valid or the store could not classify the restore failure.
+    /// </summary>
+    public string? HandoffInvalidReason { get; init; }
 }

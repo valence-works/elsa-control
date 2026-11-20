@@ -156,6 +156,7 @@ public static class AzureManagedElsaProvisioningProgressProjector
 
         string state;
         string? diagnosticCode = null;
+        string? reasonCode = null;
         var blocked = false;
         var allReady = false;
         var recoveryRequired = lifecycleState == ElsaInstanceOperationState.RecoveryRequired;
@@ -217,7 +218,14 @@ public static class AzureManagedElsaProvisioningProgressProjector
             state = ManagedElsaProvisioningProgressStates.Failed;
             diagnosticCode = lifecycleState == ElsaInstanceOperationState.Cancelled
                 ? ManagedElsaProvisioningProgressDiagnostics.Cancelled
-                : ManagedElsaProvisioningProgressDiagnostics.Failed;
+                : string.Equals(
+                    lifecycle?.FailureCode,
+                    ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected,
+                    StringComparison.Ordinal)
+                    ? ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected
+                    : ManagedElsaProvisioningProgressDiagnostics.Failed;
+            if (ManagedElsaReasonCodeCatalog.IsSafeTranslatorFinding(lifecycle?.ReconciliationDiagnosticCode))
+                reasonCode = lifecycle!.ReconciliationDiagnosticCode;
             blocked = true;
         }
         else if (lifecycleState == ElsaInstanceOperationState.Succeeded && observedReady)
@@ -407,7 +415,8 @@ public static class AzureManagedElsaProvisioningProgressProjector
             blockingOperationStage,
             staleReason,
             lifecycle?.AttemptNumber,
-            attemptStartedAt?.ToUniversalTime());
+            attemptStartedAt?.ToUniversalTime(),
+            reasonCode);
     }
 
     private static ManagedElsaProvisioningProgress Unavailable(

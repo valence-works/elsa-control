@@ -155,7 +155,7 @@ public sealed class ElsaInstanceLifecycleWorkerTests
     }
 
     [Fact]
-    public async Task Deterministic_provider_rejection_does_not_create_an_uncertain_handoff()
+    public async Task Deterministic_provider_rejection_fails_the_queued_run_with_a_visible_reason()
     {
         var store = new InMemoryElsaInstanceLifecycleStore(new StaticTimeProvider(Now));
         var service = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
@@ -163,7 +163,8 @@ public sealed class ElsaInstanceLifecycleWorkerTests
         store.RegisterResolutionInput(accepted.Operation.Id, ResolutionInput(accepted.Instance));
         var provider = new RecordingSubmissionPort(
             throwOnSubmit: true,
-            failureKind: ElsaInstanceProviderSubmissionFailureKind.Rejected);
+            failureKind: ElsaInstanceProviderSubmissionFailureKind.Rejected,
+            findingCodes: ["azure.imageRegistry.unsupported", "secret.must.not.leak"]);
 
         var result = await new ElsaInstanceLifecycleWorker(
                 store,
@@ -173,10 +174,127 @@ public sealed class ElsaInstanceLifecycleWorkerTests
                 store)
             .ProcessAvailableAsync("lifecycle-worker-1");
 
+        var failed = Assert.Single(result.Results);
         Assert.Equal(1, result.ProviderInvocations);
-        Assert.Equal(ElsaInstanceOperationState.Queued, Assert.Single(store.Operations).State);
-        Assert.Equal(WorkspaceDeploymentRunStatus.Queued, Assert.Single(store.DeploymentRuns).Run.Status);
-        Assert.NotNull((await store.ListPendingProviderOperationsAsync(16)).Single().Submission);
+        Assert.Equal(ElsaInstanceLifecycleWorkerOutcome.Failed, failed.Outcome);
+        Assert.Equal(ElsaInstanceOperationState.Failed, Assert.Single(store.Operations).State);
+        Assert.Equal(WorkspaceDeploymentRunStatus.Failed, Assert.Single(store.DeploymentRuns).Run.Status);
+        Assert.Equal(ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected, failed.FailureCode);
+        Assert.Equal(ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected, Assert.Single(store.Failures).Code);
+        Assert.Equal(
+            ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected,
+            Assert.Single(store.DeploymentRuns).Run.RecoveryReason);
+        Assert.Empty(await store.ListPendingProviderOperationsAsync(16));
+        Assert.Equal(
+            ["azure.imageRegistry.unsupported"],
+            new ElsaInstanceProviderSubmissionException(
+                ElsaInstanceProviderSubmissionFailureKind.Rejected,
+                findingCodes: ["azure.imageRegistry.unsupported", "secret.must.not.leak"]).FindingCodes);
+    }
+
+    [Fact]
+    public async Task Delete_at_accept_time_waits_behind_a_queued_create_with_an_active_worker_lease()
+    {
+        var authority = new InMemoryElsaInstanceDeleteConfirmationAuthority();
+        var store = new InMemoryElsaInstanceLifecycleStore(new StaticTimeProvider(Now), authority);
+        var service = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
+        var accepted = await service.CreateAsync(CreateRequest("claims-leased-delete", "create-leased-delete"));
+        store.RegisterResolutionInput(accepted.Operation.Id, ResolutionInput(accepted.Instance));
+        await new ElsaInstanceLifecycleWorker(
+                store,
+                new RecordingResolver(SuccessfulResolution(WorkspaceId, accepted.Instance.Id)),
+                new StaticTimeProvider(Now))
+            .ProcessAvailableAsync("lifecycle-worker-1");
+        store.SeedWorkerLease(accepted.Operation.Id, "lifecycle-worker-1", Now.AddMinutes(5));
+
+        var confirmationId = Guid.NewGuid();
+        var actorAccountId = Guid.NewGuid();
+        authority.Add(new ActionConfirmation(
+            confirmationId,
+            WorkspaceId,
+            ConfirmationActionType.DeleteManagedInstance,
+            accepted.Instance.Id.ToString("D"),
+            actorAccountId,
+            Now,
+            Now.AddMinutes(5),
+            null));
+        var deletion = await service.DeleteAsync(new ElsaInstanceLifecycleRequest(
+            WorkspaceId, accepted.Instance.Id, store.Instances.Single().Version, "delete-after-leased",
+            DeleteConfirmationId: confirmationId, ActorAccountId: actorAccountId));
+
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, deletion.Operation.State);
+        Assert.Equal(ElsaInstanceOperationState.Queued, store.Operations.Single(x => x.Id == accepted.Operation.Id).State);
+        Assert.Null(await store.TryClaimNextDeletionAsync("deletion-worker-1", Now.AddMinutes(1)));
+    }
+
+    [Fact]
+    public async Task Rejected_create_does_not_deadlock_a_later_delete()
+    {
+        var authority = new InMemoryElsaInstanceDeleteConfirmationAuthority();
+        var store = new InMemoryElsaInstanceLifecycleStore(new StaticTimeProvider(Now), authority);
+        var service = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
+        var accepted = await service.CreateAsync(CreateRequest("claims-rejected-delete", "create-rejected-delete"));
+        store.RegisterResolutionInput(accepted.Operation.Id, ResolutionInput(accepted.Instance));
+        await new ElsaInstanceLifecycleWorker(
+                store,
+                new RecordingResolver(SuccessfulResolution(WorkspaceId, accepted.Instance.Id)),
+                new StaticTimeProvider(Now),
+                new RecordingSubmissionPort(
+                    throwOnSubmit: true,
+                    failureKind: ElsaInstanceProviderSubmissionFailureKind.Rejected,
+                    findingCodes: ["azure.imageRegistry.unsupported"]),
+                store)
+            .ProcessAvailableAsync("lifecycle-worker-1");
+
+        var confirmationId = Guid.NewGuid();
+        var actorAccountId = Guid.NewGuid();
+        authority.Add(new ActionConfirmation(
+            confirmationId,
+            WorkspaceId,
+            ConfirmationActionType.DeleteManagedInstance,
+            accepted.Instance.Id.ToString("D"),
+            actorAccountId,
+            Now,
+            Now.AddMinutes(5),
+            null));
+        var deletion = await service.DeleteAsync(new ElsaInstanceLifecycleRequest(
+            WorkspaceId, accepted.Instance.Id, store.Instances.Single().Version, "delete-after-rejected",
+            DeleteConfirmationId: confirmationId, ActorAccountId: actorAccountId));
+
+        Assert.Equal(ElsaInstanceOperationState.Accepted, deletion.Operation.State);
+        Assert.Equal(ElsaInstanceOperationState.Failed, store.Operations.Single(x => x.Id == accepted.Operation.Id).State);
+        var claimed = await store.TryClaimNextDeletionAsync("deletion-worker-1", Now.AddMinutes(1));
+        Assert.NotNull(claimed);
+        Assert.Equal(deletion.Operation.Id, claimed.Operation.Id);
+        Assert.True(claimed.CanFinalizeLocally);
+        Assert.Null(claimed.Instance.PlacementAssignmentReference);
+    }
+
+    [Fact]
+    public async Task Rejected_create_does_not_deadlock_a_later_stop()
+    {
+        var store = new InMemoryElsaInstanceLifecycleStore(new StaticTimeProvider(Now));
+        var service = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
+        var accepted = await service.CreateAsync(CreateRequest("claims-rejected-stop", "create-rejected-stop"));
+        store.RegisterResolutionInput(accepted.Operation.Id, ResolutionInput(accepted.Instance));
+        await new ElsaInstanceLifecycleWorker(
+                store,
+                new RecordingResolver(SuccessfulResolution(WorkspaceId, accepted.Instance.Id)),
+                new StaticTimeProvider(Now),
+                new RecordingSubmissionPort(
+                    throwOnSubmit: true,
+                    failureKind: ElsaInstanceProviderSubmissionFailureKind.Rejected,
+                    findingCodes: ["azure.imageRegistry.unsupported"]),
+                store)
+            .ProcessAvailableAsync("lifecycle-worker-1");
+
+        var stopped = await service.StopAsync(new ElsaInstanceLifecycleRequest(
+            WorkspaceId, accepted.Instance.Id, store.Instances.Single().Version, "stop-after-rejected"));
+
+        Assert.Equal(ElsaInstanceOperationState.Accepted, stopped.Operation.State);
+        Assert.Equal(ElsaDesiredLifecycle.Stopped, stopped.Instance.DesiredLifecycle);
+        Assert.Equal(ElsaInstanceOperationState.Failed, store.Operations.Single(x => x.Id == accepted.Operation.Id).State);
+        Assert.Equal(2, store.Operations.Count);
     }
 
     [Fact]
@@ -618,7 +736,12 @@ public sealed class ElsaInstanceLifecycleWorkerTests
         var service = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
         var created = await service.CreateAsync(CreateRequest("claims-delete", "create-delete"));
         store.RegisterResolutionInput(created.Operation.Id, ResolutionInput(created.Instance));
-        await new ElsaInstanceLifecycleWorker(store, new RecordingResolver(SuccessfulResolution(WorkspaceId, created.Instance.Id)), new StaticTimeProvider(Now))
+        await new ElsaInstanceLifecycleWorker(
+                store,
+                new RecordingResolver(SuccessfulResolution(WorkspaceId, created.Instance.Id)),
+                new StaticTimeProvider(Now),
+                new RecordingSubmissionPort(throwOnSubmit: true),
+                store)
             .ProcessAvailableAsync("lifecycle-worker-1");
         var confirmationId = Guid.NewGuid();
         var actorAccountId = Guid.NewGuid();
@@ -642,6 +765,8 @@ public sealed class ElsaInstanceLifecycleWorkerTests
         Assert.Empty(result.Results);
         Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation,
             store.Operations.Single(x => x.Id == deletion.Operation.Id).State);
+        Assert.Equal(ElsaInstanceOperationState.RecoveryRequired,
+            store.Operations.Single(x => x.Id == created.Operation.Id).State);
         Assert.Single(store.DeploymentRuns);
     }
 
@@ -762,7 +887,8 @@ public sealed class ElsaInstanceLifecycleWorkerTests
     private sealed class RecordingSubmissionPort(
         bool throwOnSubmit = false,
         ElsaInstanceProviderSubmissionFailureKind failureKind = ElsaInstanceProviderSubmissionFailureKind.OutcomeUnknown,
-        string? placementAssignmentId = null)
+        string? placementAssignmentId = null,
+        IReadOnlyList<string>? findingCodes = null)
         : IElsaInstanceProviderSubmissionPort
     {
         public List<ElsaInstanceProviderSubmission> Submissions { get; } = [];
@@ -775,7 +901,7 @@ public sealed class ElsaInstanceLifecycleWorkerTests
             request.Validate();
             Submissions.Add(request);
             if (throwOnSubmit)
-                throw new ElsaInstanceProviderSubmissionException(failureKind);
+                throw new ElsaInstanceProviderSubmissionException(failureKind, findingCodes: findingCodes);
             return Task.FromResult(new ElsaInstanceProviderSubmissionResult(
                 $"provider-operation-{request.OperationId:N}",
                 Replayed: Submissions.Count > 1,
@@ -847,6 +973,11 @@ public sealed class ElsaInstanceLifecycleWorkerTests
 
         public Task CommitProviderSubmissionAsync(ElsaInstanceProviderSubmissionCommit commit, CancellationToken cancellationToken = default) =>
             _inner.CommitProviderSubmissionAsync(commit, cancellationToken);
+
+        public Task FailRejectedProviderSubmissionAsync(
+            ElsaInstanceProviderSubmissionRejection rejection,
+            CancellationToken cancellationToken = default) =>
+            _inner.FailRejectedProviderSubmissionAsync(rejection, cancellationToken);
 
     }
 

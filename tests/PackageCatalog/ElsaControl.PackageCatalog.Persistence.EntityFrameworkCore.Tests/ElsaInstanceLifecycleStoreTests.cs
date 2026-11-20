@@ -2492,6 +2492,218 @@ public sealed partial class ElsaInstanceLifecycleStoreTests : IClassFixture<Dele
     }
 
     [Fact]
+    public async Task Rejected_provider_submission_fails_the_queued_run_and_clears_replay()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Provider rejected submission");
+        var store = new EfCoreElsaInstanceLifecycleStore(
+            db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now.AddMinutes(1)));
+
+        await store.FailRejectedProviderSubmissionAsync(new(
+            workspace.Id,
+            accepted.Instance.Id,
+            accepted.Operation.Id,
+            accepted.Operation.AttemptNumber,
+            Now.AddMinutes(1),
+            ["azure.imageRegistry.unsupported", "secret.must.not.leak"]));
+
+        db.ChangeTracker.Clear();
+        var operation = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        var run = await db.DeploymentRuns.AsNoTracking().SingleAsync(x => x.ElsaInstanceId == accepted.Instance.Id);
+        Assert.Equal(ElsaInstanceOperationState.Failed, operation.State);
+        Assert.Equal(ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected, operation.FailureCode);
+        Assert.Equal("azure.imageRegistry.unsupported", operation.ReconciliationDiagnosticCode);
+        Assert.Equal(WorkspaceDeploymentRunStatus.Failed, run.Status);
+        Assert.Equal(ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected, run.RecoveryReason);
+        Assert.Empty(await store.ListPendingProviderOperationsAsync(16));
+        await store.FailRejectedProviderSubmissionAsync(new(
+            workspace.Id,
+            accepted.Instance.Id,
+            accepted.Operation.Id,
+            accepted.Operation.AttemptNumber,
+            Now.AddMinutes(2),
+            ["azure.imageRegistry.unsupported"]));
+        db.ChangeTracker.Clear();
+        Assert.Equal(Now.AddMinutes(1), (await db.ElsaInstanceOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == accepted.Operation.Id)).CompletedAt);
+    }
+
+    [Fact]
+    public async Task Delete_after_a_rejected_create_is_claimed_without_provider_assignment()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Rejected then delete");
+        var store = new EfCoreElsaInstanceLifecycleStore(
+            db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now.AddMinutes(1)));
+        await store.FailRejectedProviderSubmissionAsync(new(
+            workspace.Id,
+            accepted.Instance.Id,
+            accepted.Operation.Id,
+            accepted.Operation.AttemptNumber,
+            Now.AddMinutes(1),
+            ["azure.imageRegistry.unsupported"]));
+        db.ChangeTracker.Clear();
+        var current = Assert.IsType<ElsaInstance>(await CreateStore(db)
+            .GetInstanceAsync(workspace.Id, accepted.Instance.Id));
+        var deletion = await new ElsaInstanceLifecycleService(
+                CreateStore(db), new FixedTimeProvider(Now.AddMinutes(2)))
+            .DeleteAsync(await CreateConfirmedDeleteRequestAsync(
+                db, workspace.Id, accepted.Instance.Id, current.Version,
+                "delete-after-rejected", Now.AddMinutes(2)));
+
+        Assert.Equal(ElsaInstanceOperationState.Accepted, deletion.Operation.State);
+        var claimed = await CreateStore(db).TryClaimNextDeletionAsync("deletion-worker", Now.AddMinutes(3));
+        Assert.NotNull(claimed);
+        Assert.Equal(deletion.Operation.Id, claimed.Operation.Id);
+        Assert.True(claimed.CanFinalizeLocally);
+        Assert.Null(claimed.Instance.PlacementAssignmentReference);
+        Assert.Empty(await db.AzureProviderResourceAssignments.AsNoTracking().ToListAsync());
+        Assert.Empty(await db.AzureProviderOperations.AsNoTracking().ToListAsync());
+    }
+
+    [Fact]
+    public async Task Delete_behind_an_uncertain_create_still_waits()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Uncertain then delete");
+        var store = new EfCoreElsaInstanceLifecycleStore(
+            db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now));
+        await store.CommitProviderSubmissionAsync(new(
+            workspace.Id,
+            accepted.Instance.Id,
+            accepted.Operation.Id,
+            accepted.Operation.AttemptNumber,
+            "provider-submission-uncertain",
+            Now));
+        db.ChangeTracker.Clear();
+        var current = Assert.IsType<ElsaInstance>(await CreateStore(db)
+            .GetInstanceAsync(workspace.Id, accepted.Instance.Id));
+        var deletion = await new ElsaInstanceLifecycleService(
+                CreateStore(db), new FixedTimeProvider(Now.AddMinutes(1)))
+            .DeleteAsync(await CreateConfirmedDeleteRequestAsync(
+                db, workspace.Id, accepted.Instance.Id, current.Version,
+                "delete-after-uncertain", Now.AddMinutes(1)));
+
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, deletion.Operation.State);
+        Assert.Equal(ElsaInstanceOperationState.RecoveryRequired,
+            (await db.ElsaInstanceOperations.AsNoTracking()
+                .SingleAsync(x => x.Id == accepted.Operation.Id)).State);
+    }
+
+    [Fact]
+    public async Task Delete_at_accept_time_supersedes_a_never_submitted_queued_create()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Never submitted accept delete");
+        db.ChangeTracker.Clear();
+        var current = Assert.IsType<ElsaInstance>(await CreateStore(db)
+            .GetInstanceAsync(workspace.Id, accepted.Instance.Id));
+        var deletion = await new ElsaInstanceLifecycleService(
+                CreateStore(db), new FixedTimeProvider(Now.AddMinutes(1)))
+            .DeleteAsync(await CreateConfirmedDeleteRequestAsync(
+                db, workspace.Id, accepted.Instance.Id, current.Version,
+                "delete-never-submitted-accept", Now.AddMinutes(1)));
+
+        Assert.Equal(ElsaInstanceOperationState.Accepted, deletion.Operation.State);
+        db.ChangeTracker.Clear();
+        var predecessor = await db.ElsaInstanceOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.Cancelled, predecessor.State);
+        Assert.Equal(
+            ManagedElsaReasonCodeCatalog.ProviderSubmissionNeverSubmittedSuperseded,
+            predecessor.FailureCode);
+    }
+
+    [Fact]
+    public async Task Delete_at_accept_time_waits_behind_a_queued_create_with_an_active_worker_lease()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Leased queued create");
+        db.ChangeTracker.Clear();
+        var operation = await db.ElsaInstanceOperations.SingleAsync(x => x.Id == accepted.Operation.Id);
+        operation.WorkerId = "resolver-worker";
+        operation.LeaseTokenHash = new string('a', 64);
+        operation.LeaseExpiresAt = Now.AddMinutes(5);
+        operation.HeartbeatAt = Now;
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+        var current = Assert.IsType<ElsaInstance>(await CreateStore(db)
+            .GetInstanceAsync(workspace.Id, accepted.Instance.Id));
+        var deletion = await new ElsaInstanceLifecycleService(
+                CreateStore(db), new FixedTimeProvider(Now.AddMinutes(1)))
+            .DeleteAsync(await CreateConfirmedDeleteRequestAsync(
+                db, workspace.Id, accepted.Instance.Id, current.Version,
+                "delete-after-leased-queued", Now.AddMinutes(1)));
+
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, deletion.Operation.State);
+        db.ChangeTracker.Clear();
+        var predecessor = await db.ElsaInstanceOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.Queued, predecessor.State);
+        Assert.Equal("resolver-worker", predecessor.WorkerId);
+        Assert.Null(predecessor.FailureCode);
+    }
+
+    [Fact]
+    public async Task Waiting_delete_supersedes_a_never_submitted_queued_create()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Never submitted delete");
+        var workspaceStore = new DeploymentWorkspaceStore(db);
+        var claimedRun = Assert.IsType<WorkspaceDeploymentRun>(
+            await workspaceStore.ClaimNextQueuedRunAsync("stale-deployment-worker", Now));
+        db.ChangeTracker.Clear();
+        var current = Assert.IsType<ElsaInstance>(await CreateStore(db)
+            .GetInstanceAsync(workspace.Id, accepted.Instance.Id));
+        var deletion = await new ElsaInstanceLifecycleService(
+                CreateStore(db), new FixedTimeProvider(Now.AddMinutes(1)))
+            .DeleteAsync(await CreateConfirmedDeleteRequestAsync(
+                db, workspace.Id, accepted.Instance.Id, current.Version,
+                "delete-after-queued", Now.AddMinutes(1)));
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, deletion.Operation.State);
+
+        db.ChangeTracker.Clear();
+        var run = await db.DeploymentRuns.SingleAsync(x => x.Id == claimedRun.Id);
+        run.Status = WorkspaceDeploymentRunStatus.Queued;
+        run.WorkerId = null;
+        run.WorkerHeartbeatAt = null;
+        run.StartedAt = null;
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var claimed = await CreateStore(db).TryClaimNextDeletionAsync("deletion-worker", Now.AddMinutes(2));
+        Assert.NotNull(claimed);
+        Assert.Equal(deletion.Operation.Id, claimed.Operation.Id);
+        db.ChangeTracker.Clear();
+        var predecessor = await db.ElsaInstanceOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.Cancelled, predecessor.State);
+        Assert.Equal(
+            ManagedElsaReasonCodeCatalog.ProviderSubmissionNeverSubmittedSuperseded,
+            predecessor.FailureCode);
+        Assert.Equal(WorkspaceDeploymentRunStatus.Cancelled,
+            (await db.DeploymentRuns.AsNoTracking().SingleAsync(x => x.Id == claimedRun.Id)).Status);
+    }
+
+    [Fact]
     public async Task Unknown_reconciliation_preserves_uncertain_submission_for_restart_reconstruction()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");

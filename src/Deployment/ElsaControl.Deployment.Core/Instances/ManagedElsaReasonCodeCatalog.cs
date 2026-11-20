@@ -39,6 +39,11 @@ public static class ManagedElsaReasonCodeCatalog
     public const string ProviderSubmissionAccepted = "provider.submission.accepted";
     public const string ProviderSubmissionUncertain = "provider.submission.uncertain";
     public const string ProviderSubmissionRejected = "provider.submission.rejected";
+    public const string ProviderSubmissionNeverSubmittedSuperseded = "provider.submission.never-submitted-superseded";
+    public const string ProviderHandoffReservationIncomplete = "provider.handoff.reservation-incomplete";
+    public const string ProviderHandoffRestoreFailed = "provider.handoff.restore-failed";
+    public const string ProviderHandoffDesiredLifecycleMismatch = "provider.handoff.desired-lifecycle-mismatch";
+    public const string ProviderHandoffSubmissionInvalid = "provider.handoff.submission-invalid";
     public const string ProviderReconciliationInProgress = "provider.reconciliation.in-progress";
     public const string ProviderReconciliationConverged = "provider.reconciliation.converged";
     public const string ProviderReconciliationUnknown = "provider.reconciliation.unknown";
@@ -178,6 +183,11 @@ public static class ManagedElsaReasonCodeCatalog
             new(ProviderReconciliationFailed, ManagedElsaReasonClass.NeedsPerson),
             new(ProviderReconciliationCancelled, ManagedElsaReasonClass.NeedsPerson),
             new(ProviderSubmissionRejected, ManagedElsaReasonClass.NeedsPerson),
+            new(ProviderSubmissionNeverSubmittedSuperseded, ManagedElsaReasonClass.HealthyHandOff),
+            new(ProviderHandoffReservationIncomplete, ManagedElsaReasonClass.NeedsPerson),
+            new(ProviderHandoffRestoreFailed, ManagedElsaReasonClass.NeedsPerson),
+            new(ProviderHandoffDesiredLifecycleMismatch, ManagedElsaReasonClass.NeedsPerson),
+            new(ProviderHandoffSubmissionInvalid, ManagedElsaReasonClass.NeedsPerson),
             new(ProviderIdentityBindingMissing, ManagedElsaReasonClass.NeedsPerson),
             new(AzureRecoveryAutoResumeConflict, ManagedElsaReasonClass.NeedsPerson),
             new(AzureRecoveryAutoResumeRejected, ManagedElsaReasonClass.NeedsPerson),
@@ -245,6 +255,33 @@ public static class ManagedElsaReasonCodeCatalog
     {
         entry = null;
         return !string.IsNullOrWhiteSpace(code) && ByCode.TryGetValue(code, out entry);
+    }
+
+    /// <summary>
+    /// Value-free Azure translator findings. Recovery, deployment, and promotion
+    /// parks stay on the catalog allowlist; these admission codes are safe to
+    /// persist and show on admin GET and provisioning progress.
+    /// </summary>
+    public static bool IsSafeTranslatorFinding(string? code) =>
+        !string.IsNullOrWhiteSpace(code)
+        && code.Length <= 64
+        && code.StartsWith("azure.", StringComparison.Ordinal)
+        && !code.StartsWith("azure.recovery.", StringComparison.Ordinal)
+        && !code.StartsWith("azure.deployment.", StringComparison.Ordinal)
+        && !code.StartsWith("azure.promotion.", StringComparison.Ordinal)
+        && code.All(character =>
+            char.IsAsciiLetterOrDigit(character) || character is '.' or '-' or '_');
+
+    public static IReadOnlyList<string> SanitizeTranslatorFindings(IEnumerable<string>? codes)
+    {
+        if (codes is null)
+            return [];
+
+        return codes
+            .Where(IsSafeTranslatorFinding)
+            .Distinct(StringComparer.Ordinal)
+            .Take(8)
+            .ToArray();
     }
 
     public static ManagedElsaReasonClass Classify(string? code) =>

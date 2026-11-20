@@ -12,6 +12,7 @@ internal static class ManagedElsaReasonLiteralScanner
     internal static readonly string[] ReasonFamilyPrefixes =
     [
         "provider.submission.",
+        "provider.handoff.",
         "provider.reconciliation.",
         "provider.identity-binding",
         "azure.deployment.",

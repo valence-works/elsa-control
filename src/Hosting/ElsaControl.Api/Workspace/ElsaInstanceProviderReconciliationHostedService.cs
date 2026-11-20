@@ -140,7 +140,19 @@ public sealed class ElsaInstanceProviderReconciliationHostedService(
     {
         if (operation.HandoffInvalid)
         {
-            logger.LogWarning("Managed Elsa provider hand-off metadata is invalid for pending operation {OperationId}.", operation.OperationId);
+            if (string.IsNullOrWhiteSpace(operation.HandoffInvalidReason))
+            {
+                logger.LogWarning(
+                    "Managed Elsa provider hand-off metadata is invalid for pending operation {OperationId}.",
+                    operation.OperationId);
+            }
+            else
+            {
+                logger.LogWarning(
+                    "Managed Elsa provider hand-off metadata is invalid for pending operation {OperationId} ({ReasonCode}).",
+                    operation.OperationId,
+                    operation.HandoffInvalidReason);
+            }
             return;
         }
 
@@ -292,13 +304,18 @@ public sealed class ElsaInstanceProviderReconciliationHostedService(
             catch (ElsaInstanceProviderSubmissionException exception)
                 when (exception.Kind == ElsaInstanceProviderSubmissionFailureKind.Rejected)
             {
-                // The provider proved that no durable hand-off occurred. Leave the
-                // lifecycle reservation queued so a later scan can replay it after
-                // configuration is corrected, and do not reconcile remote work that
-                // cannot exist.
+                // A plan rejection is deterministic. Fail the reserved run so replay
+                // cannot loop, and do not reconcile remote work that cannot exist.
                 logger.LogWarning(
-                    "Managed Elsa instance provider hand-off was rejected and is awaiting retry for operation {OperationId}.",
+                    "Managed Elsa instance provider hand-off was rejected for operation {OperationId}.",
                     operation.OperationId);
+                await submissionStore.FailRejectedProviderSubmissionAsync(new(
+                    submission.WorkspaceId,
+                    submission.InstanceId,
+                    submission.OperationId,
+                    submission.AttemptNumber,
+                    DateTimeOffset.UtcNow,
+                    exception.FindingCodes), stoppingToken);
                 return;
             }
             catch (Exception)

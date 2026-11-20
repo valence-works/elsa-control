@@ -823,6 +823,8 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
     [InlineData(ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReasonCode)]
     [InlineData(ElsaInstanceCommercialOperation.EntitlementRequired)]
     [InlineData(ElsaInstanceCommercialOperation.EntitlementSafeExitSuperseded)]
+    [InlineData(ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected)]
+    [InlineData("azure.imageRegistry.unsupported")]
     public void Customer_safe_operation_reason_keeps_allowlisted_failure_and_reason_codes(string reasonCode)
     {
         var now = Now;

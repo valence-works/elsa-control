@@ -127,6 +127,25 @@ public sealed class ManagedElsaReasonCodeCatalogTests
     }
 
     [Fact]
+    public void Translator_findings_are_value_free_admission_codes()
+    {
+        Assert.True(ManagedElsaReasonCodeCatalog.IsSafeTranslatorFinding("azure.imageRegistry.unsupported"));
+        Assert.Equal(
+            ["azure.imageRegistry.unsupported"],
+            ManagedElsaReasonCodeCatalog.SanitizeTranslatorFindings(
+                ["azure.imageRegistry.unsupported", "azure.recovery.needs-operator", "secret/value", ""]));
+        Assert.True(ManagedElsaReasonCodeCatalog.RequiresHuman(
+            ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected, Now, Now));
+        Assert.Equal(
+            ManagedElsaReasonClass.NeedsPerson,
+            ManagedElsaReasonCodeCatalog.Classify(ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected));
+        Assert.Equal(
+            ManagedElsaReasonClass.HealthyHandOff,
+            ManagedElsaReasonCodeCatalog.Classify(
+                ManagedElsaReasonCodeCatalog.ProviderSubmissionNeverSubmittedSuperseded));
+    }
+
+    [Fact]
     public void Auto_resuming_and_temporary_require_a_human_only_after_the_named_window()
     {
         var inside = Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter - TimeSpan.FromTicks(1);

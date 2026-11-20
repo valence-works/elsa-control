@@ -271,7 +271,6 @@ public sealed class ElsaInstanceContractTests
 
     [Theory]
     [InlineData(ElsaInstanceOperationState.Accepted)]
-    [InlineData(ElsaInstanceOperationState.Queued)]
     [InlineData(ElsaInstanceOperationState.Running)]
     [InlineData(ElsaInstanceOperationState.RecoveryRequired)]
     public void Delete_waits_behind_an_active_or_uncertain_operation(ElsaInstanceOperationState state)
@@ -284,6 +283,27 @@ public sealed class ElsaInstanceContractTests
         Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, result.Operation.State);
         Assert.Equal(ElsaDesiredLifecycle.Deleting, result.Instance.DesiredLifecycle);
         Assert.Equal(instance.Id, active.InstanceId);
+        Assert.True(active.HoldsReservation);
+    }
+
+    [Theory]
+    [InlineData(ElsaInstanceOperationState.Queued, ElsaInstanceOperationAction.Delete)]
+    [InlineData(ElsaInstanceOperationState.Queued, ElsaInstanceOperationAction.Stop)]
+    [InlineData(ElsaInstanceOperationState.EntitlementHeld, ElsaInstanceOperationAction.Delete)]
+    [InlineData(ElsaInstanceOperationState.EntitlementHeld, ElsaInstanceOperationAction.Stop)]
+    public void Delete_and_stop_supersede_never_submitted_queued_or_held_work(
+        ElsaInstanceOperationState predecessorState,
+        ElsaInstanceOperationAction exit)
+    {
+        var instance = CreateInstance(ElsaObservedLifecycle.Ready);
+        var active = OperationFor(instance, predecessorState);
+
+        var result = ElsaInstanceStateMachine.Request(instance, exit, active);
+
+        Assert.Equal(ElsaInstanceOperationState.Accepted, result.Operation.State);
+        Assert.Equal(exit == ElsaInstanceOperationAction.Delete
+            ? ElsaDesiredLifecycle.Deleting
+            : ElsaDesiredLifecycle.Stopped, result.Instance.DesiredLifecycle);
         Assert.True(active.HoldsReservation);
     }
 
@@ -496,6 +516,25 @@ public sealed class ElsaInstanceContractTests
         Assert.True(ElsaInstanceOperationGuard.IsConflict(operation, "key-2", Hash('b')));
         Assert.False(ElsaInstanceOperationGuard.IsConflict(operation, "key-1", Hash('a')));
         Assert.Throws<InvalidOperationException>(() => operation.TransitionTo(ElsaInstanceOperationState.Queued));
+    }
+
+    [Theory]
+    [InlineData("worker-1", null, null, null)]
+    [InlineData(null, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", null, null)]
+    [InlineData(null, null, true, null)]
+    [InlineData(null, null, null, true)]
+    public void In_flight_worker_lease_is_any_worker_or_lease_field(
+        string? workerId,
+        string? leaseTokenHash,
+        bool? hasLeaseExpiry,
+        bool? hasHeartbeat)
+    {
+        DateTimeOffset? leaseExpiresAt = hasLeaseExpiry == true ? DateTimeOffset.UnixEpoch : null;
+        DateTimeOffset? heartbeatAt = hasHeartbeat == true ? DateTimeOffset.UnixEpoch : null;
+
+        Assert.True(ElsaInstanceOperationGuard.HasInFlightWorkerLease(
+            workerId, leaseTokenHash, leaseExpiresAt, heartbeatAt));
+        Assert.False(ElsaInstanceOperationGuard.HasInFlightWorkerLease(null, null, null, null));
     }
 
     [Fact]
@@ -1094,6 +1133,8 @@ public sealed class ElsaInstanceContractTests
             ElsaInstanceOperationState.WaitingForPriorOperation => operation
                 .TransitionTo(ElsaInstanceOperationState.WaitingForPriorOperation),
             ElsaInstanceOperationState.Queued => operation.TransitionTo(ElsaInstanceOperationState.Queued),
+            ElsaInstanceOperationState.EntitlementHeld => operation.TransitionTo(ElsaInstanceOperationState.Queued)
+                .TransitionTo(ElsaInstanceOperationState.EntitlementHeld),
             ElsaInstanceOperationState.Running => operation.TransitionTo(ElsaInstanceOperationState.Queued)
                 .TransitionTo(ElsaInstanceOperationState.Running),
             ElsaInstanceOperationState.RecoveryRequired => operation.TransitionTo(ElsaInstanceOperationState.Queued)

@@ -709,21 +709,59 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                         .OrderByDescending(x => x.AcceptedAt)
                         .ThenByDescending(x => x.CreatedAt)
                         .FirstOrDefaultAsync(cancellationToken);
-                var supersedesEntitlementHeld = operation.Action is ElsaInstanceOperationAction.Stop or ElsaInstanceOperationAction.Delete &&
+                var supersedesSafePredecessor = operation.Action is ElsaInstanceOperationAction.Stop or ElsaInstanceOperationAction.Delete &&
                     activeOperation is not null &&
-                    activeOperation.State == ElsaInstanceOperationState.EntitlementHeld &&
-                    activeOperation.Action != ElsaInstanceOperationAction.Delete;
-                if (supersedesEntitlementHeld)
+                    activeOperation.Action != ElsaInstanceOperationAction.Delete &&
+                    activeOperation.State is ElsaInstanceOperationState.EntitlementHeld or ElsaInstanceOperationState.Queued;
+                if (supersedesSafePredecessor)
                 {
-                    var heldOperation = await dbContext.ElsaInstanceOperations
+                    var predecessor = await dbContext.ElsaInstanceOperations
                         .SingleOrDefaultAsync(x => x.Id == activeOperation!.Id &&
                                                    x.WorkspaceId == instance.WorkspaceId &&
                                                    x.InstanceId == instance.Id,
                             cancellationToken);
-                    if (heldOperation is null || heldOperation.State != ElsaInstanceOperationState.EntitlementHeld)
-                        throw Conflict("The entitlement-held operation changed concurrently.", ElsaInstanceLifecycleConflictReason.OperationActive);
-                    await SupersedeEntitlementHeldOperationAsync(heldOperation, storedInstance!, outbox.CreatedAt, cancellationToken);
-                    activeOperation = null;
+                    if (predecessor is null ||
+                        predecessor.State is not (ElsaInstanceOperationState.EntitlementHeld or ElsaInstanceOperationState.Queued))
+                        throw Conflict("The safe-exit predecessor changed concurrently.", ElsaInstanceLifecycleConflictReason.OperationActive);
+                    var predecessorRun = predecessor.DeploymentRunId is { } predecessorRunId
+                        ? await dbContext.DeploymentRuns
+                            .Include(x => x.Environment)
+                            .SingleOrDefaultAsync(x => x.Id == predecessorRunId &&
+                                                       x.WorkspaceId == instance.WorkspaceId &&
+                                                       x.ElsaInstanceId == instance.Id,
+                                cancellationToken)
+                        : null;
+                    var queuedHandOffCommitted = predecessor.State == ElsaInstanceOperationState.Queued &&
+                        predecessorRun is not null &&
+                        predecessorRun.Status != WorkspaceDeploymentRunStatus.Queued;
+                    var queuedHasAzureProvenance = predecessor.State == ElsaInstanceOperationState.Queued &&
+                        (await dbContext.AzureProviderResourceAssignments.AsNoTracking()
+                            .AnyAsync(x => x.WorkspaceId == instance.WorkspaceId &&
+                                           x.InstanceId == instance.Id, cancellationToken) ||
+                         await dbContext.AzureProviderOperations.AsNoTracking()
+                            .AnyAsync(x => x.WorkspaceId == instance.WorkspaceId &&
+                                           x.InstanceId == instance.Id, cancellationToken));
+                    var predecessorHasInFlightWorkerLease = ElsaInstanceOperationGuard.HasInFlightWorkerLease(
+                        predecessor.WorkerId,
+                        predecessor.LeaseTokenHash,
+                        predecessor.LeaseExpiresAt,
+                        predecessor.HeartbeatAt);
+                    if (queuedHandOffCommitted || queuedHasAzureProvenance || predecessorHasInFlightWorkerLease)
+                    {
+                        // A committed, uncertain, or still-leased provider hand-off
+                        // still needs Delete/Stop to wait. The lease guard matches
+                        // TrySupersedeNeverSubmittedPredecessorAsync so an in-flight
+                        // SubmitAsync cannot finish after this Create is cancelled.
+                    }
+                    else
+                    {
+                        var failureCode = predecessor.State == ElsaInstanceOperationState.EntitlementHeld
+                            ? ElsaInstanceCommercialOperation.EntitlementSafeExitSuperseded
+                            : ManagedElsaReasonCodeCatalog.ProviderSubmissionNeverSubmittedSuperseded;
+                        await SupersedeSafeExitPredecessorAsync(
+                            predecessor, storedInstance!, outbox.CreatedAt, failureCode, cancellationToken);
+                        activeOperation = null;
+                    }
                 }
                 if (activeOperation is not null)
                 {
@@ -1623,7 +1661,9 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                         .ToListAsync(cancellationToken);
                     foreach (var waitingCandidate in waitingCandidates)
                     {
-                        if (!await TrySupersedeRecoveryRequiredPredecessorAsync(
+                        if (!await TrySupersedeNeverSubmittedPredecessorAsync(
+                                waitingCandidate, nowUtc, cancellationToken) &&
+                            !await TrySupersedeRecoveryRequiredPredecessorAsync(
                                 waitingCandidate, nowUtc, cancellationToken))
                             continue;
                         // Persist the predecessor cancellation before promoting the successor.
@@ -2402,6 +2442,96 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         }, cancellationToken);
     }
 
+    public async Task FailRejectedProviderSubmissionAsync(
+        ElsaInstanceProviderSubmissionRejection rejection,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(rejection);
+        rejection.Validate();
+        dbContext.ChangeTracker.Clear();
+        await dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
+        {
+            var operation = await dbContext.ElsaInstanceOperations.SingleOrDefaultAsync(
+                x => x.WorkspaceId == rejection.WorkspaceId && x.Id == rejection.OperationId,
+                cancellationToken);
+            var instance = operation?.InstanceId is { } instanceId
+                ? await LoadTrackedInstanceAsync(instanceId, cancellationToken)
+                : null;
+            var run = operation?.DeploymentRunId is { } runId
+                ? await dbContext.DeploymentRuns
+                    .Include(x => x.Environment)
+                    .SingleOrDefaultAsync(
+                        x => x.WorkspaceId == rejection.WorkspaceId && x.Id == runId,
+                        cancellationToken)
+                : null;
+            if (operation is null || instance is null || run is null ||
+                operation.InstanceId != rejection.InstanceId || operation.AttemptNumber != rejection.AttemptNumber ||
+                instance.Id != rejection.InstanceId || instance.WorkspaceId != rejection.WorkspaceId ||
+                run.ElsaInstanceId != rejection.InstanceId)
+                throw Conflict("Provider submission rejection correlation is invalid.");
+
+            if (operation.State == ElsaInstanceOperationState.Failed &&
+                string.Equals(operation.FailureCode, ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            if (operation.State != ElsaInstanceOperationState.Queued ||
+                run.Status != WorkspaceDeploymentRunStatus.Queued)
+                throw Conflict("Provider submission reservation is no longer queued.");
+
+            var rejectedAt = rejection.RejectedAt.ToUniversalTime();
+            var previousReason = CurrentParkReason(operation, run.RecoveryReason);
+            operation.State = ElsaInstanceOperationState.Failed;
+            operation.FailureCode = ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected;
+            operation.FailureSummary = "The provider rejected the submission before a durable hand-off.";
+            operation.ReconciliationDiagnosticCode = rejection.FirstFindingCode;
+            operation.CompletedAt = rejectedAt;
+            operation.WorkerId = null;
+            operation.LeaseTokenHash = null;
+            operation.LeaseExpiresAt = null;
+            operation.HeartbeatAt = null;
+            operation.UpdatedAt = rejectedAt;
+            ApplyReasonClock(
+                operation,
+                previousReason,
+                CurrentParkReason(operation, ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected),
+                rejectedAt,
+                restartClock: false);
+            run.Status = WorkspaceDeploymentRunStatus.Failed;
+            run.CompletedAt = rejectedAt;
+            run.RecoveryReason = ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected;
+            run.FailureMessage = null;
+            run.WorkerId = null;
+            run.WorkerHeartbeatAt = null;
+            if (run.Environment is not null)
+            {
+                run.Environment.UpdatedAt = rejectedAt;
+                run.Environment.DeploymentStatus = DeploymentStatus.Blocked;
+            }
+            await dbContext.DeploymentRunHistoryEvents.AddAsync(new()
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = run.WorkspaceId,
+                RunId = run.Id,
+                Status = WorkspaceDeploymentRunStatus.Failed,
+                Message = "Deployment run failed because the provider rejected the submission.",
+                CreatedAt = rejectedAt
+            }, cancellationToken);
+            await dbContext.ElsaInstanceAuditEvents.AddAsync(await CreateAuditEventAsync(
+                instance,
+                operation,
+                instance.ObservedLifecycle,
+                rejectedAt,
+                cancellationToken,
+                "lifecycle.failed",
+                run.Id,
+                diagnosticCode: rejection.FirstFindingCode ?? ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected,
+                summary: "The provider rejected the submission before a durable hand-off."), cancellationToken);
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }, cancellationToken);
+    }
+
     public async Task<IReadOnlyList<ElsaInstanceProviderPendingOperation>> ListPendingProviderOperationsAsync(
         int limit,
         CancellationToken cancellationToken = default)
@@ -2481,7 +2611,11 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             if (operation.InstanceId is not { } instanceId || operation.DeploymentRunId is not { } runId ||
                 operation.ResolvedPlanId is null)
             {
-                pending.Add(new(operation.WorkspaceId, operation.Id) { HandoffInvalid = true });
+                pending.Add(new(operation.WorkspaceId, operation.Id)
+                {
+                    HandoffInvalid = true,
+                    HandoffInvalidReason = ManagedElsaReasonCodeCatalog.ProviderHandoffReservationIncomplete
+                });
                 continue;
             }
 
@@ -2498,7 +2632,11 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 plan is null || plan.WorkspaceId != operation.WorkspaceId ||
                 !TryRestoreResolvedPlan(plan, operation.ResolvedPlanId, out var resolvedPlan))
             {
-                pending.Add(new(operation.WorkspaceId, operation.Id) { HandoffInvalid = true });
+                pending.Add(new(operation.WorkspaceId, operation.Id)
+                {
+                    HandoffInvalid = true,
+                    HandoffInvalidReason = ManagedElsaReasonCodeCatalog.ProviderHandoffRestoreFailed
+                });
                 continue;
             }
 
@@ -2526,7 +2664,11 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                             checked(predecessorReconciledVersion + 2),
                             cancellationToken))
                     {
-                        pending.Add(new(operation.WorkspaceId, operation.Id) { HandoffInvalid = true });
+                        pending.Add(new(operation.WorkspaceId, operation.Id)
+                        {
+                            HandoffInvalid = true,
+                            HandoffInvalidReason = ManagedElsaReasonCodeCatalog.ProviderHandoffDesiredLifecycleMismatch
+                        });
                         continue;
                     }
 
@@ -2578,7 +2720,11 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             }
             catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
             {
-                pending.Add(new(operation.WorkspaceId, operation.Id) { HandoffInvalid = true });
+                pending.Add(new(operation.WorkspaceId, operation.Id)
+                {
+                    HandoffInvalid = true,
+                    HandoffInvalidReason = ManagedElsaReasonCodeCatalog.ProviderHandoffSubmissionInvalid
+                });
             }
         }
 
@@ -4142,11 +4288,24 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         ElsaInstanceOperationEntity operation,
         ElsaInstanceEntity instance,
         DateTimeOffset supersededAt,
+        CancellationToken cancellationToken) =>
+        await SupersedeSafeExitPredecessorAsync(
+            operation,
+            instance,
+            supersededAt,
+            ElsaInstanceCommercialOperation.EntitlementSafeExitSuperseded,
+            cancellationToken);
+
+    private async Task SupersedeSafeExitPredecessorAsync(
+        ElsaInstanceOperationEntity operation,
+        ElsaInstanceEntity instance,
+        DateTimeOffset supersededAt,
+        string failureCode,
         CancellationToken cancellationToken)
     {
         var timestamp = supersededAt.ToUniversalTime();
         operation.State = ElsaInstanceOperationState.Cancelled;
-        operation.FailureCode = ElsaInstanceCommercialOperation.EntitlementSafeExitSuperseded;
+        operation.FailureCode = failureCode;
         operation.FailureSummary = null;
         operation.CompletedAt = timestamp;
         operation.WorkerId = null;
@@ -4172,7 +4331,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         {
             run.Status = WorkspaceDeploymentRunStatus.Cancelled;
             run.CompletedAt = timestamp;
-            run.RecoveryReason = ElsaInstanceCommercialOperation.EntitlementSafeExitSuperseded;
+            run.RecoveryReason = failureCode;
             run.FailureMessage = null;
             run.WorkerId = null;
             run.WorkerHeartbeatAt = null;
@@ -4191,6 +4350,110 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 CreatedAt = timestamp
             }, cancellationToken);
         }
+    }
+
+    private async Task<bool> TrySupersedeNeverSubmittedPredecessorAsync(
+        ElsaInstanceLifecycleOutboxEntity deleteOutbox,
+        DateTimeOffset supersededAt,
+        CancellationToken cancellationToken)
+    {
+        var deleteOperation = await dbContext.ElsaInstanceOperations.AsNoTracking()
+            .SingleOrDefaultAsync(x => x.Id == deleteOutbox.OperationId &&
+                                       x.WorkspaceId == deleteOutbox.WorkspaceId &&
+                                       x.InstanceId == deleteOutbox.InstanceId,
+                cancellationToken);
+        var instance = await dbContext.ElsaInstances.AsNoTracking()
+            .SingleOrDefaultAsync(x => x.Id == deleteOutbox.InstanceId &&
+                                       x.WorkspaceId == deleteOutbox.WorkspaceId,
+                cancellationToken);
+        if (deleteOperation is null || instance is null ||
+            deleteOperation.Action != ElsaInstanceOperationAction.Delete ||
+            deleteOperation.State != ElsaInstanceOperationState.WaitingForPriorOperation ||
+            instance.DesiredLifecycle != ElsaDesiredLifecycle.Deleting ||
+            !string.Equals(instance.LastOperationId, deleteOperation.Id.ToString("D"), StringComparison.OrdinalIgnoreCase) ||
+            deleteOperation.ExpectedVersion + 1 != instance.Version)
+            return false;
+
+        var blockers = await dbContext.ElsaInstanceOperations.AsNoTracking()
+            .Where(x => x.Id != deleteOperation.Id &&
+                        x.WorkspaceId == deleteOperation.WorkspaceId &&
+                        x.InstanceId == deleteOperation.InstanceId &&
+                        (x.State == ElsaInstanceOperationState.Accepted ||
+                         x.State == ElsaInstanceOperationState.WaitingForPriorOperation ||
+                         x.State == ElsaInstanceOperationState.Queued ||
+                         x.State == ElsaInstanceOperationState.EntitlementHeld ||
+                         x.State == ElsaInstanceOperationState.Running ||
+                         x.State == ElsaInstanceOperationState.RecoveryRequired))
+            .ToListAsync(cancellationToken);
+        if (blockers is not [{ State: ElsaInstanceOperationState.Queued } predecessor] ||
+            predecessor.Action == ElsaInstanceOperationAction.Delete ||
+            predecessor.DeploymentRunId is not { } runId ||
+            predecessor.AcceptedAt > deleteOperation.AcceptedAt ||
+            ElsaInstanceOperationGuard.HasInFlightWorkerLease(
+                predecessor.WorkerId,
+                predecessor.LeaseTokenHash,
+                predecessor.LeaseExpiresAt,
+                predecessor.HeartbeatAt))
+            return false;
+
+        var activeRuns = await dbContext.DeploymentRuns.AsNoTracking()
+            .Where(x => x.WorkspaceId == deleteOperation.WorkspaceId &&
+                        x.ElsaInstanceId == deleteOperation.InstanceId &&
+                        (x.Status == WorkspaceDeploymentRunStatus.Queued ||
+                         x.Status == WorkspaceDeploymentRunStatus.Running ||
+                         x.Status == WorkspaceDeploymentRunStatus.RecoveryRequired))
+            .ToListAsync(cancellationToken);
+        if (activeRuns is not [{ Status: WorkspaceDeploymentRunStatus.Queued } activeRun] ||
+            activeRun.Id != runId)
+            return false;
+
+        var hasAzureProvenance = await dbContext.AzureProviderResourceAssignments.AsNoTracking()
+                .AnyAsync(x => x.WorkspaceId == deleteOperation.WorkspaceId &&
+                               x.InstanceId == deleteOperation.InstanceId, cancellationToken) ||
+            await dbContext.AzureProviderOperations.AsNoTracking()
+                .AnyAsync(x => x.WorkspaceId == deleteOperation.WorkspaceId &&
+                               x.InstanceId == deleteOperation.InstanceId, cancellationToken);
+        if (hasAzureProvenance)
+            return false;
+
+        var trackedPredecessor = await dbContext.ElsaInstanceOperations
+            .SingleOrDefaultAsync(x => x.Id == predecessor.Id &&
+                                       x.WorkspaceId == deleteOperation.WorkspaceId &&
+                                       x.InstanceId == deleteOperation.InstanceId &&
+                                       x.State == ElsaInstanceOperationState.Queued &&
+                                       x.Action != ElsaInstanceOperationAction.Delete &&
+                                       x.DeploymentRunId == runId &&
+                                       x.WorkerId == null && x.LeaseTokenHash == null &&
+                                       x.LeaseExpiresAt == null && x.HeartbeatAt == null,
+                cancellationToken);
+        var trackedRun = await dbContext.DeploymentRuns.Include(x => x.Environment)
+            .SingleOrDefaultAsync(x => x.Id == runId &&
+                                       x.WorkspaceId == deleteOperation.WorkspaceId &&
+                                       x.ElsaInstanceId == deleteOperation.InstanceId &&
+                                       x.Status == WorkspaceDeploymentRunStatus.Queued,
+                cancellationToken);
+        if (trackedPredecessor is null || trackedRun is null)
+            return false;
+
+        var trackedInstance = await LoadTrackedInstanceAsync(deleteOperation.InstanceId, cancellationToken)
+            ?? throw Conflict("Deletion instance no longer exists.");
+        await SupersedeSafeExitPredecessorAsync(
+            trackedPredecessor,
+            trackedInstance,
+            supersededAt,
+            ManagedElsaReasonCodeCatalog.ProviderSubmissionNeverSubmittedSuperseded,
+            cancellationToken);
+        await dbContext.ElsaInstanceAuditEvents.AddAsync(await CreateAuditEventAsync(
+            trackedInstance,
+            trackedPredecessor,
+            trackedInstance.ObservedLifecycle,
+            supersededAt,
+            cancellationToken,
+            eventType: "lifecycle.never-submitted-superseded-by-delete",
+            deploymentRunId: trackedRun.Id,
+            diagnosticCode: ManagedElsaReasonCodeCatalog.ProviderSubmissionNeverSubmittedSuperseded,
+            summary: "Never-submitted lifecycle work was superseded by confirmed deletion cleanup."), cancellationToken);
+        return true;
     }
 
     private async Task<bool> TrySupersedeRecoveryRequiredPredecessorAsync(
@@ -4230,8 +4493,11 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             predecessor.Action == ElsaInstanceOperationAction.Delete ||
             predecessor.DeploymentRunId is not { } runId ||
             predecessor.AcceptedAt > deleteOperation.AcceptedAt ||
-            predecessor.WorkerId is not null || predecessor.LeaseTokenHash is not null ||
-            predecessor.LeaseExpiresAt is not null || predecessor.HeartbeatAt is not null)
+            ElsaInstanceOperationGuard.HasInFlightWorkerLease(
+                predecessor.WorkerId,
+                predecessor.LeaseTokenHash,
+                predecessor.LeaseExpiresAt,
+                predecessor.HeartbeatAt))
             return false;
 
         var activeRuns = await dbContext.DeploymentRuns.AsNoTracking()
