@@ -100,6 +100,7 @@ public sealed class GovernedReleaseCatalogIngestionServiceTests
         var result = await new GovernedReleaseCatalogIngestionService(
                 new ReleaseManifestAdmissionService(verifier),
                 store,
+                new PermissiveFeed(),
                 TimeProvider.System)
             .AdmitAsync(artifact, CatalogOptions("preview"));
 
@@ -175,6 +176,93 @@ public sealed class GovernedReleaseCatalogIngestionServiceTests
     }
 
     [Fact]
+    public async Task Unresolvable_manifest_is_rejected_and_names_package_ids_only()
+    {
+        var store = new RecordingStore();
+        var feed = new ScriptedFeed
+        {
+            Existing = new HashSet<ReleasePackageIdentity>(ReleasePackageIdentityComparer.Instance)
+        };
+        var artifact = ProducerArtifact(UnresolvablePayload(), 'd');
+        var result = await CreateService(artifact, store, packageFeed: feed).AdmitAsync(
+            artifact,
+            CatalogOptions("preview"));
+
+        Assert.False(result.Accepted);
+        var finding = Assert.Single(result.Findings, x => x.Code == GovernedReleasePackageResolution.UnresolvableCode);
+        Assert.Contains("Elsa.Persistence.EFCore.SqlServer", finding.Message, StringComparison.Ordinal);
+        Assert.Contains("Elsa.Scheduling.Quartz.EFCore.SqlServer", finding.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("nuget.org", finding.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("https://", finding.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("credential", finding.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, store.Calls);
+        Assert.Equal(1, feed.Calls);
+    }
+
+    [Fact]
+    public async Task Feed_outage_fails_closed_with_a_retryable_code()
+    {
+        var store = new RecordingStore();
+        var feed = new ScriptedFeed { Throw = new ReleasePackageFeedUnavailableException() };
+        var artifact = ProducerArtifact(ProducerPayload("3.10", "3.10.2"), 'd');
+        var result = await CreateService(artifact, store, packageFeed: feed).AdmitAsync(
+            artifact,
+            CatalogOptions("supported"));
+
+        Assert.False(result.Accepted);
+        Assert.Contains(result.Findings, x => x.Code == GovernedReleasePackageResolution.FeedUnavailableCode);
+        Assert.All(result.Findings, finding =>
+        {
+            Assert.DoesNotContain("nuget.org", finding.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("https://", finding.Message, StringComparison.OrdinalIgnoreCase);
+        });
+        Assert.Equal(0, store.Calls);
+    }
+
+    [Fact]
+    public async Task Promotion_to_supported_re_runs_the_package_resolution_check()
+    {
+        var store = new MutableStore();
+        var feed = new ScriptedFeed();
+        var artifact = ProducerArtifact(UnresolvablePayload(), 'd');
+        var service = CreateService(artifact, store, packageFeed: feed);
+
+        var admitted = await service.AdmitAsync(artifact, CatalogOptions("preview"));
+        Assert.True(admitted.Accepted, Findings(admitted));
+        Assert.All(admitted.Entries, entry => Assert.Equal("preview", entry.CatalogLifecycle));
+
+        feed.Existing = new HashSet<ReleasePackageIdentity>(ReleasePackageIdentityComparer.Instance);
+        var rejected = await service.PromoteToSupportedAsync(artifact.Digest, CatalogOptions("preview"));
+        Assert.False(rejected.Accepted);
+        Assert.Contains(rejected.Findings, x => x.Code == GovernedReleasePackageResolution.UnresolvableCode);
+        Assert.Contains("Elsa.Persistence.EFCore.SqlServer", Assert.Single(rejected.Findings).Message, StringComparison.Ordinal);
+        Assert.Contains("Elsa.Scheduling.Quartz.EFCore.SqlServer", Assert.Single(rejected.Findings).Message, StringComparison.Ordinal);
+        Assert.Equal("preview", Assert.Single(store.Stored.Select(x => x.CatalogLifecycle).Distinct()));
+
+        feed.Existing = null;
+        var promoted = await service.PromoteToSupportedAsync(artifact.Digest, CatalogOptions("preview"));
+        Assert.True(promoted.Accepted, Findings(promoted));
+        Assert.Equal(GovernedReleaseCatalogWriteStatus.Stored, promoted.WriteStatus);
+        Assert.All(promoted.Entries, entry => Assert.Equal("supported", entry.CatalogLifecycle));
+    }
+
+    [Fact]
+    public async Task Promotion_reuses_the_stable_release_filter_instead_of_a_parallel_check()
+    {
+        var store = new MutableStore();
+        var artifact = ProducerArtifact(ProducerFixture(), 'a');
+        var service = CreateService(artifact, store);
+
+        var admitted = await service.AdmitAsync(artifact, CatalogOptions("preview"));
+        Assert.True(admitted.Accepted, Findings(admitted));
+
+        var promoted = await service.PromoteToSupportedAsync(artifact.Digest, CatalogOptions("preview"));
+        Assert.False(promoted.Accepted);
+        Assert.Contains(promoted.Findings, x => x.Code == GovernedReleaseCatalogLifecycle.SupportedPrereleaseCode);
+        Assert.Equal("preview", Assert.Single(store.Stored.Select(x => x.CatalogLifecycle).Distinct()));
+    }
+
+    [Fact]
     public async Task Admitted_values_exceeding_catalog_storage_limits_are_rejected_before_store()
     {
         var producer = JsonNode.Parse(ProducerFixture())!;
@@ -223,11 +311,13 @@ public sealed class GovernedReleaseCatalogIngestionServiceTests
     private static GovernedReleaseCatalogIngestionService CreateService(
         ReleaseManifestArtifact artifact,
         IGovernedReleaseCatalogStore store,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        IReleasePackageFeed? packageFeed = null)
     {
         return new(
             new ReleaseManifestAdmissionService(new StubSignatureVerifier(ProducerVerification(artifact))),
             store,
+            packageFeed ?? new PermissiveFeed(),
             timeProvider ?? TimeProvider.System);
     }
 
@@ -244,6 +334,28 @@ public sealed class GovernedReleaseCatalogIngestionServiceTests
         producer["release"]!["version"] = releaseVersion;
         producer["release"]!["compatibility"]!["engineVersion"] = releaseVersion;
         producer["release"]!["id"] = $"{releaseVersion}-build";
+        RefreshProducerCanonicalDigest(producer);
+        return producer.ToJsonString();
+    }
+
+    private static string UnresolvablePayload()
+    {
+        var producer = JsonNode.Parse(ProducerFixture())!;
+        producer["release"]!["releaseLine"] = "3.10";
+        producer["release"]!["version"] = "3.10.2";
+        producer["release"]!["compatibility"]!["engineVersion"] = "3.10.2";
+        producer["release"]!["id"] = "3.10.2-build";
+        producer["componentDeclarations"]!["packages"] = new JsonArray(
+            new JsonObject
+            {
+                ["id"] = "Elsa.Persistence.EFCore.SqlServer",
+                ["version"] = "3.8.0-preview.5413"
+            },
+            new JsonObject
+            {
+                ["id"] = "Elsa.Scheduling.Quartz.EFCore.SqlServer",
+                ["version"] = "3.8.0-preview.342"
+            });
         RefreshProducerCanonicalDigest(producer);
         return producer.ToJsonString();
     }
@@ -301,6 +413,99 @@ public sealed class GovernedReleaseCatalogIngestionServiceTests
         {
             Calls++;
             return ValueTask.FromResult(result);
+        }
+    }
+
+    private sealed class PermissiveFeed : IReleasePackageFeed
+    {
+        public Task<IReadOnlySet<ReleasePackageIdentity>> FindExistingAsync(
+            IReadOnlyList<ReleasePackageIdentity> packages,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlySet<ReleasePackageIdentity>>(
+                packages.ToHashSet(ReleasePackageIdentityComparer.Instance));
+    }
+
+    private sealed class ScriptedFeed : IReleasePackageFeed
+    {
+        public IReadOnlySet<ReleasePackageIdentity>? Existing { get; set; }
+        public Exception? Throw { get; set; }
+        public int Calls { get; private set; }
+
+        public Task<IReadOnlySet<ReleasePackageIdentity>> FindExistingAsync(
+            IReadOnlyList<ReleasePackageIdentity> packages,
+            CancellationToken cancellationToken = default)
+        {
+            Calls++;
+            if (Throw is not null)
+                throw Throw;
+            return Task.FromResult(
+                Existing ?? (IReadOnlySet<ReleasePackageIdentity>)packages.ToHashSet(ReleasePackageIdentityComparer.Instance));
+        }
+    }
+
+    private sealed class MutableStore : IGovernedReleaseCatalogStore
+    {
+        public List<GovernedReleaseCatalogEntry> Stored { get; } = [];
+
+        public Task<GovernedReleaseCatalogWriteResult> StoreAsync(
+            IReadOnlyList<GovernedReleaseCatalogEntry> entries,
+            CancellationToken cancellationToken = default)
+        {
+            Stored.Clear();
+            Stored.AddRange(entries);
+            return Task.FromResult(new GovernedReleaseCatalogWriteResult(
+                GovernedReleaseCatalogWriteStatus.Stored,
+                entries));
+        }
+
+        public Task<IReadOnlyList<GovernedReleaseCatalogEntry>> QueryAsync(
+            GovernedReleaseCatalogQuery query,
+            CancellationToken cancellationToken = default)
+        {
+            IEnumerable<GovernedReleaseCatalogEntry> matches = Stored;
+            if (!string.IsNullOrWhiteSpace(query.ManifestDigest))
+                matches = matches.Where(entry =>
+                    string.Equals(entry.ManifestDigest, query.ManifestDigest, StringComparison.OrdinalIgnoreCase));
+            if (!string.IsNullOrWhiteSpace(query.RegistryClass))
+                matches = matches.Where(entry =>
+                    string.Equals(entry.RegistryClass, query.RegistryClass, StringComparison.OrdinalIgnoreCase));
+            if (!string.IsNullOrWhiteSpace(query.CatalogLifecycle))
+                matches = matches.Where(entry =>
+                    string.Equals(entry.CatalogLifecycle, query.CatalogLifecycle, StringComparison.OrdinalIgnoreCase));
+            return Task.FromResult<IReadOnlyList<GovernedReleaseCatalogEntry>>(matches.ToArray());
+        }
+
+        public Task<GovernedReleaseCatalogWriteResult> UpdateCatalogLifecycleAsync(
+            string manifestDigest,
+            string registryClass,
+            string catalogLifecycle,
+            CancellationToken cancellationToken = default)
+        {
+            var matches = Stored
+                .Where(entry =>
+                    string.Equals(entry.ManifestDigest, manifestDigest, StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(entry.RegistryClass, registryClass, StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            if (matches.Length == 0)
+                return Task.FromResult(new GovernedReleaseCatalogWriteResult(
+                    GovernedReleaseCatalogWriteStatus.Conflict,
+                    [],
+                    "catalog.identity.conflict"));
+
+            for (var index = 0; index < Stored.Count; index++)
+            {
+                if (string.Equals(Stored[index].ManifestDigest, manifestDigest, StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(Stored[index].RegistryClass, registryClass, StringComparison.OrdinalIgnoreCase))
+                    Stored[index] = Stored[index] with { CatalogLifecycle = catalogLifecycle };
+            }
+
+            return Task.FromResult(new GovernedReleaseCatalogWriteResult(
+                GovernedReleaseCatalogWriteStatus.Stored,
+                Stored
+                    .Where(entry =>
+                        string.Equals(entry.ManifestDigest, manifestDigest, StringComparison.OrdinalIgnoreCase)
+                        && string.Equals(entry.RegistryClass, registryClass, StringComparison.OrdinalIgnoreCase))
+                    .ToArray()));
         }
     }
 

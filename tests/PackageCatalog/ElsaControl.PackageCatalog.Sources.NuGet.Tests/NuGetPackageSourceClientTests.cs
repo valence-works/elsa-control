@@ -67,6 +67,31 @@ public sealed class NuGetPackageSourceClientTests
         Assert.Contains("advertises a NuGet search service", exception.Message);
     }
 
+    [Fact]
+    public async Task Exact_package_version_lookup_finds_published_versions_and_skips_missing_ones()
+    {
+        await using var feed = await LoopbackNuGetFeed.StartAsync();
+        var client = new NuGetPackageSourceClient(new PackageSourcePatternMatcher());
+
+        Assert.True(await client.PackageVersionExistsAsync(feed.ServiceIndexUrl, "Elsa.Email", "1.0.0"));
+        Assert.False(await client.PackageVersionExistsAsync(feed.ServiceIndexUrl, "Elsa.Email", "9.9.9"));
+        Assert.False(await client.PackageVersionExistsAsync(feed.ServiceIndexUrl, "Elsa.Missing", "1.0.0"));
+        Assert.False(await client.PackageVersionExistsAsync(feed.ServiceIndexUrl, "Elsa.Email", "not-a-version"));
+    }
+
+    [Fact]
+    public async Task Exact_package_version_lookup_fails_closed_without_naming_the_feed()
+    {
+        var client = new NuGetPackageSourceClient(new PackageSourcePatternMatcher());
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            client.PackageVersionExistsAsync("https://127.0.0.1:1/v3/index.json", "Elsa.Email", "1.0.0"));
+
+        Assert.Equal("The package feed is unavailable.", exception.Message);
+        Assert.DoesNotContain("127.0.0.1", exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("index.json", exception.Message, StringComparison.Ordinal);
+    }
+
     private sealed class LoopbackNuGetFeed : IAsyncDisposable
     {
         private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
@@ -156,7 +181,10 @@ public sealed class NuGetPackageSourceClientTests
                 _ => "{}"
             };
 
-            var status = path == "/flat/elsa.tests/index.json" ? "404 Not Found" : "200 OK";
+            var knownPackageIndex = path is "/flat/elsa.email/index.json" or "/flat/elsa.workflows/index.json";
+            var status = path.StartsWith("/flat/", StringComparison.OrdinalIgnoreCase) && !knownPackageIndex
+                ? "404 Not Found"
+                : "200 OK";
             var body = Encoding.UTF8.GetBytes(json);
             var header = Encoding.ASCII.GetBytes(
                 $"HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {body.Length}\r\nConnection: close\r\n\r\n");

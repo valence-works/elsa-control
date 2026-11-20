@@ -87,7 +87,8 @@ public sealed record GovernedReleaseCatalogQuery(
     string? RegistryClass = null,
     string? TopologyId = null,
     string? RuntimeKind = null,
-    string? Capability = null);
+    string? Capability = null,
+    string? ManifestDigest = null);
 
 /// <summary>
 /// Server-owned catalog policy supplied alongside the verifier options. The producer's
@@ -118,6 +119,19 @@ public interface IGovernedReleaseCatalogStore
     Task<IReadOnlyList<GovernedReleaseCatalogEntry>> QueryAsync(
         GovernedReleaseCatalogQuery query,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Control-owned lifecycle transition. Producer facts stay immutable; only
+    /// <see cref="GovernedReleaseCatalogEntry.CatalogLifecycle"/> (and the
+    /// projection fingerprint that includes it) may change. Implementations
+    /// must not contact the network.
+    /// </summary>
+    Task<GovernedReleaseCatalogWriteResult> UpdateCatalogLifecycleAsync(
+        string manifestDigest,
+        string registryClass,
+        string catalogLifecycle,
+        CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("Catalog lifecycle transitions are not supported by this store.");
 }
 
 /// <summary>
@@ -129,6 +143,16 @@ public interface IReleaseCatalogIngestionService
 {
     Task<GovernedReleaseCatalogAdmissionResult> AdmitAsync(
         ReleaseManifestArtifact artifact,
+        GovernedReleaseCatalogAdmissionOptions options,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Promotes an already-admitted release to <c>supported</c>. Re-runs the
+    /// package-resolution guard and the RG1 stable-version filter. Does not
+    /// contact the store until those checks pass.
+    /// </summary>
+    Task<GovernedReleaseCatalogAdmissionResult> PromoteToSupportedAsync(
+        string manifestDigest,
         GovernedReleaseCatalogAdmissionOptions options,
         CancellationToken cancellationToken = default);
 }

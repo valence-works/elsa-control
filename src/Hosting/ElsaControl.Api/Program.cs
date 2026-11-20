@@ -692,6 +692,7 @@ var engineVerificationEnabled = builder.Configuration.GetValue("Deployment:Engin
 if (engineVerificationEnabled && !builder.Environment.IsEnvironment("Testing"))
     builder.Services.AddHostedService<EngineVerificationHostedService>();
 builder.Services.AddScoped<IPackageVersionDiscoveryClient, NuGetPackageSourceClient>();
+builder.Services.AddScoped<IReleasePackageFeed, NuGetReleasePackageFeed>();
 builder.Services.AddScoped<IPackageArchiveDownloader, NuGetSyncPackageDownloader>();
 builder.Services.AddScoped<IPackageArchiveManifestReader, PackageArchiveManifestReader>();
 builder.Services.AddScoped<ManifestIngestionService>();

@@ -1,6 +1,8 @@
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using ElsaControl.Api.Authentication;
 using ElsaControl.Api.ReleaseCatalog;
 using ElsaControl.Api.Workspace;
@@ -164,6 +166,104 @@ public sealed class ReleaseCatalogApiTests
     }
 
     [Fact]
+    public async Task Admin_ingestion_rejects_an_unresolvable_manifest_and_lists_package_ids_only()
+    {
+        var feed = new ScriptedReleasePackageFeed
+        {
+            Existing = new HashSet<ReleasePackageIdentity>(ReleasePackageIdentityComparer.Instance)
+        };
+        await using var app = CreateApplication(services =>
+        {
+            services.RemoveAll<IReleaseManifestSignatureVerifier>();
+            services.AddSingleton<IReleaseManifestSignatureVerifier, FixtureSignatureVerifier>();
+            services.RemoveAll<IReleasePackageFeed>();
+            services.AddSingleton<IReleasePackageFeed>(feed);
+        });
+        await app.SeedAsync(_ => Task.CompletedTask);
+        var client = CreateAdminClient(app);
+
+        var response = await client.PostControlJsonAsync(
+            "/api/admin/release-catalog/manifests",
+            Request(payload: UnresolvablePayload()));
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
+        Assert.Contains(GovernedReleasePackageResolution.UnresolvableCode, body, StringComparison.Ordinal);
+        Assert.Contains("Elsa.Persistence.EFCore.SqlServer", body, StringComparison.Ordinal);
+        Assert.Contains("Elsa.Scheduling.Quartz.EFCore.SqlServer", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("nuget.org", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("api.nuget.org", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("credential", body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Admin_ingestion_fails_closed_when_the_package_feed_is_unavailable()
+    {
+        var feed = new ScriptedReleasePackageFeed { Throw = new ReleasePackageFeedUnavailableException() };
+        await using var app = CreateApplication(services =>
+        {
+            services.RemoveAll<IReleaseManifestSignatureVerifier>();
+            services.AddSingleton<IReleaseManifestSignatureVerifier, FixtureSignatureVerifier>();
+            services.RemoveAll<IReleasePackageFeed>();
+            services.AddSingleton<IReleasePackageFeed>(feed);
+        }, catalogLifecycle: "supported");
+        await app.SeedAsync(_ => Task.CompletedTask);
+        var client = CreateAdminClient(app);
+
+        var response = await client.PostControlJsonAsync(
+            "/api/admin/release-catalog/manifests",
+            Request(payload: UnresolvablePayload()));
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Contains(GovernedReleasePackageResolution.FeedUnavailableCode, body, StringComparison.Ordinal);
+        Assert.Contains("\"retryable\":true", body.Replace(" ", ""), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("nuget.org", body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Admin_promotion_to_supported_re_runs_the_package_resolution_check()
+    {
+        var feed = new ScriptedReleasePackageFeed();
+        await using var app = CreateApplication(services =>
+        {
+            services.RemoveAll<IReleaseManifestSignatureVerifier>();
+            services.AddSingleton<IReleaseManifestSignatureVerifier, FixtureSignatureVerifier>();
+            services.RemoveAll<IReleasePackageFeed>();
+            services.AddSingleton<IReleasePackageFeed>(feed);
+        });
+        await app.SeedAsync(_ => Task.CompletedTask);
+        var client = CreateAdminClient(app);
+        var request = Request(payload: UnresolvablePayload());
+
+        var admitted = await client.PostControlJsonAsync("/api/admin/release-catalog/manifests", request);
+        Assert.Equal(HttpStatusCode.Created, admitted.StatusCode);
+
+        feed.Existing = new HashSet<ReleasePackageIdentity>(ReleasePackageIdentityComparer.Instance);
+        var rejected = await client.PostControlJsonAsync(
+            "/api/admin/release-catalog/manifests/promote-supported",
+            new AdminReleaseCatalogPromoteRequest(request.Digest));
+        var rejectedBody = await rejected.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, rejected.StatusCode);
+        Assert.Contains(GovernedReleasePackageResolution.UnresolvableCode, rejectedBody, StringComparison.Ordinal);
+        Assert.Contains("Elsa.Persistence.EFCore.SqlServer", rejectedBody, StringComparison.Ordinal);
+        Assert.Contains("Elsa.Scheduling.Quartz.EFCore.SqlServer", rejectedBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("nuget.org", rejectedBody, StringComparison.OrdinalIgnoreCase);
+
+        feed.Existing = null;
+        var promoted = await client.PostControlJsonAsync(
+            "/api/admin/release-catalog/manifests/promote-supported",
+            new AdminReleaseCatalogPromoteRequest(request.Digest));
+        var promotedResult = await promoted.Content.ReadControlJsonAsync<AdminReleaseCatalogAdmissionResponse>();
+
+        Assert.Equal(HttpStatusCode.OK, promoted.StatusCode);
+        Assert.NotNull(promotedResult);
+        Assert.Equal(GovernedReleaseCatalogWriteStatus.Stored, promotedResult.Status);
+        Assert.All(promotedResult.Entries, entry => Assert.Equal("supported", entry.Distribution.CatalogLifecycle));
+    }
+
+    [Fact]
     public async Task Admin_ingestion_reports_a_request_specific_detail_for_a_missing_body()
     {
         await using var app = CreateApplication();
@@ -197,14 +297,51 @@ public sealed class ReleaseCatalogApiTests
         return client;
     }
 
-    private static AdminReleaseManifestIngestionRequest Request(string? manifestDigest = null)
+    private static AdminReleaseManifestIngestionRequest Request(string? manifestDigest = null, string? payload = null)
     {
-        var payload = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "producer-release-manifest-2.0.0.json"));
+        var body = payload ?? File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "producer-release-manifest-2.0.0.json"));
         var digest = manifestDigest ?? Digest('a');
         return new(
             $"oci://valence-runtime/release-manifests/release-manifest@{digest}",
             digest,
-            payload);
+            body);
+    }
+
+    private static string UnresolvablePayload()
+    {
+        var producer = JsonNode.Parse(
+            File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "producer-release-manifest-2.0.0.json")))!;
+        producer["release"]!["releaseLine"] = "3.10";
+        producer["release"]!["version"] = "3.10.2";
+        producer["release"]!["compatibility"]!["engineVersion"] = "3.10.2";
+        producer["release"]!["id"] = "3.10.2-build";
+        producer["componentDeclarations"]!["packages"] = new JsonArray(
+            new JsonObject
+            {
+                ["id"] = "Elsa.Persistence.EFCore.SqlServer",
+                ["version"] = "3.8.0-preview.5413"
+            },
+            new JsonObject
+            {
+                ["id"] = "Elsa.Scheduling.Quartz.EFCore.SqlServer",
+                ["version"] = "3.8.0-preview.342"
+            });
+        RefreshProducerCanonicalDigest(producer);
+        return producer.ToJsonString();
+    }
+
+    private static void RefreshProducerCanonicalDigest(JsonNode producer)
+    {
+        using var document = JsonDocument.Parse(producer.ToJsonString());
+        var mapper = typeof(ElsaControl.RuntimeBuilder.Core.ReleaseManifests.ReleaseManifestAdmissionService).Assembly.GetType(
+            "ElsaControl.RuntimeBuilder.Core.ReleaseManifests.ProducerReleaseManifestMapper",
+            throwOnError: true)!;
+        var method = mapper.GetMethod(
+            "CanonicalDigest",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+        producer["integrity"]!["canonicalContentDigest"] = (string)method.Invoke(
+            null,
+            [document.RootElement, true])!;
     }
 
     private static string Digest(char value) => $"sha256:{new string(value, 64)}";

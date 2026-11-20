@@ -69,6 +69,7 @@ public sealed class GovernedReleaseCatalogStore(DbContextOptions<CatalogDbContex
         roots = Exact(roots, query.ProducerLifecycle, x => x.ProducerLifecycle);
         roots = Exact(roots, query.CatalogLifecycle, x => x.CatalogLifecycle);
         roots = Exact(roots, query.RegistryClass, x => x.RegistryClass);
+        roots = Exact(roots, query.ManifestDigest, x => x.ManifestDigest);
 
         if (query.TopologyId is not null)
         {
@@ -110,6 +111,58 @@ public sealed class GovernedReleaseCatalogStore(DbContextOptions<CatalogDbContex
             .ThenBy(entry => entry.RegistryClass, StringComparer.OrdinalIgnoreCase)
             .ThenBy(entry => entry.Topology.Id, StringComparer.OrdinalIgnoreCase)
             .ToArray();
+    }
+
+    public async Task<GovernedReleaseCatalogWriteResult> UpdateCatalogLifecycleAsync(
+        string manifestDigest,
+        string registryClass,
+        string catalogLifecycle,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(manifestDigest);
+        ArgumentException.ThrowIfNullOrWhiteSpace(registryClass);
+        ArgumentException.ThrowIfNullOrWhiteSpace(catalogLifecycle);
+        if (catalogLifecycle.Length > 64 || catalogLifecycle.Any(char.IsControl))
+            throw new ArgumentException("The catalog lifecycle is invalid.", nameof(catalogLifecycle));
+
+        var digest = Normalize(manifestDigest);
+        var registry = Normalize(registryClass);
+        var lifecycle = catalogLifecycle.Trim().ToLowerInvariant();
+        await using var db = new CatalogDbContext(dbOptions);
+        return await db.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
+        {
+            var existing = await AggregateQuery(db.GovernedReleaseCatalog)
+                .Where(x => x.ManifestDigest == digest && x.RegistryClass == registry)
+                .Take(2)
+                .ToListAsync(cancellationToken);
+            if (existing.Count != 1)
+                return new GovernedReleaseCatalogWriteResult(
+                    GovernedReleaseCatalogWriteStatus.Conflict,
+                    existing.Count == 1 ? ToEntries(existing[0]) : [],
+                    "catalog.identity.conflict");
+
+            var root = existing[0];
+            if (string.Equals(root.CatalogLifecycle, lifecycle, StringComparison.Ordinal))
+                return new GovernedReleaseCatalogWriteResult(
+                    GovernedReleaseCatalogWriteStatus.Unchanged,
+                    ToEntries(root));
+
+            var projected = ToEntries(root)
+                .Select(entry => entry with { CatalogLifecycle = lifecycle })
+                .ToArray();
+            foreach (var entry in projected)
+                Validate(entry);
+            ValidateBatch(projected);
+
+            var tracked = await db.GovernedReleaseCatalog.SingleAsync(x => x.Id == root.Id, cancellationToken);
+            tracked.CatalogLifecycle = lifecycle;
+            tracked.ProjectionFingerprint = ProjectionFingerprint(projected);
+            db.PermitGovernedReleaseCatalogLifecycleTransition(tracked.Id);
+            await db.SaveChangesAsync(cancellationToken);
+            return new GovernedReleaseCatalogWriteResult(
+                GovernedReleaseCatalogWriteStatus.Stored,
+                projected);
+        }, cancellationToken);
     }
 
     private async Task<IReadOnlyList<GovernedReleaseCatalogEntity>> FindExistingCandidatesAsync(
@@ -178,8 +231,9 @@ public sealed class GovernedReleaseCatalogStore(DbContextOptions<CatalogDbContex
             SourceRepository = first.Distribution.SourceRepository,
             SourceCommit = first.Distribution.SourceCommit,
             SourceRunId = first.Distribution.SourceRunId,
-            // The application supplies immutable Control policy for this admitted
-            // catalog identity; a policy change requires a separate transition path.
+            // The application supplies Control policy for this admitted catalog
+            // identity. Producer facts stay immutable; catalog lifecycle may
+            // change only through UpdateCatalogLifecycleAsync.
             CatalogLifecycle = Normalize(first.CatalogLifecycle),
             AdmittedAtUtcTicks = first.AdmittedAt.UtcTicks,
             ComponentDeclarationsFormat = first.ComponentDeclarations?.Format,
@@ -336,7 +390,8 @@ public sealed class GovernedReleaseCatalogStore(DbContextOptions<CatalogDbContex
         && (query.RuntimeKind is null || entry.Topology.RuntimeKinds.Contains(query.RuntimeKind, StringComparer.Ordinal))
         && (query.Capability is null || entry.Topology.Capabilities
             .Concat(entry.Topology.Components.SelectMany(x => x.Capabilities))
-            .Contains(query.Capability, StringComparer.Ordinal));
+            .Contains(query.Capability, StringComparer.Ordinal))
+        && (query.ManifestDigest is null || string.Equals(entry.ManifestDigest, query.ManifestDigest, StringComparison.OrdinalIgnoreCase));
 
     private static GovernedReleaseCatalogQuery NormalizeQuery(GovernedReleaseCatalogQuery query) => query with
     {
@@ -349,7 +404,8 @@ public sealed class GovernedReleaseCatalogStore(DbContextOptions<CatalogDbContex
         RegistryClass = NormalizeOptional(query.RegistryClass),
         TopologyId = NormalizeOptional(query.TopologyId),
         RuntimeKind = NormalizeOptional(query.RuntimeKind),
-        Capability = NormalizeOptional(query.Capability)
+        Capability = NormalizeOptional(query.Capability),
+        ManifestDigest = NormalizeOptional(query.ManifestDigest)
     };
 
     private static IQueryable<GovernedReleaseCatalogEntity> Exact(

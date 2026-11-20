@@ -7,6 +7,7 @@ namespace ElsaControl.RuntimeBuilder.Core.ReleaseCatalog;
 public sealed class GovernedReleaseCatalogIngestionService(
     ReleaseManifestAdmissionService admissionService,
     IGovernedReleaseCatalogStore store,
+    IReleasePackageFeed packageFeed,
     TimeProvider timeProvider) : IReleaseCatalogIngestionService
 {
     public async Task<GovernedReleaseCatalogAdmissionResult> AdmitAsync(
@@ -18,6 +19,7 @@ public sealed class GovernedReleaseCatalogIngestionService(
         ArgumentNullException.ThrowIfNull(catalogOptions);
         ArgumentNullException.ThrowIfNull(admissionService);
         ArgumentNullException.ThrowIfNull(store);
+        ArgumentNullException.ThrowIfNull(packageFeed);
         ArgumentNullException.ThrowIfNull(timeProvider);
 
         var catalogLifecycle = catalogOptions.CatalogLifecycle?.Trim();
@@ -60,6 +62,13 @@ public sealed class GovernedReleaseCatalogIngestionService(
                 "A supported catalog row cannot use a prerelease version.",
                 "catalogLifecycle");
 
+        var packageFindings = await ResolveDeclaredPackagesAsync(
+            admission.Manifest.ComponentDeclarations?.Packages
+                .Select(package => new ReleasePackageIdentity(package.Id, package.Version)),
+            cancellationToken);
+        if (packageFindings.Count > 0)
+            return new(false, null, [], packageFindings);
+
         IReadOnlyList<GovernedReleaseCatalogEntry> entries;
         try
         {
@@ -79,6 +88,110 @@ public sealed class GovernedReleaseCatalogIngestionService(
                 [new("catalog.identity.conflict", "A different immutable release already owns this catalog identity.", "catalog")],
                 IncomingEntries: entries)
             : new(true, write.Status, write.Entries, []);
+    }
+
+    public async Task<GovernedReleaseCatalogAdmissionResult> PromoteToSupportedAsync(
+        string manifestDigest,
+        GovernedReleaseCatalogAdmissionOptions catalogOptions,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(manifestDigest);
+        ArgumentNullException.ThrowIfNull(catalogOptions);
+        ArgumentNullException.ThrowIfNull(store);
+        ArgumentNullException.ThrowIfNull(packageFeed);
+
+        var options = catalogOptions.ManifestAdmission
+            ?? throw new ArgumentException("Manifest admission options are required.", nameof(catalogOptions));
+        var registryClass = string.IsNullOrWhiteSpace(options.RegistryClass)
+            ? "paid"
+            : options.RegistryClass.Trim();
+
+        var entries = await store.QueryAsync(
+            new GovernedReleaseCatalogQuery(
+                RegistryClass: registryClass,
+                ManifestDigest: manifestDigest.Trim()),
+            cancellationToken);
+        if (entries.Count == 0)
+            return Rejected(
+                "catalog.promotion.notFound",
+                "The admitted release was not found.",
+                "manifestDigest");
+
+        // Reuse the RG1 picker filter rather than a parallel stability check.
+        // FindEligibleCatalogEntryAsync applies the same WhereStableReleaseVersion
+        // gate when selecting Supported rows for create.
+        var stable = ManagedElsaReleasePicker.WhereStableReleaseVersion(entries).ToArray();
+        if (stable.Length == 0)
+            return Rejected(
+                GovernedReleaseCatalogLifecycle.SupportedPrereleaseCode,
+                "A supported catalog row cannot use a prerelease version.",
+                "catalogLifecycle");
+
+        var current = stable[0];
+        if (GovernedReleaseCatalogLifecycle.IsSupported(current.CatalogLifecycle))
+            return new(true, GovernedReleaseCatalogWriteStatus.Unchanged, stable, []);
+
+        var packageFindings = await ResolveDeclaredPackagesAsync(
+            current.ComponentDeclarations?.Packages
+                .Select(package => new ReleasePackageIdentity(package.Id, package.Version)),
+            cancellationToken);
+        if (packageFindings.Count > 0)
+            return new(false, null, [], packageFindings);
+
+        var write = await store.UpdateCatalogLifecycleAsync(
+            current.ManifestDigest,
+            current.RegistryClass,
+            GovernedReleaseCatalogLifecycle.Supported,
+            cancellationToken);
+        return write.Status == GovernedReleaseCatalogWriteStatus.Conflict
+            ? new(false, write.Status, write.Entries,
+                [new("catalog.identity.conflict", "A different immutable release already owns this catalog identity.", "catalog")])
+            : new(true, write.Status, write.Entries, []);
+    }
+
+    private async Task<IReadOnlyList<GovernedReleaseCatalogFinding>> ResolveDeclaredPackagesAsync(
+        IEnumerable<ReleasePackageIdentity>? packages,
+        CancellationToken cancellationToken)
+    {
+        var identities = packages?.ToArray() ?? [];
+        if (identities.Length == 0)
+            return [];
+
+        IReadOnlySet<ReleasePackageIdentity> found;
+        try
+        {
+            found = await packageFeed.FindExistingAsync(identities, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            // Fail closed: outages, protocol errors, and unexpected feed
+            // exceptions must not leak the feed URL or credentials.
+            return
+            [
+                new(
+                    GovernedReleasePackageResolution.FeedUnavailableCode,
+                    "The configured package feed is unavailable.",
+                    "componentDeclarations.packages")
+            ];
+        }
+
+        var missing = identities
+            .Where(package => !found.Contains(package, ReleasePackageIdentityComparer.Instance))
+            .Select(package => package.Id)
+            .ToArray();
+        return missing.Length == 0
+            ? []
+            :
+            [
+                new(
+                    GovernedReleasePackageResolution.UnresolvableCode,
+                    GovernedReleasePackageResolution.UnresolvableMessage(missing),
+                    "componentDeclarations.packages")
+            ];
     }
 
     private static IReadOnlyList<GovernedReleaseCatalogEntry> Project(

@@ -22,6 +22,36 @@ public sealed class ReleaseCatalogAdmissionOptions
     /// </summary>
     public string CatalogLifecycle { get; set; } = "Preview";
 
+    /// <summary>
+    /// NuGet V3 service index used to resolve declared packages at admission and
+    /// at promotion to Supported. Defaults to nuget.org, matching the engine
+    /// release feed. Never returned in admission findings.
+    /// </summary>
+    public string ReleaseFeedServiceIndex { get; set; } = DefaultReleaseFeedServiceIndex;
+
+    public const string DefaultReleaseFeedServiceIndex = "https://api.nuget.org/v3/index.json";
+
+    public string NormalizeReleaseFeedServiceIndex()
+    {
+        if (string.IsNullOrWhiteSpace(ReleaseFeedServiceIndex)
+            || ReleaseFeedServiceIndex.Length > 2048
+            || ReleaseFeedServiceIndex.Any(char.IsControl)
+            || ReleaseFeedServiceIndex.Contains('\\', StringComparison.Ordinal)
+            || ReleaseFeedServiceIndex.Contains('?', StringComparison.Ordinal)
+            || ReleaseFeedServiceIndex.Contains('#', StringComparison.Ordinal)
+            || ReleaseFeedServiceIndex.Contains('@', StringComparison.Ordinal))
+            throw new ArgumentException("The release feed service index is unsafe.", nameof(ReleaseFeedServiceIndex));
+
+        var value = ReleaseFeedServiceIndex.Trim();
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri)
+            || !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+            || !string.IsNullOrEmpty(uri.UserInfo)
+            || string.IsNullOrWhiteSpace(uri.Host))
+            throw new ArgumentException("The release feed service index is unsafe.", nameof(ReleaseFeedServiceIndex));
+
+        return value;
+    }
+
     public GovernedReleaseCatalogAdmissionOptions ToAdmissionOptions() =>
         new(
             new ElsaControl.RuntimeBuilder.Abstractions.ReleaseManifests.ReleaseManifestAdmissionOptions(
@@ -37,6 +67,8 @@ public sealed record AdminReleaseManifestIngestionRequest(
     string? Reference,
     string? Digest,
     string? Payload);
+
+public sealed record AdminReleaseCatalogPromoteRequest(string? ManifestDigest);
 
 public sealed record AdminReleaseCatalogAdmissionResponse(
     GovernedReleaseCatalogWriteStatus Status,

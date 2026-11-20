@@ -9,6 +9,7 @@ using ElsaControl.Deployment.Core.Cockpit;
 using ElsaControl.Deployment.Core.Workspace;
 using ElsaControl.PackageCatalog.Core.Packages;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
+using ElsaControl.RuntimeBuilder.Abstractions.ReleaseCatalog;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
@@ -107,6 +108,8 @@ internal sealed class ControlApiTestApplication : WebApplicationFactory<Program>
             services.AddSingleton<TestExternalEnginePairingAvailability>();
             services.AddSingleton<IExternalEnginePairingAvailability>(services =>
                 services.GetRequiredService<TestExternalEnginePairingAvailability>());
+            services.RemoveAll<IReleasePackageFeed>();
+            services.AddSingleton<IReleasePackageFeed, PermissiveReleasePackageFeed>();
             _configureServices?.Invoke(services);
         });
     }
@@ -182,6 +185,31 @@ public sealed class DefaultControlApiTestApplicationFixture : IAsyncLifetime
     public Task InitializeAsync() => Task.CompletedTask;
 
     public async Task DisposeAsync() => await ((IAsyncDisposable)Application).DisposeAsync();
+}
+
+internal sealed class PermissiveReleasePackageFeed : IReleasePackageFeed
+{
+    public Task<IReadOnlySet<ReleasePackageIdentity>> FindExistingAsync(
+        IReadOnlyList<ReleasePackageIdentity> packages,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult<IReadOnlySet<ReleasePackageIdentity>>(
+            packages.ToHashSet(ReleasePackageIdentityComparer.Instance));
+}
+
+internal sealed class ScriptedReleasePackageFeed : IReleasePackageFeed
+{
+    public IReadOnlySet<ReleasePackageIdentity>? Existing { get; set; }
+    public Exception? Throw { get; set; }
+
+    public Task<IReadOnlySet<ReleasePackageIdentity>> FindExistingAsync(
+        IReadOnlyList<ReleasePackageIdentity> packages,
+        CancellationToken cancellationToken = default)
+    {
+        if (Throw is not null)
+            throw Throw;
+        return Task.FromResult(
+            Existing ?? (IReadOnlySet<ReleasePackageIdentity>)packages.ToHashSet(ReleasePackageIdentityComparer.Instance));
+    }
 }
 
 internal static class ControlApiJsonExtensions
