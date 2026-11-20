@@ -2718,10 +2718,17 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                     operation.Action != ElsaInstanceOperationAction.Delete)
                 {
                     // A waiting Delete can flip DesiredLifecycle while SubmitAsync is
-                    // still in flight. Replay the original Create/Stop apply so the
-                    // in-flight marker cannot wedge behind that successor.
-                    if (operation.ProviderSubmissionInFlightAt is not null &&
-                        operation.State == ElsaInstanceOperationState.Queued &&
+                    // still in flight, or after CommitResolved while the resolution
+                    // lease is still held and Mark has not run. Replay the original
+                    // Create/Stop apply so neither the marker nor that leftover lease
+                    // can wedge the successor.
+                    if (ElsaInstanceOperationGuard.CanReplayQueuedPredecessorBehindWaitingDelete(
+                            operation.State,
+                            operation.ProviderSubmissionInFlightAt,
+                            operation.WorkerId,
+                            operation.LeaseTokenHash,
+                            operation.LeaseExpiresAt,
+                            operation.HeartbeatAt) &&
                         await HasWaitingDeleteSuccessorForConfirmedProviderAsync(
                             instance, operation, cancellationToken))
                     {

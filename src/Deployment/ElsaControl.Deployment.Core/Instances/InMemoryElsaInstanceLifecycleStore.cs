@@ -438,9 +438,19 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                                 run.Run.ActorAccountId);
                             target.Validate();
                             var desiredLifecycle = instance.DesiredLifecycle;
+                            _claims.TryGetValue(operation.Id, out var claim);
+                            DateTimeOffset? submissionInFlightAt = _submissionInFlight.TryGetValue(operation.Id, out var markedAt)
+                                ? markedAt
+                                : null;
                             if (desiredLifecycle == ElsaDesiredLifecycle.Deleting &&
                                 operation.Action != ElsaInstanceOperationAction.Delete &&
-                                _submissionInFlight.ContainsKey(operation.Id) &&
+                                ElsaInstanceOperationGuard.CanReplayQueuedPredecessorBehindWaitingDelete(
+                                    operation.State,
+                                    submissionInFlightAt,
+                                    claim?.WorkerId,
+                                    claim?.Token,
+                                    claim?.ExpiresAt,
+                                    heartbeatAt: null) &&
                                 _operations.Values.Any(successor =>
                                     successor.InstanceId == instance.Id &&
                                     successor.Action == ElsaInstanceOperationAction.Delete &&

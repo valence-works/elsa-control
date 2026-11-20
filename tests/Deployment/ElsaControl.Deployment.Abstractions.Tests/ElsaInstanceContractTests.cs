@@ -583,6 +583,34 @@ public sealed class ElsaInstanceContractTests
     }
 
     [Fact]
+    public void Queued_predecessor_replay_behind_a_waiting_delete_covers_lease_or_marker()
+    {
+        Assert.False(ElsaInstanceOperationGuard.CanReplayQueuedPredecessorBehindWaitingDelete(
+            ElsaInstanceOperationState.Queued, null, null, null, null, null));
+        Assert.True(ElsaInstanceOperationGuard.CanReplayQueuedPredecessorBehindWaitingDelete(
+            ElsaInstanceOperationState.Queued,
+            submissionInFlightAt: DateTimeOffset.UnixEpoch,
+            workerId: null,
+            leaseTokenHash: null,
+            leaseExpiresAt: null,
+            heartbeatAt: null));
+        Assert.True(ElsaInstanceOperationGuard.CanReplayQueuedPredecessorBehindWaitingDelete(
+            ElsaInstanceOperationState.Queued,
+            submissionInFlightAt: null,
+            workerId: "resolver-worker",
+            leaseTokenHash: null,
+            leaseExpiresAt: null,
+            heartbeatAt: null));
+        Assert.False(ElsaInstanceOperationGuard.CanReplayQueuedPredecessorBehindWaitingDelete(
+            ElsaInstanceOperationState.RecoveryRequired,
+            submissionInFlightAt: DateTimeOffset.UnixEpoch,
+            workerId: "resolver-worker",
+            leaseTokenHash: null,
+            leaseExpiresAt: null,
+            heartbeatAt: null));
+    }
+
+    [Fact]
     public void Queued_predecessor_replay_keeps_a_stopped_instance_stopped()
     {
         Assert.Equal(

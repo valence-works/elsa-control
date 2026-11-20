@@ -55,6 +55,58 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     }
 
     [DisposableSqlServerFact]
+    public async Task Sql_server_crash_after_resolve_before_mark_lets_waiting_delete_proceed_after_replay()
+    {
+        var masterConnectionString = GetLoopbackMasterConnectionString();
+        await using var database = await SqlServerTestDatabase.CreateAsync(masterConnectionString);
+        Guid workspaceId;
+        Guid instanceId;
+        Guid operationId;
+        Guid deletionId;
+        int attemptNumber;
+        await using (var db = CreateSqlServerContext(database.ConnectionString))
+        {
+            await db.Database.MigrateAsync();
+            var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "SQL resolve crash before mark");
+            workspaceId = workspace.Id;
+            instanceId = accepted.Instance.Id;
+            operationId = accepted.Operation.Id;
+            attemptNumber = accepted.Operation.AttemptNumber;
+            var current = Assert.IsType<ElsaInstance>(await CreateStore(db)
+                .GetInstanceAsync(workspace.Id, accepted.Instance.Id));
+            var deletion = await new ElsaInstanceLifecycleService(
+                    CreateStore(db), new FixedTimeProvider(Now.AddMinutes(1)))
+                .DeleteAsync(await CreateConfirmedDeleteRequestAsync(
+                    db, workspace.Id, accepted.Instance.Id, current.Version,
+                    "delete-sql-resolve-crash", Now.AddMinutes(1)));
+            deletionId = deletion.Operation.Id;
+            Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, deletion.Operation.State);
+
+            var pending = Assert.Single(await CreateStore(db).ListPendingProviderOperationsAsync(16));
+            Assert.False(pending.HandoffInvalid);
+            Assert.NotNull(pending.Submission);
+            Assert.Equal(operationId, pending.Submission.OperationId);
+            Assert.Equal(ElsaDesiredLifecycle.Running, pending.Submission.DesiredLifecycle);
+            Assert.Null(await CreateStore(db).TryClaimNextDeletionAsync("deletion-worker", Now.AddMinutes(2)));
+        }
+
+        await using var recovered = CreateSqlServerContext(database.ConnectionString);
+        await CreateStore(recovered).FailRejectedProviderSubmissionAsync(new(
+            workspaceId, instanceId, operationId, attemptNumber, Now.AddMinutes(2),
+            ["azure.imageRegistry.unsupported"]));
+        recovered.ChangeTracker.Clear();
+        Assert.Equal(ElsaInstanceOperationState.Failed,
+            (await recovered.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == operationId)).State);
+        Assert.Equal(
+            ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected,
+            (await recovered.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == operationId)).FailureCode);
+
+        var claimed = await CreateStore(recovered).TryClaimNextDeletionAsync("deletion-worker-finalize", Now.AddMinutes(3));
+        Assert.NotNull(claimed);
+        Assert.Equal(deletionId, claimed.Operation.Id);
+    }
+
+    [DisposableSqlServerFact]
     public async Task Sql_server_delete_does_not_supersede_a_create_with_submission_in_flight()
     {
         var masterConnectionString = GetLoopbackMasterConnectionString();

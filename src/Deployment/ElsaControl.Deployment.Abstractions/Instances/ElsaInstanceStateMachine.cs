@@ -387,6 +387,27 @@ public static class ElsaInstanceOperationGuard
     }
 
     /// <summary>
+    /// Replay of a queued Create/Stop whose instance is now Deleting is allowed
+    /// when the submission-in-flight marker is set or the resolution lease is
+    /// still held. That covers a crash after <c>CommitResolvedAsync</c> and
+    /// before <c>MarkProviderSubmissionInFlightAsync</c>, so reconciliation can
+    /// finish the hand-off instead of leaving a waiting Delete wedged.
+    /// </summary>
+    public static bool CanReplayQueuedPredecessorBehindWaitingDelete(
+        ElsaInstanceOperationState state,
+        DateTimeOffset? submissionInFlightAt,
+        string? workerId,
+        string? leaseTokenHash,
+        DateTimeOffset? leaseExpiresAt,
+        DateTimeOffset? heartbeatAt)
+    {
+        ElsaInstanceValue.RequireEnum(state, nameof(state));
+        return state == ElsaInstanceOperationState.Queued &&
+            (submissionInFlightAt is not null ||
+             HasInFlightWorkerLease(workerId, leaseTokenHash, leaseExpiresAt, heartbeatAt));
+    }
+
+    /// <summary>
     /// Desired lifecycle used when replaying a queued predecessor whose instance
     /// is now Deleting. Stop and an already-stopped instance stay Stopped so a
     /// Reconcile/Retry accepted while stopped is not replayed as Running.

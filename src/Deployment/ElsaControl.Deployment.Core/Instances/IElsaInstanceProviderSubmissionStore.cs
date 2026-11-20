@@ -14,7 +14,10 @@ public interface IElsaInstanceProviderSubmissionStore
     /// The marker stays set until provenance is committed, the submit is rejected,
     /// or an uncertain hand-off is recorded. A crash after this write is
     /// reconciled by the provider-reconciliation worker replaying the pending
-    /// Queued submission; the marker does not expire through the worker lease.
+    /// Queued submission. A crash before this write, with a waiting Delete, is
+    /// recovered by remapping that still-leased Queued predecessor so this
+    /// method and Submit can still run; the marker does not expire through the
+    /// worker lease.
     /// </summary>
     Task MarkProviderSubmissionInFlightAsync(
         ElsaInstanceProviderSubmissionInFlightMark mark,
