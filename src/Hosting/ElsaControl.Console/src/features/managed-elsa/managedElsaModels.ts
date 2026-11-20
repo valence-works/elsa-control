@@ -72,6 +72,8 @@ export type ManagedElsaReleaseOption = {
   channel: string;
   topologyId: string;
   recommended?: boolean;
+  /** Admitted Supported release-manifest digest. Display and proof evidence only. */
+  manifestDigest?: string;
 };
 
 export type ManagedElsaOnboardingOptions = {
