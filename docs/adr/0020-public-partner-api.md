@@ -54,7 +54,7 @@ webhook and no public contract.
    `/api/workspaces/...` routes, does not go through the Hub or Cloud BFF, and adds no
    second lifecycle path. It has its own authentication scheme, authorization policy,
    rate-limit policies and OpenAPI document.
-3. **Credentials are Control-native API keys in the first slice.** See Identity.
+3. **Credentials are Control-native API keys in the first slice, and the Elsa Hub is the only place a human creates and manages them.** Control is the source of truth for partner identities, keys and scopes. The Hub stores no key secret. See Identity and Key management through the Hub.
 4. **One resource kind, `engine`, with a `placement` field.** `placement` is
    `dedicated` in v1. `shared` is reserved in the schema and refused with
    `placement.unavailable` until ADR-0019's L6 flag (#945) opens it.
@@ -69,9 +69,10 @@ webhook and no public contract.
 ### Identity and self-serve onboarding
 
 - **Sign-up.** A person signs in on the Hub (Supabase identity, ADR-0018), opens the
-  Partner page, and creates a partner organization. The Hub reaches Control through
-  purpose-built endpoints on the Hub BFF allowlist (the "partner console" endpoints). These
-  are human-session endpoints, separate from the machine API.
+  Partner page in the signed-in section, and creates a partner organization. The Hub's
+  backend (the Supabase edge functions on the cloud-bff path) calls purpose-built Control
+  endpoints on the Hub BFF allowlist. These are human-session endpoints, separate from the
+  machine API.
 - **Terms.** Acceptance is an immutable record: terms version, timestamp, accepting
   account id, and the organization. The terms text is a legal document owned by Sipke and
   counsel and is not in this repository. `PartnerStatus` moves to `Active` only when the
@@ -97,6 +98,43 @@ webhook and no public contract.
   Failed attempts are throttled per source IP with the existing low-permit fallback
   bucket. Key secrets never appear in logs, problem bodies or audit text, and the audit
   records `keyId` only.
+
+### Key management through the Hub
+
+Partners create, list, rotate and revoke keys in the Hub's signed-in Partner page, the
+same way the Hub fronts engine management today (ADR-0018). The Hub is the presentation
+and identity layer. Control owns everything else.
+
+- **Control is the source of truth.** Partner identities, keys, scopes, expiry and
+  last-used time live in Control only. The Hub keeps no copy of any of them, not even a
+  key id, and reads the list from Control on each page load.
+- **The Hub never stores a secret.** `POST /api/organizations/{organizationId}/partner/keys`
+  returns the full key once in the response. The Hub edge function passes that body to the
+  browser and keeps nothing: no database row, no cache, no log line, no analytics event,
+  no error report with the body. The browser shows the secret once with a copy button and
+  drops it when the dialog closes. Control keeps only the SHA-256 hash, and neither side can
+  show a secret again. A lost key is revoked and replaced.
+- **Endpoints (human session, Hub BFF allowlist only):** create, list (no secrets, with
+  key id, name, scopes, created, expires, last used, state), rotate (creates the new key
+  and returns it once, leaving the old one active until the partner revokes it), and
+  revoke. Plus `GET .../partner/usage` for the usage view below. Each has its own
+  authorization and tests. None is on any machine surface, and none is reachable with an
+  API key, so a stolen key can't mint more keys.
+- **Authorization.** Control authorizes the Hub session's linked account (#851) as an
+  Owner or Admin of the partner organization. The Hub checks nothing that Control doesn't
+  also check. Responses carry `Cache-Control: no-store`. The create and rotate routes use
+  the existing identity-and-IP rate limit, and the secret never appears in a URL, a query
+  string or a header the Hub forwards or logs.
+- **Hub edge function rules.** The create and rotate functions redact response bodies in
+  logs and error reports, return `no-store`, never write the body to storage or to a queue,
+  and use a short timeout with no retry (a retry would mint a second key). The Hub's
+  contract tests include a check that the secret does not appear in any log fixture.
+- **Partner usage view (cheap version).** `GET .../partner/usage` returns the allowance and
+  current use per engine type (from the commercial gate), engine counts by public state,
+  and per-key last-used time. Request volume per key needs metering and is deferred. The
+  Hub renders it as read-only numbers and never computes them.
+- **Audit.** Control records key created, rotated and revoked with the acting account id and
+  the key id, and never the secret.
 
 ### Isolation: end customers map to engines
 
@@ -246,8 +284,10 @@ and the quick-start. A partner polls operations. The first partner can use this 
 staging as soon as it is deployed.
 
 **Wave 2, "self-serve and public":** partner sign-up and terms on the Hub, the partner
-checkout and portal, the key and webhook console, webhooks, and the staging proof of the
-whole journey. Public availability needs wave 2 and the legal terms.
+checkout and portal, the Hub key console (create, list, rotate, revoke) and usage view, the
+Hub webhook console, webhooks, and the staging proof of the whole journey. Key management
+in the Hub is needed before the first partner goes beyond staging; until then an operator
+issues keys through the admin endpoints. Public availability needs wave 2 and the legal terms.
 
 ## Deferred
 
