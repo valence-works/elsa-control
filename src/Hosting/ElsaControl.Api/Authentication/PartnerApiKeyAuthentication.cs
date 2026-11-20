@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Caching.Distributed;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Options;
 using System.Threading.RateLimiting;
 
@@ -33,8 +34,51 @@ public static class PartnerApiKeyDefaults
 public sealed class PartnerApiOptions
 {
     public const string ConfigurationSection = PartnerApiKeyDefaults.ConfigurationSection;
+    public const string LiveEnvironment = "live";
+    public const string TestEnvironment = "test";
 
-    public string Environment { get; set; } = "test";
+    public string Environment { get; set; } = "";
+
+    /// <summary>
+    /// When true, Production may start with a process-local <see cref="IDistributedCache"/>.
+    /// Isolated tests and gated live proofs may set this. Production hosts must not.
+    /// </summary>
+    public bool AllowProcessLocalCache { get; set; }
+
+    public void ApplyEnvironmentDefault(IHostEnvironment environment)
+    {
+        if (string.IsNullOrWhiteSpace(Environment))
+            Environment = environment.IsProduction() ? LiveEnvironment : TestEnvironment;
+    }
+}
+
+public sealed class PartnerApiConfigurationValidator(
+    IHostEnvironment environment,
+    IOptions<PartnerApiOptions> options,
+    IDistributedCache cache) : IHostedService
+{
+    public Task StartAsync(CancellationToken cancellationToken)
+    {
+        var errors = Validate().ToArray();
+        if (errors.Length > 0)
+            throw new InvalidOperationException($"Partner API configuration is invalid: {string.Join(" ", errors)}");
+
+        return Task.CompletedTask;
+    }
+
+    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    internal IEnumerable<string> Validate()
+    {
+        if (environment.IsProduction() &&
+            !string.Equals(options.Value.Environment, PartnerApiOptions.LiveEnvironment, StringComparison.Ordinal))
+            yield return "PartnerApi:Environment must be live in Production.";
+
+        if (environment.IsProduction() &&
+            !options.Value.AllowProcessLocalCache &&
+            cache is MemoryDistributedCache)
+            yield return "Partner API requires a shared IDistributedCache in Production so revocation invalidates every instance. MemoryDistributedCache is process-local.";
+    }
 }
 
 public static class PartnerApiKeySelector

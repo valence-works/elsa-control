@@ -363,9 +363,9 @@ builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.Configure<PartnerApiOptions>(options =>
 {
     builder.Configuration.GetSection(PartnerApiOptions.ConfigurationSection).Bind(options);
-    if (string.IsNullOrWhiteSpace(options.Environment))
-        options.Environment = builder.Environment.IsProduction() ? "live" : "test";
+    options.ApplyEnvironmentDefault(builder.Environment);
 });
+builder.Services.AddHostedService<PartnerApiConfigurationValidator>();
 builder.Services.AddScoped<IPartnerApiKeyStore, PartnerApiKeyStore>();
 builder.Services.AddSingleton<IPartnerApiKeyCache, DistributedPartnerApiKeyCache>();
 builder.Services.AddSingleton<IPartnerMintedTokenRevoker, NoOpPartnerMintedTokenRevoker>();
