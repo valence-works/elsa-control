@@ -21,7 +21,7 @@ import { ApiError } from "@/lib/api/httpClient";
 
 const workspaceState = vi.hoisted(() => ({
   selectedWorkspaceId: "workspace-1",
-  selectedWorkspace: { id: "workspace-1", name: "Northstar", kind: "Shared", role: "Owner" }
+  selectedWorkspace: { id: "workspace-1", name: "Northstar", kind: "Shared", role: "Owner" as string }
 }));
 const provisioningState = vi.hoisted(() => ({ available: true, pending: false, error: null as Error | null }));
 
@@ -123,6 +123,7 @@ const projectedBuilderIntent: RuntimeBuilderIntent = {
 describe("EngineProvisioningPage", () => {
   beforeEach(() => {
     workspaceState.selectedWorkspaceId = "workspace-1";
+    workspaceState.selectedWorkspace.role = "Owner";
     provisioningState.available = true;
     provisioningState.pending = false;
     provisioningState.error = null;
@@ -147,8 +148,8 @@ describe("EngineProvisioningPage", () => {
     vi.mocked(getManagedElsaOnboardingOptions).mockResolvedValue({
       ...optionsFixture,
       releases: [
-        { distributionId: "elsa", releaseLine: "4.x", version: "4.2.0", channel: "stable", topologyId: "managed", recommended: true },
         { distributionId: "elsa", releaseLine: "4.x", version: "4.1.0", channel: "stable", topologyId: "managed" },
+        { distributionId: "elsa", releaseLine: "4.x", version: "4.2.0", channel: "stable", topologyId: "managed", recommended: true },
         { distributionId: "elsa", releaseLine: "4.x", version: "4.0.0", channel: "stable", topologyId: "managed" }
       ],
       previewReleases: [{ distributionId: "elsa", releaseLine: "5.x", version: "5.0.0-preview.1", channel: "preview", topologyId: "managed", manifestDigest: `sha256:${"a".repeat(64)}` }]
@@ -160,7 +161,8 @@ describe("EngineProvisioningPage", () => {
     expect(picker).toHaveDisplayValue(/4.2.0/);
     expect(screen.getAllByText("Recommended").length).toBeGreaterThanOrEqual(1);
     expect(within(picker).queryByRole("option", { name: /5.0.0-preview.1/ })).not.toBeInTheDocument();
-    expect(getManagedElsaOnboardingOptions).toHaveBeenCalledWith("workspace-1", { includePreview: false });
+    expect(getManagedElsaOnboardingOptions).toHaveBeenCalledWith("workspace-1");
+    expect(getManagedElsaOnboardingOptions).not.toHaveBeenCalledWith("workspace-1", { includePreview: true });
   });
 
   it("previews, accepts, polls, and links the registered engine", async () => {
@@ -232,6 +234,68 @@ describe("EngineProvisioningPage", () => {
       intent: expect.objectContaining({ release: expect.objectContaining({ previewManifestDigest: `sha256:${"a".repeat(64)}` }) })
     })));
     expect(getManagedElsaOnboardingOptions).toHaveBeenCalledWith("workspace-1", { includePreview: true });
+  });
+
+  it("hides Preview from workspace Readers who are not Owners", async () => {
+    workspaceState.selectedWorkspace.role = "Reader";
+    vi.mocked(getManagedElsaOnboardingOptions).mockResolvedValue({
+      ...optionsFixture,
+      previewReleases: [{ distributionId: "elsa", releaseLine: "5.x", version: "5.0.0-preview.1", channel: "preview", topologyId: "managed", manifestDigest: `sha256:${"a".repeat(64)}` }]
+    });
+    renderPage();
+
+    const picker = await screen.findByRole("combobox", { name: "Release" });
+    expect(screen.queryByRole("checkbox", { name: /Show Preview releases/ })).not.toBeInTheDocument();
+    expect(within(picker).queryByRole("option", { name: /5.0.0-preview.1/ })).not.toBeInTheDocument();
+    expect(getManagedElsaOnboardingOptions).not.toHaveBeenCalledWith("workspace-1", { includePreview: true });
+  });
+
+  it("keeps Supported releases when Preview options fail to load", async () => {
+    vi.mocked(getManagedElsaOnboardingOptions).mockImplementation(async (_workspaceId, request) => {
+      if (request?.includePreview) throw new Error("preview-unavailable");
+      return {
+        ...optionsFixture,
+        releases: [
+          { distributionId: "elsa", releaseLine: "4.x", version: "4.1.0", channel: "stable", topologyId: "managed" },
+          { distributionId: "elsa", releaseLine: "4.x", version: "4.2.0", channel: "stable", topologyId: "managed", recommended: true }
+        ]
+      };
+    });
+    const user = userEvent.setup();
+    renderPage();
+
+    const picker = await screen.findByRole("combobox", { name: "Release" });
+    expect(picker).toHaveDisplayValue(/4.2.0/);
+    await user.click(screen.getByRole("checkbox", { name: /Show Preview releases/ }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Preview releases could not load");
+    expect(screen.getByRole("heading", { name: "Provision an engine" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Release" })).toHaveDisplayValue(/4.2.0/);
+    await user.click(screen.getByRole("checkbox", { name: /Show Preview releases/ }));
+    expect(screen.queryByText("Preview releases could not load")).not.toBeInTheDocument();
+  });
+
+  it("does not crash after Edit configuration when Preview is turned off", async () => {
+    vi.mocked(getManagedElsaOnboardingOptions).mockImplementation(async (_workspaceId, request) => ({
+      ...optionsFixture,
+      previewReleases: request?.includePreview
+        ? [{ distributionId: "elsa", releaseLine: "5.x", version: "5.0.0-preview.1", channel: "preview", topologyId: "managed", manifestDigest: `sha256:${"a".repeat(64)}` }]
+        : null
+    }));
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByRole("heading", { name: "Provision an engine" });
+    await user.type(screen.getByRole("textbox", { name: "Engine name" }), "Preview engine");
+    await user.click(screen.getByRole("checkbox", { name: /Show Preview releases/ }));
+    const previewPicker = await screen.findByRole("combobox", { name: "Release" });
+    await user.selectOptions(previewPicker, await within(previewPicker).findByRole("option", { name: /5.0.0-preview.1/ }));
+    await user.click(screen.getByRole("checkbox", { name: /Use this Preview release/ }));
+    await user.click(screen.getByRole("button", { name: "Review deployment" }));
+    expect(await screen.findByRole("heading", { name: "Ready to provision" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Edit configuration" }));
+    await user.click(screen.getByRole("checkbox", { name: /Show Preview releases/ }));
+    expect(screen.getByRole("heading", { name: "Provision an engine" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Release" })).toHaveDisplayValue(/4.0.0/);
   });
 
   it("retries uncertain acceptance with the same key and creates a new key for a revised review", async () => {

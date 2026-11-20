@@ -8,9 +8,10 @@ import { Badge, Button, EmptyState, Input, SecondaryButton, Select, buttonClassN
 import { RequestStateView } from "@/components/states/RequestStateViews";
 import { getDeploymentCockpit, getDeploymentPermissions } from "@/features/deployments/deploymentApi";
 import type { DeploymentCockpit, EnvironmentSummary, WorkflowApplication, WorkspaceDeploymentPermissionsResponse } from "@/features/deployments/deploymentModels";
-import { getManagedElsaOnboardingOptions, getManagedElsaOperation } from "@/features/managed-elsa/managedElsaApi";
+import { getManagedElsaOperation } from "@/features/managed-elsa/managedElsaApi";
 import { ReleasePicker } from "@/features/managed-elsa/ReleasePicker";
-import { buildManagedElsaIntent, onboardingChoiceKey, onboardingChoices, preferredOnboardingChoice, slugify, type OnboardingChoice } from "@/features/managed-elsa/managedElsaOnboarding";
+import { useManagedElsaOnboardingOptions } from "@/features/managed-elsa/useManagedElsaOnboardingOptions";
+import { buildManagedElsaIntent, onboardingChoiceKey, preferredOnboardingChoice, slugify, type OnboardingChoice } from "@/features/managed-elsa/managedElsaOnboarding";
 import type { ManagedElsaOnboardingOptions, ManagedElsaOperation } from "@/features/managed-elsa/managedElsaModels";
 import { getBuilderCatalog, listRuntimeConfigurations } from "@/features/runtime-builder/runtimeBuilderApi";
 import type { BuilderCatalog, RuntimeBuilderIntent, RuntimeConfiguration } from "@/features/runtime-builder/runtimeBuilderModels";
@@ -91,12 +92,7 @@ function EngineProvisioningWorkspace({ workspace }: { workspace: WorkspaceState 
   const canShowPreview = workspace.selectedWorkspace?.role === "Owner";
   const [showPreview, setShowPreview] = useState(false);
   const includePreview = canShowPreview && showPreview;
-  const options = useQuery<ManagedElsaOnboardingOptions>({
-    queryKey: queryKeys.managedElsaOnboardingOptions(workspaceId, includePreview),
-    queryFn: () => getManagedElsaOnboardingOptions(workspaceId, { includePreview }),
-    enabled: Boolean(workspaceId) && providerAvailable && canManageSetup,
-    retry: false
-  });
+  const options = useManagedElsaOnboardingOptions(workspaceId, includePreview, providerAvailable && canManageSetup);
   const cockpit = useQuery<DeploymentCockpit>({
     queryKey: queryKeys.deploymentCockpit(workspaceId),
     queryFn: () => getDeploymentCockpit(workspaceId),
@@ -111,7 +107,7 @@ function EngineProvisioningWorkspace({ workspace }: { workspace: WorkspaceState 
   });
 
   const environments = useMemo(() => availableEnvironments(cockpit.data, targets.data), [cockpit.data, targets.data]);
-  const choices = useMemo(() => onboardingChoices(options.data, { includePreview }), [includePreview, options.data]);
+  const choices = options.choices;
   const [step, setStep] = useState<Step>(() => loadPendingProvisioning(workspaceId) ? "provisioning" : "configure");
   const [name, setName] = useState(routeStateForWorkspace.configurationName ?? "");
   const [slug, setSlug] = useState(() => slugify(routeStateForWorkspace.configurationName ?? ""));
@@ -376,7 +372,7 @@ function EngineProvisioningWorkspace({ workspace }: { workspace: WorkspaceState 
 
   const isBusy = preview.isPending || create.isPending;
   const canReview = Boolean(name.trim() && slug.trim() && selectedRelease && selectedEnvironment && handoffStatus !== "pending" && handoffStatus !== "missing" && (!previewReleaseRequired || previewConsent));
-  const reviewedAttempt = previewResult && selectedEnvironment ? {
+  const reviewedAttempt = previewResult && selectedRelease && selectedEnvironment ? {
     key: idempotencyKey,
     request: buildRequest(previewResult.previewDigest, previewResult.builderIntent),
     display: {
@@ -427,7 +423,8 @@ function EngineProvisioningWorkspace({ workspace }: { workspace: WorkspaceState 
           onReleaseChange={(value) => { setReleaseKey(value); setPreviewConsent(false); }}
           canShowPreview={canShowPreview}
           showPreview={showPreview}
-          onShowPreviewChange={(value) => { setShowPreview(value); setPreviewConsent(false); }}
+          onShowPreviewChange={(value) => { setShowPreview(value); setPreviewConsent(false); setPreviewResult(null); }}
+          previewError={options.previewError}
           onConfigurationChange={(value) => { setSelectedConfigurationId(value); setBuilderIntent(undefined); setCustomizationOpen(false); }}
           onCustomize={() => {
             if (!builderIntent && selectedConfiguration) setBuilderIntent(selectedConfiguration.intent);
@@ -462,7 +459,7 @@ function EngineProvisioningWorkspace({ workspace }: { workspace: WorkspaceState 
 function ConfigureView({
   name, slug, applicationId, environmentId, releaseKey, selectedConfigurationId, selectedConfiguration, builderIntent,
   environments, applicationEnvironments, choices, configurations, workspaceId, launchProfile, previewReleaseRequired, previewConsent, canReview, customizationOpen, disabled, error,
-  handoffStatus, canShowPreview, showPreview,
+  handoffStatus, canShowPreview, showPreview, previewError,
   onNameChange, onSlugChange, onApplicationChange, onEnvironmentChange, onReleaseChange, onShowPreviewChange, onConfigurationChange, onCustomize, onCustomizationClose, onBuilderIntentChange, onPreviewConsentChange, onSubmit
 }: {
   name: string;
@@ -488,6 +485,7 @@ function ConfigureView({
   error: string | null;
   canShowPreview: boolean;
   showPreview: boolean;
+  previewError: string | null;
   onNameChange: (value: string) => void;
   onSlugChange: (value: string) => void;
   onApplicationChange: (value: string) => void;
@@ -519,6 +517,7 @@ function ConfigureView({
               canShowPreview={canShowPreview}
               showPreview={showPreview}
               onShowPreviewChange={onShowPreviewChange}
+              previewError={previewError}
             />
           </div>
           {previewReleaseRequired ? <label className="mt-4 flex items-start gap-2 rounded-ui border border-warning/40 bg-warning/5 p-3 text-sm text-warning"><input type="checkbox" className="mt-1 h-4 w-4 accent-primary" checked={previewConsent} onChange={(event) => onPreviewConsentChange(event.target.checked)} disabled={disabled} /><span>Use this Preview release for this engine. Preview releases have no availability SLO.</span></label> : null}

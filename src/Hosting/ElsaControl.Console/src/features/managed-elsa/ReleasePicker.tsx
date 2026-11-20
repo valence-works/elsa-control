@@ -25,7 +25,8 @@ export function ReleasePicker({
   disabled = false,
   canShowPreview,
   showPreview,
-  onShowPreviewChange
+  onShowPreviewChange,
+  previewError = null
 }: {
   label: string;
   ariaLabel?: string;
@@ -36,6 +37,7 @@ export function ReleasePicker({
   canShowPreview: boolean;
   showPreview: boolean;
   onShowPreviewChange: (value: boolean) => void;
+  previewError?: string | null;
 }) {
   const selected = choices.find((choice) => onboardingChoiceKey(choice) === value) ?? null;
   const comboboxLabel = ariaLabel ?? label;
@@ -80,6 +82,7 @@ export function ReleasePicker({
           </span>
         </label>
       ) : null}
+      {previewError ? <p role="alert" className="text-sm text-warning">{previewError}</p> : null}
     </div>
   );
 }

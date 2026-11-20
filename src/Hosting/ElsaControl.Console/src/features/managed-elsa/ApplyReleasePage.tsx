@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, ExternalLink, LoaderCircle, ShieldAlert } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useWorkspaceContext } from "@/app/WorkspaceContextProvider";
 import { Button, EmptyState, buttonClassName } from "@/components/ui";
@@ -13,10 +13,10 @@ import { releaseCatalogCopy } from "@/features/release-catalog/releaseCatalogMod
 import {
   getManagedElsaInstance,
   getManagedElsaInstanceHealth,
-  getManagedElsaOnboardingOptions,
   getManagedElsaOperation,
   updateManagedElsaInstanceIntent
 } from "@/features/managed-elsa/managedElsaApi";
+import { useManagedElsaOnboardingOptions } from "@/features/managed-elsa/useManagedElsaOnboardingOptions";
 import {
   openManagedElsaInstance
 } from "@/features/managed-elsa/ManagedElsaInstancesPage";
@@ -45,6 +45,7 @@ export function ApplyReleasePage() {
   const queryClient = useQueryClient();
   const [releaseKey, setReleaseKey] = useState("");
   const [showPreview, setShowPreview] = useState(false);
+  const [releaseTouched, setReleaseTouched] = useState(false);
   const [previewConsent, setPreviewConsent] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [idempotencyKey] = useState(() => crypto.randomUUID());
@@ -60,13 +61,8 @@ export function ApplyReleasePage() {
   });
   const canShowPreview = selectedWorkspace?.role === "Owner";
   const includePreview = canShowPreview && showPreview;
-  const options = useQuery({
-    queryKey: queryKeys.managedElsaOnboardingOptions(selectedWorkspaceId, includePreview),
-    queryFn: () => getManagedElsaOnboardingOptions(selectedWorkspaceId, { includePreview }),
-    enabled: Boolean(selectedWorkspaceId),
-    retry: false
-  });
-  const choices = useMemo(() => onboardingChoices(options.data, { includePreview }), [includePreview, options.data]);
+  const options = useManagedElsaOnboardingOptions(selectedWorkspaceId, includePreview);
+  const choices = options.choices;
   const selected = choices.find((choice) => onboardingChoiceKey(choice) === releaseKey) ?? null;
   const previewRequired = Boolean(selected?.previewManifestDigest);
   const requestedNotAdmitted = Boolean(requestedVersion) && !choices.some((choice) => choice.version === requestedVersion);
@@ -76,10 +72,16 @@ export function ApplyReleasePage() {
       if (releaseKey) setReleaseKey("");
       return;
     }
+    if (!releaseTouched) {
+      const preferred = preferredOnboardingChoice(choices, requestedVersion);
+      const next = preferred ? onboardingChoiceKey(preferred) : "";
+      if (next !== releaseKey) setReleaseKey(next);
+      return;
+    }
     if (choices.some((choice) => onboardingChoiceKey(choice) === releaseKey)) return;
     const preferred = preferredOnboardingChoice(choices, requestedVersion);
     setReleaseKey(preferred ? onboardingChoiceKey(preferred) : "");
-  }, [choices, releaseKey, requestedVersion]);
+  }, [choices, releaseKey, releaseTouched, requestedVersion]);
 
   useEffect(() => {
     setPreviewConsent(false);
@@ -192,7 +194,10 @@ export function ApplyReleasePage() {
               label="Admitted release"
               choices={choices}
               value={releaseKey}
-              onChange={setReleaseKey}
+              onChange={(value) => {
+                setReleaseTouched(true);
+                setReleaseKey(value);
+              }}
               disabled={applyBlocked}
               canShowPreview={canShowPreview}
               showPreview={showPreview}
@@ -200,6 +205,7 @@ export function ApplyReleasePage() {
                 setShowPreview(value);
                 setPreviewConsent(false);
               }}
+              previewError={options.previewError}
             />
 
             {selected ? (
