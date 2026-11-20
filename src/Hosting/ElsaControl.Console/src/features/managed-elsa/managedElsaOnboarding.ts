@@ -1,15 +1,31 @@
 import type { ManagedElsaInstanceIntent, ManagedElsaOnboardingOptions, ManagedElsaReleaseOption } from "@/features/managed-elsa/managedElsaModels";
 
-export function onboardingChoices(options: ManagedElsaOnboardingOptions | undefined) {
-  const entries = [
-    ...(options?.releases ?? []).map((entry) => ({ ...entry, previewManifestDigest: null as string | null })),
-    ...(options?.previewReleases ?? [])
+export type OnboardingChoice = ManagedElsaReleaseOption & {
+  previewManifestDigest: string | null;
+  recommended: boolean;
+};
+
+export function onboardingChoices(
+  options: ManagedElsaOnboardingOptions | undefined,
+  { includePreview = false }: { includePreview?: boolean } = {}
+): OnboardingChoice[] {
+  const entries: OnboardingChoice[] = [
+    ...(options?.releases ?? []).map((entry) => ({
+      ...entry,
+      previewManifestDigest: null as string | null,
+      recommended: Boolean(entry.recommended)
+    })),
+    ...(includePreview ? options?.previewReleases ?? [] : [])
       .filter((entry) => /^sha256:[0-9a-f]{64}$/.test(entry.manifestDigest))
-      .map(({ manifestDigest, ...entry }) => ({ ...entry, previewManifestDigest: manifestDigest }))
+      .map(({ manifestDigest, ...entry }) => ({
+        ...entry,
+        previewManifestDigest: manifestDigest,
+        recommended: false
+      }))
   ];
   const groups = new Map<string, typeof entries>();
   for (const entry of entries) {
-    const key = choiceKey(entry.distributionId, entry.releaseLine, entry.version, entry.channel, entry.topologyId);
+    const key = choiceIdentityKey(entry);
     const group = groups.get(key) ?? [];
     group.push(entry);
     groups.set(key, group);
@@ -21,6 +37,18 @@ export function onboardingChoices(options: ManagedElsaOnboardingOptions | undefi
     if (supported) return [supported];
     return group.every((entry) => entry.previewManifestDigest === group[0].previewManifestDigest) ? [group[0]] : [];
   });
+}
+
+export function preferredOnboardingChoice(choices: OnboardingChoice[], requestedVersion = "") {
+  if (requestedVersion) {
+    const requested = choices.find((choice) => choice.version === requestedVersion);
+    if (requested) return requested;
+  }
+  return choices.find((choice) => choice.recommended) ?? null;
+}
+
+export function onboardingChoiceKey(choice: OnboardingChoice) {
+  return `${choice.distributionId}|${choice.releaseLine}|${choice.version}|${choice.channel}|${choice.topologyId}|${choice.previewManifestDigest ?? ""}`;
 }
 
 export function buildManagedElsaIntent(
@@ -57,8 +85,8 @@ export function buildManagedElsaIntent(
   };
 }
 
-function choiceKey(distributionId: string, releaseLine: string, version: string, channel: string, topologyId: string) {
-  return `${distributionId}|${releaseLine}|${version}|${channel}|${topologyId}`;
+function choiceIdentityKey(choice: Pick<OnboardingChoice, "distributionId" | "releaseLine" | "version" | "channel" | "topologyId">) {
+  return `${choice.distributionId}|${choice.releaseLine}|${choice.version}|${choice.channel}|${choice.topologyId}`;
 }
 
 export function slugify(value: string) {

@@ -19,11 +19,19 @@ import { getManagedElsaOnboardingOptions, getManagedElsaOperation } from "@/feat
 import { getBuilderCatalog, listRuntimeConfigurations } from "@/features/runtime-builder/runtimeBuilderApi";
 import { ApiError } from "@/lib/api/httpClient";
 
-const workspaceState = vi.hoisted(() => ({ selectedWorkspaceId: "workspace-1" }));
+const workspaceState = vi.hoisted(() => ({
+  selectedWorkspaceId: "workspace-1",
+  selectedWorkspace: { id: "workspace-1", name: "Northstar", kind: "Shared", role: "Owner" }
+}));
 const provisioningState = vi.hoisted(() => ({ available: true, pending: false, error: null as Error | null }));
 
 vi.mock("@/app/WorkspaceContextProvider", () => ({
-  useWorkspaceContext: () => ({ selectedWorkspaceId: workspaceState.selectedWorkspaceId, isLoading: false, isError: false })
+  useWorkspaceContext: () => ({
+    selectedWorkspaceId: workspaceState.selectedWorkspaceId,
+    selectedWorkspace: workspaceState.selectedWorkspace,
+    isLoading: false,
+    isError: false
+  })
 }));
 
 vi.mock("@/features/engine-provisioning/useEngineProvisioningProviders", () => ({
@@ -59,7 +67,7 @@ vi.mock("@/features/runtime-builder/runtimeBuilderApi", () => ({
 }));
 
 const optionsFixture: ManagedElsaOnboardingOptions = {
-  releases: [{ distributionId: "elsa", releaseLine: "4.x", version: "4.0.0", channel: "stable", topologyId: "managed" }],
+  releases: [{ distributionId: "elsa", releaseLine: "4.x", version: "4.0.0", channel: "stable", topologyId: "managed", recommended: true }],
   launchProfile: {
     name: "West Europe Dedicated",
     description: "Managed hosting in West Europe.",
@@ -135,6 +143,26 @@ describe("EngineProvisioningPage", () => {
     vi.clearAllMocks();
   });
 
+  it("preselects the recommended Supported release and keeps Preview hidden", async () => {
+    vi.mocked(getManagedElsaOnboardingOptions).mockResolvedValue({
+      ...optionsFixture,
+      releases: [
+        { distributionId: "elsa", releaseLine: "4.x", version: "4.2.0", channel: "stable", topologyId: "managed", recommended: true },
+        { distributionId: "elsa", releaseLine: "4.x", version: "4.1.0", channel: "stable", topologyId: "managed" },
+        { distributionId: "elsa", releaseLine: "4.x", version: "4.0.0", channel: "stable", topologyId: "managed" }
+      ],
+      previewReleases: [{ distributionId: "elsa", releaseLine: "5.x", version: "5.0.0-preview.1", channel: "preview", topologyId: "managed", manifestDigest: `sha256:${"a".repeat(64)}` }]
+    });
+    renderPage();
+
+    const picker = await screen.findByRole("combobox", { name: "Release" });
+    expect(within(picker).getAllByRole("option")).toHaveLength(3);
+    expect(picker).toHaveDisplayValue(/4.2.0/);
+    expect(screen.getAllByText("Recommended").length).toBeGreaterThanOrEqual(1);
+    expect(within(picker).queryByRole("option", { name: /5.0.0-preview.1/ })).not.toBeInTheDocument();
+    expect(getManagedElsaOnboardingOptions).toHaveBeenCalledWith("workspace-1", { includePreview: false });
+  });
+
   it("previews, accepts, polls, and links the registered engine", async () => {
     const user = userEvent.setup();
     renderPage();
@@ -174,16 +202,26 @@ describe("EngineProvisioningPage", () => {
   });
 
   it("requires explicit Preview consent before server preview", async () => {
-    vi.mocked(getManagedElsaOnboardingOptions).mockResolvedValue({
+    vi.mocked(getManagedElsaOnboardingOptions).mockImplementation(async (_workspaceId, request) => ({
       ...optionsFixture,
       releases: [],
-      previewReleases: [{ distributionId: "elsa", releaseLine: "5.x", version: "5.0.0-preview.1", channel: "preview", topologyId: "managed", manifestDigest: `sha256:${"a".repeat(64)}` }]
-    });
+      previewReleases: request?.includePreview
+        ? [{ distributionId: "elsa", releaseLine: "5.x", version: "5.0.0-preview.1", channel: "preview", topologyId: "managed", manifestDigest: `sha256:${"a".repeat(64)}` }]
+        : null
+    }));
     const user = userEvent.setup();
     renderPage();
 
     await screen.findByRole("heading", { name: "Provision an engine" });
+    const releasePicker = screen.getByRole("combobox", { name: "Release" });
+    expect(screen.getByRole("checkbox", { name: /Show Preview releases/ })).not.toBeChecked();
+    expect(within(releasePicker).queryByRole("option", { name: /5.0.0-preview.1/ })).not.toBeInTheDocument();
     await user.type(screen.getByRole("textbox", { name: "Engine name" }), "Preview engine");
+
+    await user.click(screen.getByRole("checkbox", { name: /Show Preview releases/ }));
+    const previewPicker = await screen.findByRole("combobox", { name: "Release" });
+    const previewOption = await within(previewPicker).findByRole("option", { name: /5.0.0-preview.1/ });
+    await user.selectOptions(previewPicker, previewOption);
     const consent = screen.getByRole("checkbox", { name: /Use this Preview release/ });
     expect(consent).not.toBeChecked();
     expect(screen.getByRole("button", { name: "Review deployment" })).toBeDisabled();
@@ -193,6 +231,7 @@ describe("EngineProvisioningPage", () => {
     await waitFor(() => expect(previewEngineProvisioning).toHaveBeenCalledWith("workspace-1", expect.objectContaining({
       intent: expect.objectContaining({ release: expect.objectContaining({ previewManifestDigest: `sha256:${"a".repeat(64)}` }) })
     })));
+    expect(getManagedElsaOnboardingOptions).toHaveBeenCalledWith("workspace-1", { includePreview: true });
   });
 
   it("retries uncertain acceptance with the same key and creates a new key for a revised review", async () => {

@@ -43,9 +43,13 @@ export async function listManagedElsaInstances(workspaceId: string) {
   };
 }
 
-export function getManagedElsaOnboardingOptions(workspaceId: string) {
+export function getManagedElsaOnboardingOptions(
+  workspaceId: string,
+  options?: { includePreview?: boolean }
+) {
+  const query = options?.includePreview ? "?includePreview=true" : "";
   return apiRequest<ManagedElsaOnboardingOptions>(
-    `/api/workspaces/${encodeURIComponent(workspaceId)}/instances/onboarding-options`
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/instances/onboarding-options${query}`
   );
 }
 

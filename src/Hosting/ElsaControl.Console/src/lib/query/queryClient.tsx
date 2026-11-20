@@ -63,7 +63,10 @@ export const queryKeys = {
   runtimeConfiguration: (workspaceId: string, configurationId: string) => ["runtime-builder", workspaceId, "configurations", configurationId] as const,
   engineProvisioningProviders: (workspaceId: string) => ["engine-provisioning", workspaceId, "providers"] as const,
   engineProvisioningTargets: (workspaceId: string) => ["engine-provisioning", workspaceId, "targets"] as const,
-  managedElsaOnboardingOptions: (workspaceId: string) => ["managed-elsa", workspaceId, "onboarding-options"] as const,
+  managedElsaOnboardingOptions: (workspaceId: string, includePreview?: boolean) =>
+    includePreview === undefined
+      ? (["managed-elsa", workspaceId, "onboarding-options"] as const)
+      : (["managed-elsa", workspaceId, "onboarding-options", includePreview] as const),
   managedElsaInstances: (workspaceId: string) => ["managed-elsa", workspaceId, "instances"] as const,
   managedElsaInstance: (workspaceId: string, instanceId: string) => ["managed-elsa", workspaceId, "instances", instanceId] as const,
   releaseCatalog: (workspaceId: string, releaseLine = "", lifecycle = "", topologyId = "") =>

@@ -3,7 +3,8 @@ import { Check, ExternalLink, LoaderCircle, ShieldAlert } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useWorkspaceContext } from "@/app/WorkspaceContextProvider";
-import { Button, EmptyState, Select, buttonClassName } from "@/components/ui";
+import { Button, EmptyState, buttonClassName } from "@/components/ui";
+import { ReleasePicker } from "@/features/managed-elsa/ReleasePicker";
 import { RequestStateView } from "@/components/states/RequestStateViews";
 import { ApiError } from "@/lib/api/httpClient";
 import { queryKeys } from "@/lib/query/queryClient";
@@ -32,7 +33,7 @@ import {
   type ManagedElsaInstanceIntent,
   type ManagedElsaOnboardingOptions
 } from "@/features/managed-elsa/managedElsaModels";
-import { buildManagedElsaIntent, onboardingChoices } from "@/features/managed-elsa/managedElsaOnboarding";
+import { buildManagedElsaIntent, onboardingChoiceKey, onboardingChoices, preferredOnboardingChoice } from "@/features/managed-elsa/managedElsaOnboarding";
 
 type ApplyRelease = ReturnType<typeof onboardingChoices>[number];
 
@@ -40,9 +41,10 @@ export function ApplyReleasePage() {
   const { instanceId = "" } = useParams();
   const [searchParams] = useSearchParams();
   const requestedVersion = searchParams.get("requestedVersion") ?? searchParams.get("apply") ?? "";
-  const { selectedWorkspaceId, isLoading: workspaceLoading } = useWorkspaceContext();
+  const { selectedWorkspaceId, selectedWorkspace, isLoading: workspaceLoading } = useWorkspaceContext();
   const queryClient = useQueryClient();
   const [releaseKey, setReleaseKey] = useState("");
+  const [showPreview, setShowPreview] = useState(false);
   const [previewConsent, setPreviewConsent] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [idempotencyKey] = useState(() => crypto.randomUUID());
@@ -56,21 +58,27 @@ export function ApplyReleasePage() {
     retry: false,
     refetchInterval: accepted ? 2000 : false
   });
+  const canShowPreview = selectedWorkspace?.role === "Owner";
+  const includePreview = canShowPreview && showPreview;
   const options = useQuery({
-    queryKey: queryKeys.managedElsaOnboardingOptions(selectedWorkspaceId),
-    queryFn: () => getManagedElsaOnboardingOptions(selectedWorkspaceId),
+    queryKey: queryKeys.managedElsaOnboardingOptions(selectedWorkspaceId, includePreview),
+    queryFn: () => getManagedElsaOnboardingOptions(selectedWorkspaceId, { includePreview }),
     enabled: Boolean(selectedWorkspaceId),
     retry: false
   });
-  const choices = useMemo(() => onboardingChoices(options.data), [options.data]);
-  const selected = choices.find((choice) => choiceKey(choice) === releaseKey) ?? null;
+  const choices = useMemo(() => onboardingChoices(options.data, { includePreview }), [includePreview, options.data]);
+  const selected = choices.find((choice) => onboardingChoiceKey(choice) === releaseKey) ?? null;
   const previewRequired = Boolean(selected?.previewManifestDigest);
   const requestedNotAdmitted = Boolean(requestedVersion) && !choices.some((choice) => choice.version === requestedVersion);
 
   useEffect(() => {
-    if (!choices.length || releaseKey) return;
-    const preferred = choices.find((choice) => choice.version === requestedVersion) ?? choices[0];
-    if (preferred) setReleaseKey(choiceKey(preferred));
+    if (!choices.length) {
+      if (releaseKey) setReleaseKey("");
+      return;
+    }
+    if (choices.some((choice) => onboardingChoiceKey(choice) === releaseKey)) return;
+    const preferred = preferredOnboardingChoice(choices, requestedVersion);
+    setReleaseKey(preferred ? onboardingChoiceKey(preferred) : "");
   }, [choices, releaseKey, requestedVersion]);
 
   useEffect(() => {
@@ -81,7 +89,7 @@ export function ApplyReleasePage() {
     mutationFn: () => {
       if (!selected || !options.data || !instance.data)
         throw new Error("apply-selection-unavailable");
-      if (requestedNotAdmitted || !isAdmittedChoice(selected, options.data))
+      if (requestedNotAdmitted || !isAdmittedChoice(selected, options.data, includePreview))
         throw new ApplyNotAdmittedError();
       if (!instance.data.eTag)
         throw new Error("instance.if-match-required");
@@ -180,23 +188,19 @@ export function ApplyReleasePage() {
               apply.mutate();
             }}
           >
-            <label className="block space-y-1.5 text-sm">
-              <span className="font-medium">Admitted release</span>
-              <Select
-                aria-label="Admitted release"
-                className="w-full"
-                value={releaseKey}
-                onChange={(event) => setReleaseKey(event.target.value)}
-                disabled={applyBlocked || choices.length === 0}
-              >
-                {choices.length === 0 ? <option value="">No admitted releases</option> : null}
-                {choices.map((choice) => (
-                  <option key={choiceKey(choice)} value={choiceKey(choice)}>
-                    {choice.version} · {choice.channel} · {choice.topologyId}
-                  </option>
-                ))}
-              </Select>
-            </label>
+            <ReleasePicker
+              label="Admitted release"
+              choices={choices}
+              value={releaseKey}
+              onChange={setReleaseKey}
+              disabled={applyBlocked}
+              canShowPreview={canShowPreview}
+              showPreview={showPreview}
+              onShowPreviewChange={(value) => {
+                setShowPreview(value);
+                setPreviewConsent(false);
+              }}
+            />
 
             {selected ? (
               <div className="rounded-ui border border-primary/20 bg-primary/5 p-4 text-sm">
@@ -224,7 +228,7 @@ export function ApplyReleasePage() {
               </label>
             ) : null}
 
-            {requestedNotAdmitted || choices.length === 0 ? (
+            {requestedNotAdmitted || (choices.length === 0 && (showPreview || !canShowPreview)) ? (
               <div role="alert" className="flex items-start gap-3 rounded-ui border border-warning/40 bg-warning/10 p-4 text-sm">
                 <ShieldAlert aria-hidden className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
                 <div>
@@ -394,12 +398,8 @@ function applyIntent(
   };
 }
 
-function isAdmittedChoice(selected: ApplyRelease, options: ManagedElsaOnboardingOptions) {
-  return onboardingChoices(options).some((choice) => choiceKey(choice) === choiceKey(selected));
-}
-
-function choiceKey(choice: ApplyRelease) {
-  return `${choice.distributionId}|${choice.releaseLine}|${choice.version}|${choice.channel}|${choice.topologyId}|${choice.previewManifestDigest ?? ""}`;
+function isAdmittedChoice(selected: ApplyRelease, options: ManagedElsaOnboardingOptions, includePreview: boolean) {
+  return onboardingChoices(options, { includePreview }).some((choice) => onboardingChoiceKey(choice) === onboardingChoiceKey(selected));
 }
 
 function isTerminal(state: string) {
