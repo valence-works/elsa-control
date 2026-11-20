@@ -52,6 +52,17 @@ public interface IAzureProviderOperationStore
         CancellationToken cancellationToken = default);
 
     Task<AzureProviderOperation?> GetAsync(Guid workspaceId, Guid operationId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// True when any provider operation row exists for the workspace and instance,
+    /// matching the never-submitted supersede provenance predicate. Lightweight
+    /// stores fail closed by reporting provenance present.
+    /// </summary>
+    Task<bool> HasAnyForInstanceAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult(true);
     /// <summary>
     /// Lists accepted, queued, and entitlement-held provider operations that are not currently
     /// leased. Recovery-required rows are durable but excluded from the automatic queue before

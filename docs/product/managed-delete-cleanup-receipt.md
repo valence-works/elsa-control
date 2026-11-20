@@ -22,6 +22,11 @@ A successful response requires:
   observed Deleted, with its last operation equal to the requested Delete.
 - The exact organization's successful lifecycle Delete and matching completion
   and tombstone timestamps.
+- Either the provider-backed path or the local-absent path below. There is no
+  fallback from one to the other.
+
+Provider-backed receipts additionally require:
+
 - Exactly one retained provider assignment for that organization, workspace and
   instance. Deletion clears the instance's placement reference, so the retained
   assignment is read independently. Ambiguity is refused.
@@ -30,6 +35,15 @@ A successful response requires:
   owner, workload, assignment and provider scope.
 - Terminal successful provider cleanup with CleanupVerified, no attempted step
   or endpoint, and both persisted inventories reduced to the owned group name.
+
+Local-absent receipts (`proofKind` `local-no-owned-resources`) apply only when
+the Delete finalized locally (`deletion.local.absent`) and the instance has
+zero `AzureProviderResourceAssignments` and zero `AzureProviderOperations` for
+that workspace and instance. They attest that no provider Delete ran:
+`providerDeleteSucceeded` is false and `providerCompletedAt` is null.
+`providerAbsenceVerifiedAtCompletion` is true because that empty provenance
+was verified in the completion transaction. Any Azure provenance, or any other
+deletion diagnostic, stays on the provider-backed path.
 
 Missing, mismatched, unfinished or ambiguous evidence returns an opaque 404,
 without a partial receipt. Unsupported lightweight stores return no receipt.
@@ -43,10 +57,16 @@ resource names, scopes, operation keys, credentials and provider diagnostics.
 Retain even the digest and timestamps privately; public Issue Bus evidence needs
 only the status class and sanitized result.
 
-`providerAbsenceVerifiedAtCompletion` attests to the trusted provider runner's
-absence verification at Delete completion. **It is not a fresh Azure Resource
-Manager observation.** The digest binds retained evidence; it is not a signature
-and does not authorize mutation or prove present absence by itself.
+`providerAbsenceVerifiedAtCompletion` attests to absence verification at Delete
+completion: the trusted provider runner's CleanupVerified result on the
+provider-backed path, or empty Azure provenance on the local-absent path.
+**It is not a fresh Azure Resource Manager observation.** The digest binds
+retained evidence; it is not a signature and does not authorize mutation or
+prove present absence by itself. Provider-backed receipts use canonical prefix
+`elsa-managed-delete-cleanup-receipt-v1`. Local receipts use
+`elsa-managed-delete-cleanup-receipt-local-v1` and set `proofKind` to
+`local-no-owned-resources`. Provider-backed receipts set `proofKind` to
+`provider-confirmed-absent`.
 
 A coordinator requiring fresh provider absence still needs an independently
 authorized exact-resource observation. It also needs its exact Stripe cleanup
@@ -75,12 +95,15 @@ invoking the configured provider observer. They are unavailable when the concret
 Azure worker runner is not composed. No credentials, provider scope or resource
 name is accepted from the caller.
 
-The observer independently validates the terminal provider Delete, lifecycle key,
-retained assignment and current execution authority. It issues one exact owned
-resource-group existence query using the existing configured runner identity;
-it does not log in, retry deletion, run cleanup or change provider state. A
-successful parsed `false` is `Absent`, `true` is `Present`; failed commands,
-malformed output and authority drift are `Unknown`. Cancellation remains
+Provider-backed observations independently validate the terminal provider Delete,
+lifecycle key, retained assignment and current execution authority, then issue
+one exact owned resource-group existence query. Local-absent observations issue
+one fresh existence query for the deterministic current-version resource group
+named from the configured prefix and instance id in the configured workload
+subscription. Neither path logs in, retries deletion, runs cleanup or changes
+provider state. A successful parsed `false` is `Absent`, `true` is `Present`;
+failed commands, malformed output and authority drift are `Unknown`. Local
+receipts never return `Absent` without that fresh read. Cancellation remains
 cancellation. Only successful observations carry an evidence digest.
 
 The response contains the bounded observation state, time, fixed reason code,

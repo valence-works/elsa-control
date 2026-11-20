@@ -146,25 +146,10 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             return FreshResourceGroupObservationUnknown(
                 AzureProviderFreshResourceGroupObservationReasonCodes.AuthorityMismatch);
 
-        var request = new AzureCommandProcessRequest(
-            _options.AzureCliPath,
-            [
-                AzureCommandArgument.Safe("group"),
-                AzureCommandArgument.Safe("exists"),
-                AzureCommandArgument.Safe("--subscription"),
-                AzureCommandArgument.Safe(_scope.SubscriptionId),
-                AzureCommandArgument.Safe("--name"),
-                AzureCommandArgument.Safe(assignment.ResourceGroupName),
-                AzureCommandArgument.Safe("--output"),
-                AzureCommandArgument.Safe("tsv"),
-                AzureCommandArgument.Safe("--only-show-errors")
-            ],
-            workingDirectory: _options.TemplateRoot);
-
         AzureCommandProcessResult<SafeValue<bool>> query;
         try
         {
-            query = await _process.ExecuteAsync(request, ParseBooleanAsync, cancellationToken);
+            query = await QueryResourceGroupExistsAsync(assignment.ResourceGroupName, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -210,6 +195,117 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             observedAt,
             AzureProviderFreshResourceGroupObservationReasonCodes.Observed,
             digest);
+    }
+
+    public async Task<AzureProviderFreshResourceGroupObservation> ObserveDeterministicResourceGroupAsync(
+        Guid workspaceId,
+        Guid organizationId,
+        Guid instanceId,
+        Guid lifecycleDeleteOperationId,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (workspaceId == Guid.Empty || organizationId == Guid.Empty ||
+            instanceId == Guid.Empty || lifecycleDeleteOperationId == Guid.Empty)
+            return FreshResourceGroupObservationUnknown(
+                AzureProviderFreshResourceGroupObservationReasonCodes.BindingMismatch);
+
+        string resourceGroupName;
+        string templateFingerprint;
+        try
+        {
+            resourceGroupName = AzureProviderResourceAssignmentNaming.ResourceGroupName(
+                _scope.ResourceGroupName, instanceId, AzureProviderResourceAssignmentNaming.CurrentVersion);
+            _scope.Validate();
+            templateFingerprint = _options.ComputeTemplateAuthorityFingerprint();
+        }
+        catch (Exception)
+        {
+            return FreshResourceGroupObservationUnknown(
+                AzureProviderFreshResourceGroupObservationReasonCodes.BindingMismatch);
+        }
+
+        AzureCommandProcessResult<SafeValue<bool>> query;
+        try
+        {
+            query = await QueryResourceGroupExistsAsync(resourceGroupName, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return FreshResourceGroupObservationUnknown(
+                AzureProviderFreshResourceGroupObservationReasonCodes.ProviderUnavailable,
+                _timeProvider.GetUtcNow());
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        var observedAt = _timeProvider.GetUtcNow();
+
+        string currentTemplateFingerprint;
+        try
+        {
+            _scope.Validate();
+            currentTemplateFingerprint = _options.ComputeTemplateAuthorityFingerprint();
+        }
+        catch (Exception)
+        {
+            return FreshResourceGroupObservationUnknown(
+                AzureProviderFreshResourceGroupObservationReasonCodes.AuthorityMismatch,
+                observedAt);
+        }
+        if (!string.Equals(templateFingerprint, currentTemplateFingerprint, StringComparison.Ordinal))
+            return FreshResourceGroupObservationUnknown(
+                AzureProviderFreshResourceGroupObservationReasonCodes.AuthorityMismatch,
+                observedAt);
+
+        if (!query.Succeeded || query.Value is null)
+            return FreshResourceGroupObservationUnknown(
+                query.FailureKind == AzureCommandProcessFailureKind.InvalidOutput
+                    ? AzureProviderFreshResourceGroupObservationReasonCodes.OutputInvalid
+                    : AzureProviderFreshResourceGroupObservationReasonCodes.ProviderUnavailable,
+                observedAt);
+
+        var state = query.Value.Value
+            ? AzureProviderFreshResourceGroupState.Present
+            : AzureProviderFreshResourceGroupState.Absent;
+        var digest = ComputeLocalFreshResourceGroupObservationDigest(
+            workspaceId,
+            organizationId,
+            instanceId,
+            lifecycleDeleteOperationId,
+            resourceGroupName,
+            state,
+            observedAt);
+        return new(
+            state,
+            observedAt,
+            AzureProviderFreshResourceGroupObservationReasonCodes.Observed,
+            digest);
+    }
+
+    private Task<AzureCommandProcessResult<SafeValue<bool>>> QueryResourceGroupExistsAsync(
+        string resourceGroupName,
+        CancellationToken cancellationToken)
+    {
+        var request = new AzureCommandProcessRequest(
+            _options.AzureCliPath,
+            [
+                AzureCommandArgument.Safe("group"),
+                AzureCommandArgument.Safe("exists"),
+                AzureCommandArgument.Safe("--subscription"),
+                AzureCommandArgument.Safe(_scope.SubscriptionId),
+                AzureCommandArgument.Safe("--name"),
+                AzureCommandArgument.Safe(resourceGroupName),
+                AzureCommandArgument.Safe("--output"),
+                AzureCommandArgument.Safe("tsv"),
+                AzureCommandArgument.Safe("--only-show-errors")
+            ],
+            workingDirectory: _options.TemplateRoot);
+        return _process.ExecuteAsync(request, ParseBooleanAsync, cancellationToken);
     }
 
     private bool TryCreateFreshResourceGroupObservationContext(
@@ -320,6 +416,31 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             delete.PlanFingerprint,
             delete.TemplateFingerprint,
             delete.CompletedAt!.Value.ToUniversalTime().UtcTicks.ToString(CultureInfo.InvariantCulture),
+            state.ToString(),
+            observedAt.ToUniversalTime().UtcTicks.ToString(CultureInfo.InvariantCulture)
+        ]);
+        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
+    }
+
+    private string ComputeLocalFreshResourceGroupObservationDigest(
+        Guid workspaceId,
+        Guid organizationId,
+        Guid instanceId,
+        Guid lifecycleDeleteOperationId,
+        string resourceGroupName,
+        AzureProviderFreshResourceGroupState state,
+        DateTimeOffset observedAt)
+    {
+        var canonical = string.Join('\n',
+        [
+            "elsa-fresh-resource-group-observation-local-v1",
+            workspaceId.ToString("D"),
+            organizationId.ToString("D"),
+            instanceId.ToString("D"),
+            lifecycleDeleteOperationId.ToString("D"),
+            _scope.SubscriptionId,
+            resourceGroupName,
+            AzureProviderResourceAssignmentNaming.CurrentVersion.ToString(CultureInfo.InvariantCulture),
             state.ToString(),
             observedAt.ToUniversalTime().UtcTicks.ToString(CultureInfo.InvariantCulture)
         ]);

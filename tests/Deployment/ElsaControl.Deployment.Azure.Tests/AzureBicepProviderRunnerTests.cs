@@ -238,6 +238,74 @@ public sealed partial class AzureBicepProviderRunnerTests : IDisposable
             Assert.Empty(process.Calls);
     }
 
+    [Theory]
+    [InlineData("false", AzureProviderFreshResourceGroupState.Absent)]
+    [InlineData("true", AzureProviderFreshResourceGroupState.Present)]
+    public async Task Deterministic_resource_group_observation_uses_one_exact_current_version_read(
+        string output,
+        AzureProviderFreshResourceGroupState expectedState)
+    {
+        var workspaceId = Guid.NewGuid();
+        var organizationId = Guid.NewGuid();
+        var instanceId = Guid.NewGuid();
+        var lifecycleDeleteId = Guid.NewGuid();
+        var expectedGroup = AzureProviderResourceAssignmentNaming.ResourceGroupName(
+            _fixture.Scope.ResourceGroupName, instanceId, AzureProviderResourceAssignmentNaming.CurrentVersion);
+        var process = new FakeCommandProcess();
+        var clock = new SteppingTimeProvider(TimeSpan.FromSeconds(7));
+        process.Success(IsFreshResourceGroupExists, output, after: () => _ = clock.GetUtcNow());
+        var runner = new AzureBicepProviderRunner(_fixture.Options, _fixture.Scope, process, timeProvider: clock);
+
+        var result = await runner.ObserveDeterministicResourceGroupAsync(
+            workspaceId, organizationId, instanceId, lifecycleDeleteId);
+
+        Assert.Equal(expectedState, result.State);
+        Assert.Equal(AzureProviderFreshResourceGroupObservationReasonCodes.Observed, result.ReasonCode);
+        Assert.Equal(new DateTimeOffset(2026, 9, 24, 0, 33, 7, TimeSpan.Zero), result.ObservedAt);
+        Assert.Matches("^[0-9a-f]{64}$", result.EvidenceDigest);
+        var call = Assert.Single(process.Calls);
+        Assert.Equal(
+        [
+            "group", "exists", "--subscription", _fixture.Scope.SubscriptionId,
+            "--name", expectedGroup, "--output", "tsv", "--only-show-errors"
+        ], call);
+        Assert.DoesNotContain("create", call);
+        Assert.DoesNotContain("delete", call);
+        Assert.DoesNotContain(expectedGroup, JsonSerializer.Serialize(result));
+    }
+
+    [Fact]
+    public async Task Deterministic_resource_group_observation_discards_result_if_template_authority_changes_during_query()
+    {
+        var instanceId = Guid.NewGuid();
+        var process = new FakeCommandProcess();
+        process.Success(IsFreshResourceGroupExists, "false", after: () =>
+            File.WriteAllText(Path.Combine(_fixture.TemplateRoot, "main.bicep"), "targetScope = 'subscription'"));
+
+        var result = await _fixture.Runner(process).ObserveDeterministicResourceGroupAsync(
+            Guid.NewGuid(), Guid.NewGuid(), instanceId, Guid.NewGuid());
+
+        Assert.Equal(AzureProviderFreshResourceGroupState.Unknown, result.State);
+        Assert.Equal(AzureProviderFreshResourceGroupObservationReasonCodes.AuthorityMismatch, result.ReasonCode);
+        Assert.NotNull(result.ObservedAt);
+        Assert.Null(result.EvidenceDigest);
+        Assert.Single(process.Calls);
+    }
+
+    [Fact]
+    public async Task Deterministic_resource_group_observation_rejects_empty_identity_before_cli()
+    {
+        var process = new FakeCommandProcess();
+
+        var result = await _fixture.Runner(process).ObserveDeterministicResourceGroupAsync(
+            Guid.Empty, Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid());
+
+        Assert.Equal(AzureProviderFreshResourceGroupState.Unknown, result.State);
+        Assert.Equal(AzureProviderFreshResourceGroupObservationReasonCodes.BindingMismatch, result.ReasonCode);
+        Assert.Null(result.ObservedAt);
+        Assert.Empty(process.Calls);
+    }
+
     private (AzureProviderOperation Delete, Guid LifecycleDeleteId, AzureProviderResourceAssignment Assignment)
         TerminalFreshDelete()
     {

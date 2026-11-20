@@ -12,12 +12,16 @@ namespace ElsaControl.Api.Workspace;
 /// </summary>
 internal static class ManagedElsaCleanupEvidenceReader
 {
+    internal const string ProviderConfirmedAbsentProofKind = "provider-confirmed-absent";
+    internal const string LocalNoOwnedResourcesProofKind = "local-no-owned-resources";
+
     internal sealed record HistoricalEvidence(
         ElsaInstance Instance,
         ElsaInstanceOperationSummary LifecycleOperation,
-        AzureProviderResourceAssignment Assignment,
-        AzureProviderOperation ProviderOperation,
-        string Digest);
+        AzureProviderResourceAssignment? Assignment,
+        AzureProviderOperation? ProviderOperation,
+        string Digest,
+        string ProofKind);
 
     internal enum FreshObservationFailure
     {
@@ -33,15 +37,27 @@ internal static class ManagedElsaCleanupEvidenceReader
         AzureProviderFreshResourceGroupObservation? Observation = null);
 
     internal static ManagedElsaCleanupReceiptResponse ToReceiptResponse(HistoricalEvidence evidence) =>
-        new(
-            InstanceTombstonePresent: true,
-            LifecycleDeleteSucceeded: true,
-            ProviderDeleteSucceeded: true,
-            ProviderAbsenceVerifiedAtCompletion: true,
-            ProviderCompletedAt: evidence.ProviderOperation.CompletedAt!.Value,
-            LifecycleCompletedAt: evidence.LifecycleOperation.CompletedAt!.Value,
-            TombstoneDeletedAt: evidence.Instance.DeletedAt!.Value,
-            ReceiptDigest: evidence.Digest);
+        evidence.ProofKind == LocalNoOwnedResourcesProofKind
+            ? new(
+                InstanceTombstonePresent: true,
+                LifecycleDeleteSucceeded: true,
+                ProviderDeleteSucceeded: false,
+                ProviderAbsenceVerifiedAtCompletion: true,
+                ProviderCompletedAt: null,
+                LifecycleCompletedAt: evidence.LifecycleOperation.CompletedAt!.Value,
+                TombstoneDeletedAt: evidence.Instance.DeletedAt!.Value,
+                ReceiptDigest: evidence.Digest,
+                ProofKind: LocalNoOwnedResourcesProofKind)
+            : new(
+                InstanceTombstonePresent: true,
+                LifecycleDeleteSucceeded: true,
+                ProviderDeleteSucceeded: true,
+                ProviderAbsenceVerifiedAtCompletion: true,
+                ProviderCompletedAt: evidence.ProviderOperation!.CompletedAt!.Value,
+                LifecycleCompletedAt: evidence.LifecycleOperation.CompletedAt!.Value,
+                TombstoneDeletedAt: evidence.Instance.DeletedAt!.Value,
+                ReceiptDigest: evidence.Digest,
+                ProofKind: ProviderConfirmedAbsentProofKind);
 
     internal static ManagedElsaFreshCleanupObservationResponse ToFreshObservationResponse(
         HistoricalEvidence evidence,
@@ -77,6 +93,18 @@ internal static class ManagedElsaCleanupEvidenceReader
             !IsHistoricalDeleteTombstone(instance, operation, operationId))
             return null;
 
+        var hasAzureProvenance =
+            await assignments.HasAnyForInstanceAsync(workspaceId, instanceId, cancellationToken) ||
+            await providerOperations.HasAnyForInstanceAsync(workspaceId, instanceId, cancellationToken);
+        if (IsLocalNoOwnedResourcesTombstone(operation, hasAzureProvenance))
+        {
+            return new(instance, operation, null, null,
+                ComputeLocalCleanupReceiptDigest(
+                    workspaceId, organizationId, instanceId, operationId,
+                    operation.CompletedAt!.Value, operation.DeletionDiagnosticCode!),
+                LocalNoOwnedResourcesProofKind);
+        }
+
         // Deletion clears the placement reference: require one exact retained owner.
         var ownerAssignments = await assignments.ListForInstanceAsync(
             workspaceId, organizationId, instanceId, cancellationToken);
@@ -94,7 +122,8 @@ internal static class ManagedElsaCleanupEvidenceReader
         return new(instance, operation, assignment, providerOperation!,
             ComputeHistoricalCleanupReceiptDigest(
                 workspaceId, organizationId, instanceId, operationId,
-                operation.CompletedAt!.Value, assignment, providerOperation!));
+                operation.CompletedAt!.Value, assignment, providerOperation!),
+            ProviderConfirmedAbsentProofKind);
     }
 
     internal static async Task<FreshObservationResult> ReadFreshObservationAsync(
@@ -121,8 +150,11 @@ internal static class ManagedElsaCleanupEvidenceReader
         AzureProviderFreshResourceGroupObservation observation;
         try
         {
-            observation = await observer.ObserveAsync(
-                evidence.ProviderOperation, operationId, evidence.Assignment, cancellationToken);
+            observation = evidence.ProofKind == LocalNoOwnedResourcesProofKind
+                ? await observer.ObserveDeterministicResourceGroupAsync(
+                    workspaceId, organizationId, instanceId, operationId, cancellationToken)
+                : await observer.ObserveAsync(
+                    evidence.ProviderOperation!, operationId, evidence.Assignment!, cancellationToken);
         }
         catch (Exception) when (!cancellationToken.IsCancellationRequested)
         {
@@ -157,6 +189,15 @@ internal static class ManagedElsaCleanupEvidenceReader
                Guid.TryParseExact(instance.LastOperationId?.Value, "D", out var lastOperationId) &&
                lastOperationId == operationId;
     }
+
+    private static bool IsLocalNoOwnedResourcesTombstone(
+        ElsaInstanceOperationSummary operation,
+        bool hasAzureProvenance) =>
+        !hasAzureProvenance &&
+        string.Equals(
+            operation.DeletionDiagnosticCode,
+            ManagedElsaReasonCodeCatalog.DeletionLocalAbsent,
+            StringComparison.Ordinal);
 
     private static bool IsHistoricalCleanupReceiptEligible(
         ElsaInstance instance,
@@ -213,6 +254,27 @@ internal static class ManagedElsaCleanupEvidenceReader
         ]);
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
     }
+
+    private static string ComputeLocalCleanupReceiptDigest(
+        Guid workspaceId,
+        Guid organizationId,
+        Guid instanceId,
+        Guid lifecycleOperationId,
+        DateTimeOffset lifecycleCompletedAt,
+        string diagnosticCode)
+    {
+        var canonical = string.Join('\n',
+        [
+            "elsa-managed-delete-cleanup-receipt-local-v1",
+            workspaceId.ToString("D"),
+            organizationId.ToString("D"),
+            instanceId.ToString("D"),
+            lifecycleOperationId.ToString("D"),
+            lifecycleCompletedAt.UtcTicks.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            diagnosticCode
+        ]);
+        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
+    }
 }
 
 /// <summary>
@@ -225,10 +287,11 @@ public sealed record ManagedElsaCleanupReceiptResponse(
     bool LifecycleDeleteSucceeded,
     bool ProviderDeleteSucceeded,
     bool ProviderAbsenceVerifiedAtCompletion,
-    DateTimeOffset ProviderCompletedAt,
+    DateTimeOffset? ProviderCompletedAt,
     DateTimeOffset LifecycleCompletedAt,
     DateTimeOffset TombstoneDeletedAt,
-    string ReceiptDigest);
+    string ReceiptDigest,
+    string ProofKind);
 
 /// <summary>Fresh ARM observation bound to the exact retained cleanup receipt.</summary>
 public sealed record ManagedElsaFreshCleanupObservationResponse(

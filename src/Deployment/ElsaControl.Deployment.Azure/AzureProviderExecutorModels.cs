@@ -274,6 +274,18 @@ public interface IAzureProviderFreshResourceGroupObserver
         Guid lifecycleDeleteOperationId,
         AzureProviderResourceAssignment assignment,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Performs one read-only ARM existence query for the deterministic current-version
+    /// resource group of <paramref name="instanceId"/> in the configured workload
+    /// subscription. Implementations must not retry cleanup or issue any provider mutation.
+    /// </summary>
+    Task<AzureProviderFreshResourceGroupObservation> ObserveDeterministicResourceGroupAsync(
+        Guid workspaceId,
+        Guid organizationId,
+        Guid instanceId,
+        Guid lifecycleDeleteOperationId,
+        CancellationToken cancellationToken = default);
 }
 
 public static class AzureProviderFreshResourceGroupObservationReasonCodes

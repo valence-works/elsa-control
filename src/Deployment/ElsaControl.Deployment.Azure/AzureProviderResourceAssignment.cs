@@ -147,6 +147,17 @@ public interface IAzureProviderResourceAssignmentStore
         CancellationToken cancellationToken = default) =>
         Task.FromResult<IReadOnlyList<AzureProviderResourceAssignment>>([]);
 
+    /// <summary>
+    /// True when any assignment row exists for the workspace and instance, matching
+    /// the never-submitted supersede provenance predicate. Lightweight stores fail
+    /// closed by reporting provenance present.
+    /// </summary>
+    Task<bool> HasAnyForInstanceAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult(true);
+
     Task<AzureProviderResourceAssignment?> RebindToCurrentScopeAsync(
         AzureProviderAssignmentScopeAuthority authority,
         DateTimeOffset now,
