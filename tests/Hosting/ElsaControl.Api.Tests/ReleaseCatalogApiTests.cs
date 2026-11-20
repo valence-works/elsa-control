@@ -146,6 +146,24 @@ public sealed class ReleaseCatalogApiTests
     }
 
     [Fact]
+    public async Task Admin_ingestion_refuses_a_prerelease_as_supported()
+    {
+        await using var app = CreateApplication(services =>
+        {
+            services.RemoveAll<IReleaseManifestSignatureVerifier>();
+            services.AddSingleton<IReleaseManifestSignatureVerifier, FixtureSignatureVerifier>();
+        }, catalogLifecycle: "supported");
+        await app.SeedAsync(_ => Task.CompletedTask);
+        var client = CreateAdminClient(app);
+
+        var response = await client.PostControlJsonAsync("/api/admin/release-catalog/manifests", Request());
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
+        Assert.Contains(GovernedReleaseCatalogLifecycle.SupportedPrereleaseCode, body, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Admin_ingestion_reports_a_request_specific_detail_for_a_missing_body()
     {
         await using var app = CreateApplication();
@@ -162,12 +180,14 @@ public sealed class ReleaseCatalogApiTests
         Assert.DoesNotContain("could not be admitted", body, StringComparison.OrdinalIgnoreCase);
     }
 
-    private static ControlApiTestApplication CreateApplication(Action<IServiceCollection>? configureServices = null) =>
+    private static ControlApiTestApplication CreateApplication(
+        Action<IServiceCollection>? configureServices = null,
+        string catalogLifecycle = "Preview") =>
         new(new Dictionary<string, string?>
         {
             [ReleaseCatalogAdmissionOptions.ConfigurationSection + ":ExpectedSignatureSubject"] = ProducerSigner,
             [ReleaseCatalogAdmissionOptions.ConfigurationSection + ":RegistryClass"] = "paid",
-            [ReleaseCatalogAdmissionOptions.ConfigurationSection + ":CatalogLifecycle"] = "Preview"
+            [ReleaseCatalogAdmissionOptions.ConfigurationSection + ":CatalogLifecycle"] = catalogLifecycle
         }, configureServices);
 
     private static HttpClient CreateAdminClient(ControlApiTestApplication app)

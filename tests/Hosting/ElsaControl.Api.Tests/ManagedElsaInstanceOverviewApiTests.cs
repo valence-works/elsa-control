@@ -212,6 +212,29 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
     }
 
     [Fact]
+    public async Task Available_releases_cap_newest_compatible_supported_rows()
+    {
+        var app = await PrepareApplicationAsync();
+        var client = app.CreateTrustedWorkspaceClient("overview-releases-cap-owner");
+        var (workspaceId, created) = await CreateReadyInstanceAsync(app, client, "overview-releases-cap-runtime");
+        _fixture.ReleaseCatalog.SetEntries(
+        [
+            CatalogEntry("valence-runtime", "3.8", "3.8.5", "stable", "combined", "supported", "paid", 'b'),
+            CatalogEntry("valence-runtime", "3.8", "3.8.6", "stable", "combined", "supported", "paid", 'c'),
+            CatalogEntry("valence-runtime", "3.8", "3.8.7", "stable", "combined", "supported", "paid", 'd'),
+            CatalogEntry("valence-runtime", "3.8", "3.8.8", "stable", "combined", "supported", "paid", 'e'),
+            CatalogEntry("valence-runtime", "3.9", "3.9.0", "stable", "combined", "supported", "paid", 'f')
+        ]);
+
+        var releases = await client.GetControlJsonAsync<ManagedElsaInstanceAvailableReleasesResponse>(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/available-releases");
+
+        Assert.NotNull(releases);
+        Assert.Equal(["3.9.0", "3.8.8", "3.8.7"], releases!.Items.Select(item => item.Version).ToArray());
+        Assert.DoesNotContain(releases.Items, item => item.Version is "3.8.5" or "3.8.6");
+    }
+
+    [Fact]
     public async Task Activity_reuses_audit_ordering_and_rejects_invalid_limits()
     {
         var app = await PrepareApplicationAsync();

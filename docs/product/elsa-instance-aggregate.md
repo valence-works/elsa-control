@@ -246,12 +246,25 @@ entries. Ambiguity is rejected before digest matching; consent cannot select one
 row from conflicting admissions. Promoting that same immutable admission to
 Supported does not invalidate the intent. Changing its digest requires new consent.
 
-The onboarding API keeps its existing `releases` list Supported-only and exposes
-Preview choices separately in `previewReleases`, including their safe manifest
-digest. The create console requires an initially unchecked acknowledgment that
-Preview is for evaluation and carries no availability SLO. A change of workspace,
-release selection or manifest digest clears the acknowledgment. Neither the
-console selection nor catalog admission upgrades a Preview release to Supported.
+The onboarding API keeps its existing `releases` list Supported-only. Rows are
+sorted newest-first by NuGet semver, capped by `ManagedElsa:ReleasePicker:MaxChoices`
+(default 3), and exactly one choice is marked `recommended: true` (the newest
+Supported release). Clients, including the Partner API `GET /releases` selector,
+must read that flag and must not rely on array order. If no Supported release
+exists, `releases` is empty and Create returns the existing
+`instance.catalog-selection-unavailable` refusal (422). Preview is not a fallback.
+
+A catalog row can have `catalogLifecycle=supported` only when its version has no
+semver prerelease label. That is checked at admission; a prerelease is `preview`
+or nothing.
+
+Preview choices are returned in `previewReleases`, including their safe manifest
+digest, only to Console workspace Owners who pass `includePreview=true`. Hub and
+Cloud BFF callers never receive the field. The create console requires an initially
+unchecked acknowledgment that Preview is for evaluation and carries no availability
+SLO. A change of workspace, release selection or manifest digest clears the
+acknowledgment. Neither the console selection nor catalog admission upgrades a
+Preview release to Supported.
 
 Consent is persisted on both the current instance and its immutable intent
 revision, contributes to the canonical intent hash, and is returned with revision

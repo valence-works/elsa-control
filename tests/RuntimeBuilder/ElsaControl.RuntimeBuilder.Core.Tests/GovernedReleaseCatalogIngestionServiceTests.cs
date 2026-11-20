@@ -21,7 +21,7 @@ public sealed class GovernedReleaseCatalogIngestionServiceTests
         var store = new RecordingStore();
         var result = await CreateService(artifact, store).AdmitAsync(
             artifact,
-            CatalogOptions("supported"));
+            CatalogOptions("preview"));
 
         Assert.True(result.Accepted, Findings(result));
         Assert.Equal(GovernedReleaseCatalogWriteStatus.Stored, result.WriteStatus);
@@ -32,7 +32,7 @@ public sealed class GovernedReleaseCatalogIngestionServiceTests
             Assert.Equal("3.8", entry.Distribution.ReleaseLine);
             Assert.Equal("3.8.0-preview.5413", entry.Distribution.ReleaseVersion);
             Assert.Equal("preview", entry.Distribution.ProducerLifecycle, ignoreCase: true);
-            Assert.Equal("supported", entry.CatalogLifecycle);
+            Assert.Equal("preview", entry.CatalogLifecycle);
             Assert.NotEmpty(entry.Topology.Components);
             Assert.NotEmpty(entry.Topology.Evidence);
             Assert.DoesNotContain(entry.Topology.Evidence, evidence =>
@@ -116,7 +116,7 @@ public sealed class GovernedReleaseCatalogIngestionServiceTests
         var store = new FingerprintingStore();
         var artifact = ProducerArtifact(ProducerFixture(), 'a');
         var service = CreateService(artifact, store, clock);
-        var options = CatalogOptions("supported");
+        var options = CatalogOptions("preview");
 
         var first = await service.AdmitAsync(artifact, options);
         clock.Now = clock.Now.AddHours(1);
@@ -128,6 +128,36 @@ public sealed class GovernedReleaseCatalogIngestionServiceTests
         Assert.Equal(GovernedReleaseCatalogWriteStatus.Unchanged, second.WriteStatus);
         Assert.Equal(2, store.Calls);
         Assert.NotEqual(store.ReceivedEntries[0][0].AdmittedAt, store.ReceivedEntries[1][0].AdmittedAt);
+    }
+
+    [Fact]
+    public async Task Prerelease_version_is_refused_as_supported()
+    {
+        var store = new RecordingStore();
+        var artifact = ProducerArtifact(ProducerFixture(), 'a');
+        var result = await CreateService(artifact, store).AdmitAsync(
+            artifact,
+            CatalogOptions("supported"));
+
+        Assert.False(result.Accepted);
+        Assert.Contains(result.Findings, x => x.Code == GovernedReleaseCatalogLifecycle.SupportedPrereleaseCode);
+        Assert.Equal(0, store.Calls);
+    }
+
+    [Fact]
+    public async Task Stable_version_can_be_admitted_as_supported()
+    {
+        var artifact = ProducerArtifact(ProducerPayload("3.10", "3.10.2"), 'd');
+        var result = await CreateService(artifact, new RecordingStore()).AdmitAsync(
+            artifact,
+            CatalogOptions("supported"));
+
+        Assert.True(result.Accepted, Findings(result));
+        Assert.All(result.Entries, entry =>
+        {
+            Assert.Equal("3.10.2", entry.Distribution.ReleaseVersion);
+            Assert.Equal("supported", entry.CatalogLifecycle);
+        });
     }
 
     [Fact]
