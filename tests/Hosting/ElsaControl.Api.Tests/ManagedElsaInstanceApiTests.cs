@@ -241,6 +241,58 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.Contains("instance.catalog-selection-unavailable", await create.Content.ReadAsStringAsync(), StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(null, "3.8.0-preview.5413", "preview", "create-leftover-preview-omitted")]
+    [InlineData("3.8.0-preview.5413", "3.8.0-preview.5413", "preview", "create-leftover-preview-explicit")]
+    [InlineData(null, "3.8.x", "stable", "create-leftover-unparseable-omitted")]
+    public async Task Create_refuses_supported_labelled_prerelease_or_unparseable_catalog_rows(
+        string? requestedVersion,
+        string catalogVersion,
+        string channel,
+        string idempotencyKey)
+    {
+        var app = await PrepareApplicationAsync([], [
+            CatalogEntry("valence-runtime", "3.8", catalogVersion, channel, "combined", "supported", "paid", 'p')
+        ]);
+        var client = app.CreateTrustedWorkspaceClient($"managed-leftover-supported-owner-{idempotencyKey}");
+        var workspaceId = await client.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var intent = Intent() with
+        {
+            Release = new ElsaReleaseIntent("valence-runtime", "3.8", requestedVersion, channel)
+        };
+
+        using var create = await SendCreateRequestAsync(
+            client, workspaceId, "Leftover supported", "leftover-supported", intent, idempotencyKey);
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, create.StatusCode);
+        Assert.Contains("instance.catalog-selection-unavailable", await create.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        Assert.Equal(0, await CountRowsAsync(db, "ElsaInstances"));
+    }
+
+    [Fact]
+    public async Task Create_rejects_preview_pin_from_a_console_source_admin()
+    {
+        var app = await PrepareApplicationAsync([], [PreviewCatalogEntry()]);
+        var owner = app.CreateTrustedWorkspaceClient("managed-preview-source-admin-owner");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        await app.AddWorkspaceMemberAsync(workspaceId, "managed-preview-source-admin", WorkspaceRole.SourceAdmin);
+        var sourceAdmin = app.CreateTrustedWorkspaceClient("managed-preview-source-admin");
+
+        using var create = await SendCreateRequestAsync(
+            sourceAdmin, workspaceId, "Preview runtime", "preview-source-admin",
+            PreviewIntent(Digest('a')), "create-preview-source-admin");
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, create.StatusCode);
+        Assert.Contains("instance.catalog-selection-unavailable", await create.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        Assert.Equal(0, await CountRowsAsync(db, "ElsaInstances"));
+    }
+
     [Fact]
     public async Task Onboarding_options_openapi_documents_recommended_and_include_preview()
     {

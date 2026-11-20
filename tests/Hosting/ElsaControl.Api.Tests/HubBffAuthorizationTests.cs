@@ -269,6 +269,36 @@ public sealed class HubBffAuthorizationTests
     }
 
     [Fact]
+    public async Task Hub_create_rejects_an_explicit_preview_pin()
+    {
+        var digest = $"sha256:{new string('a', 64)}";
+        var catalog = CreateCatalogStore(
+            CatalogEntry("3.8.0-preview.1", 'a', catalogLifecycle: "preview", channel: "preview"));
+        await using var app = CreateLifecycleHubApplication(catalog);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var client = CreateHubClient(app, HubSubject);
+        var workspaceId = await BootstrapWorkspaceAsync(client);
+        await EnableManagedHostingAsync(app, workspaceId, maxInstances: int.MaxValue);
+        var intent = Intent() with
+        {
+            Release = new ElsaReleaseIntent(
+                "valence-runtime", "3.8", "3.8.0-preview.1", "preview", previewManifestDigest: digest)
+        };
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/workspaces/{workspaceId:D}/instances")
+        {
+            Content = JsonContent.Create(
+                new ManagedElsaInstanceCreateRequest("Hub preview", "hub-preview-runtime", intent),
+                options: ControlApiTestApplication.JsonOptions)
+        };
+        request.Headers.Add("Idempotency-Key", "hub-preview-create");
+
+        using var create = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, create.StatusCode);
+        Assert.Contains("instance.catalog-selection-unavailable", await create.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Workspace_reader_hub_session_can_read_and_is_denied_on_mutations()
     {
         var catalog = CreateCatalogStore(CatalogEntry("3.8.4", 'a'), CatalogEntry("3.8.5", 'b'));

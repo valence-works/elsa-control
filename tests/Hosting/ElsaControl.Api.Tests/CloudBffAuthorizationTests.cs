@@ -579,6 +579,44 @@ public sealed class CloudBffAuthorizationTests
     }
 
     [Fact]
+    public async Task Cloud_bff_create_rejects_an_explicit_preview_pin()
+    {
+        var digest = $"sha256:{new string('a', 64)}";
+        var catalog = new MutableReleaseCatalogStore(
+        [
+            CloudCatalogEntry("3.8.0-preview.1", 'a', catalogLifecycle: "preview", channel: "preview")
+        ]);
+        await using var app = CreateBffApplication(configureServices: services =>
+        {
+            services.AddSingleton<IEngineProvisioningModule, TestProvisioningModule>();
+            services.RemoveAll<IGovernedReleaseCatalogStore>();
+            services.AddSingleton<IGovernedReleaseCatalogStore>(catalog);
+        });
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var client = CreateBffClient(app);
+        var workspaceId = (await client.GetControlJsonAsync<MeWorkspacesResponse>("/api/me/workspaces"))!
+            .Workspaces.Single().Id;
+        await EnableManagedHostingAsync(app, workspaceId);
+        var intent = Intent() with
+        {
+            Release = new ElsaReleaseIntent(
+                "valence-runtime", "3.8", "3.8.0-preview.1", "preview", previewManifestDigest: digest)
+        };
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/workspaces/{workspaceId:D}/instances")
+        {
+            Content = JsonContent.Create(
+                new ManagedElsaInstanceCreateRequest("Cloud preview", "cloud-preview-runtime", intent),
+                options: ControlApiTestApplication.JsonOptions)
+        };
+        request.Headers.Add("Idempotency-Key", "cloud-preview-create");
+
+        using var create = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, create.StatusCode);
+        Assert.Contains("instance.catalog-selection-unavailable", await create.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Ordinary_control_bearer_remains_available_when_bff_restrictions_are_enabled()
     {
         await using var app = CreateBffApplication();

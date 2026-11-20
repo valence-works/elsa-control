@@ -253,6 +253,9 @@ Supported release). Clients, including the Partner API `GET /releases` selector,
 must read that flag and must not rely on array order. If no Supported release
 exists, `releases` is empty and Create returns the existing
 `instance.catalog-selection-unavailable` refusal (422). Preview is not a fallback.
+The same 422 applies when the only remaining Supported row is a leftover
+prerelease or unparseable version (including when `requestedVersion` is omitted),
+and when a Preview pin is submitted by anyone other than a Console workspace Owner.
 
 A catalog row can have `catalogLifecycle=supported` only when its version has no
 semver prerelease label. That is checked at admission; a prerelease is `preview`

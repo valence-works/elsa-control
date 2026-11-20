@@ -43,7 +43,9 @@ public static class EngineProvisioningWorkflowEndpoints
                 ElsaInstanceOperationAction.Create, cancellationToken: cancellationToken);
             if (!commercial.Allowed)
                 return Problem(commercial.Code, commercial.Summary, StatusCodes.Status422UnprocessableEntity);
-            return Results.Ok(await previews.PreviewAsync(workspaceId, request, cancellationToken: cancellationToken));
+            return Results.Ok(await previews.PreviewAsync(
+                workspaceId, request, ManagedElsaInstanceEndpoints.CallerMaySelectPreviewReleases(context),
+                cancellationToken: cancellationToken));
         }).RequireDeploymentPermission(WorkspaceDeploymentPermissions.ManageSetup)
             .AddEndpointFilter<EngineProvisioningRequiredFilter>();
 
@@ -89,7 +91,9 @@ public static class EngineProvisioningWorkflowEndpoints
                     ElsaInstanceOperationAction.Create, cancellationToken: cancellationToken);
                 if (!commercial.Allowed)
                     return Problem(commercial.Code, commercial.Summary, StatusCodes.Status422UnprocessableEntity);
-                var preview = await previews.PreviewAsync(workspaceId, request, cancellationToken: cancellationToken);
+                var preview = await previews.PreviewAsync(
+                    workspaceId, request, ManagedElsaInstanceEndpoints.CallerMaySelectPreviewReleases(context),
+                    cancellationToken: cancellationToken);
                 if (!preview.CanProvision)
                     return Results.UnprocessableEntity(preview);
                 if (!string.Equals(preview.PreviewDigest, request.PreviewDigest, StringComparison.Ordinal))

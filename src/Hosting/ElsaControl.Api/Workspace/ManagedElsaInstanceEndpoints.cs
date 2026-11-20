@@ -9,6 +9,7 @@ using ElsaControl.Deployment.Core.Workspace;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.RuntimeBuilder.Abstractions.ReleaseCatalog;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 
 namespace ElsaControl.Api.Workspace;
@@ -178,7 +179,8 @@ public static class ManagedElsaInstanceEndpoints
             if (!commercialDecision.Allowed)
                 return Problem(commercialDecision.Code, commercialDecision.Summary, StatusCodes.Status422UnprocessableEntity);
             if (!MatchesInitialLaunchProfile(request.Intent.Placement) ||
-                !await HasOneEligibleCatalogMatchAsync(catalog, request.Intent, cancellationToken))
+                !await HasOneEligibleCatalogMatchAsync(
+                    catalog, request.Intent, CallerMaySelectPreviewReleases(context), cancellationToken))
                 return Problem("instance.catalog-selection-unavailable", "The selected managed release or launch profile is unavailable.", StatusCodes.Status422UnprocessableEntity);
 
             try
@@ -301,7 +303,8 @@ public static class ManagedElsaInstanceEndpoints
             if (!commercialDecision.Allowed)
                 return Problem(commercialDecision.Code, commercialDecision.Summary, StatusCodes.Status422UnprocessableEntity);
             if (request.Intent is not null &&
-                !await HasOneEligibleCatalogMatchAsync(catalog, request.Intent, cancellationToken))
+                !await HasOneEligibleCatalogMatchAsync(
+                    catalog, request.Intent, CallerMaySelectPreviewReleases(context), cancellationToken))
                 return Problem("instance.catalog-selection-unavailable", "The selected managed release is unavailable.", StatusCodes.Status422UnprocessableEntity);
             try
             {
@@ -555,7 +558,8 @@ public static class ManagedElsaInstanceEndpoints
             if (!commercialDecision.Allowed)
                 return Problem(commercialDecision.Code, commercialDecision.Summary, StatusCodes.Status422UnprocessableEntity);
             if (request.Intent is not null &&
-                !await HasOneEligibleCatalogMatchAsync(catalog, request.Intent, cancellationToken))
+                !await HasOneEligibleCatalogMatchAsync(
+                    catalog, request.Intent, CallerMaySelectPreviewReleases(context), cancellationToken))
                 return Problem("instance.catalog-selection-unavailable", "The selected managed release is unavailable.", StatusCodes.Status422UnprocessableEntity);
 
             try
@@ -849,15 +853,20 @@ public static class ManagedElsaInstanceEndpoints
     private static async Task<bool> HasOneEligibleCatalogMatchAsync(
         IGovernedReleaseCatalogStore catalog,
         ElsaInstanceIntent intent,
+        bool allowPreview,
         CancellationToken cancellationToken)
-        => await FindEligibleCatalogEntryAsync(catalog, intent, cancellationToken) is not null;
+        => await FindEligibleCatalogEntryAsync(catalog, intent, allowPreview, cancellationToken) is not null;
 
     internal static async Task<GovernedReleaseCatalogEntry?> FindEligibleCatalogEntryAsync(
         IGovernedReleaseCatalogStore catalog,
         ElsaInstanceIntent intent,
+        bool allowPreview,
         CancellationToken cancellationToken)
     {
         var previewConsentDigest = intent.Release.PreviewManifestDigest;
+        if (previewConsentDigest is not null && !allowPreview)
+            return null;
+
         var entries = await catalog.QueryAsync(new GovernedReleaseCatalogQuery(
             DistributionId: intent.Release.DistributionId,
             ReleaseLine: intent.Release.ReleaseLine,
@@ -866,10 +875,11 @@ public static class ManagedElsaInstanceEndpoints
             CatalogLifecycle: previewConsentDigest is null ? GovernedReleaseCatalogLifecycle.Supported : null,
             RegistryClass: "paid",
             TopologyId: intent.Application.TopologyId), cancellationToken);
-        var eligible = entries
-            .Where(entry => IsEligibleCatalogLifecycle(entry.CatalogLifecycle, previewConsentDigest is not null))
-            .Take(2)
-            .ToArray();
+        IEnumerable<GovernedReleaseCatalogEntry> candidates = entries
+            .Where(entry => IsEligibleCatalogLifecycle(entry.CatalogLifecycle, previewConsentDigest is not null));
+        if (previewConsentDigest is null)
+            candidates = ManagedElsaReleasePicker.WhereStableReleaseVersion(candidates);
+        var eligible = candidates.Take(2).ToArray();
         return eligible.Length == 1 &&
                (previewConsentDigest is null ||
                 string.Equals(eligible[0].ManifestDigest, previewConsentDigest, StringComparison.OrdinalIgnoreCase))
@@ -879,6 +889,15 @@ public static class ManagedElsaInstanceEndpoints
     private static bool IsEligibleCatalogLifecycle(string lifecycle, bool allowPreview) =>
         GovernedReleaseCatalogLifecycle.IsSupported(lifecycle) ||
         allowPreview && GovernedReleaseCatalogLifecycle.IsPreview(lifecycle);
+
+    internal static bool CallerMaySelectPreviewReleases(HttpContext context) =>
+        ShouldIncludePreviewReleases(
+            context,
+            context.GetWorkspaceAccess(),
+            includePreview: true,
+            context.RequestServices.GetRequiredService<IOptions<CloudBffOptions>>().Value,
+            context.RequestServices.GetRequiredService<IOptions<CloudAccountIdentityOptions>>().Value,
+            context.RequestServices.GetRequiredService<IOptions<HubAccountIdentityOptions>>().Value);
 
     internal static bool ShouldIncludePreviewReleases(
         HttpContext context,
