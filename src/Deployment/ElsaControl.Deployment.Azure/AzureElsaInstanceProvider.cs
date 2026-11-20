@@ -59,7 +59,11 @@ public sealed class AzureElsaInstanceProvider(
             var target = new AzureWorkloadTarget(WorkloadName(request.InstanceId), location);
             var translation = AzureWorkloadPlanTranslator.Translate(request.Plan, target, _providerScope);
             if (!translation.IsAccepted)
-                throw new InvalidOperationException("The resolved plan is outside the governed Azure provider profile.");
+            {
+                throw new ElsaInstanceProviderSubmissionException(
+                    ElsaInstanceProviderSubmissionFailureKind.Rejected,
+                    findingCodes: translation.Findings.Select(finding => finding.Code).ToArray());
+            }
 
             var assignment = await assignmentStore.CreateOrGetAsync(
                 new(

@@ -242,6 +242,61 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
         return Task.CompletedTask;
     }
 
+    public Task FailRejectedProviderSubmissionAsync(
+        ElsaInstanceProviderSubmissionRejection rejection,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ArgumentNullException.ThrowIfNull(rejection);
+        rejection.Validate();
+        lock (_gate)
+        {
+            if (!_operations.TryGetValue(rejection.OperationId, out var operation) ||
+                !_instances.TryGetValue(rejection.InstanceId, out _) ||
+                operation.InstanceId != rejection.InstanceId || operation.AttemptNumber != rejection.AttemptNumber)
+                throw new ElsaInstanceLifecycleConflictException("Provider submission rejection correlation is invalid.");
+
+            if (operation.State == ElsaInstanceOperationState.Failed &&
+                _failures.TryGetValue(rejection.OperationId, out var existing) &&
+                string.Equals(existing.Code, ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected, StringComparison.Ordinal))
+                return Task.CompletedTask;
+
+            if (operation.State != ElsaInstanceOperationState.Queued)
+                throw new ElsaInstanceLifecycleConflictException("Provider submission reservation is no longer queued.");
+            var run = _deploymentRuns.Values.SingleOrDefault(x => x.Operation.Id == rejection.OperationId);
+            if (run is not null && run.Run.Status != WorkspaceDeploymentRunStatus.Queued)
+                throw new ElsaInstanceLifecycleConflictException("Provider submission reservation is no longer queued.");
+
+            var failed = operation.TransitionTo(ElsaInstanceOperationState.Failed);
+            _operations[rejection.OperationId] = failed;
+            _claims.Remove(rejection.OperationId);
+            _failures[rejection.OperationId] = new ElsaInstanceLifecycleRecordedFailure(
+                rejection.OperationId,
+                ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected,
+                "The provider rejected the submission before a durable hand-off.",
+                rejection.RejectedAt);
+            if (rejection.FirstFindingCode is { } finding)
+                _parkReasons[rejection.OperationId] = finding;
+            if (run is not null)
+            {
+                _deploymentRuns[run.Run.Id] = run with
+                {
+                    Operation = failed,
+                    Run = run.Run with
+                    {
+                        Status = WorkspaceDeploymentRunStatus.Failed,
+                        CompletedAt = rejection.RejectedAt,
+                        RecoveryReason = ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected,
+                        FailureMessage = null,
+                        WorkerId = null,
+                        WorkerHeartbeatAt = null
+                    }
+                };
+            }
+        }
+        return Task.CompletedTask;
+    }
+
     private static ElsaInstance WithPlacementAssignment(ElsaInstance instance, string? assignmentId) =>
         assignmentId is null ? instance : ElsaInstance.Hydrate(
             instance.Id, instance.OrganizationId, instance.WorkspaceId, instance.Name, instance.Slug,
@@ -921,41 +976,54 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
 
             var active = _operations.Values.FirstOrDefault(x =>
                 x.InstanceId == instance.Id && ElsaInstanceOperationGuard.IsBlocking(x.State));
-            var supersedesEntitlementHeld = operation.Action is ElsaInstanceOperationAction.Stop or ElsaInstanceOperationAction.Delete &&
+            var supersedesSafePredecessor = operation.Action is ElsaInstanceOperationAction.Stop or ElsaInstanceOperationAction.Delete &&
                 active is not null &&
-                active.State == ElsaInstanceOperationState.EntitlementHeld &&
-                active.Action != ElsaInstanceOperationAction.Delete;
-            if (supersedesEntitlementHeld)
+                active.Action != ElsaInstanceOperationAction.Delete &&
+                active.State is ElsaInstanceOperationState.EntitlementHeld or ElsaInstanceOperationState.Queued;
+            if (supersedesSafePredecessor)
             {
-                var held = _operations[active!.Id];
-                if (held.State != ElsaInstanceOperationState.EntitlementHeld)
+                var predecessor = _operations[active!.Id];
+                if (predecessor.State is not (ElsaInstanceOperationState.EntitlementHeld or ElsaInstanceOperationState.Queued))
                     throw new ElsaInstanceLifecycleConflictException(
-                        "The entitlement-held operation changed concurrently.",
+                        "The safe-exit predecessor changed concurrently.",
                         ElsaInstanceLifecycleConflictReason.OperationActive);
-                var cancelled = held.TransitionTo(ElsaInstanceOperationState.Cancelled);
-                _operations[held.Id] = cancelled;
-                _claims.Remove(held.Id);
-                _failures[held.Id] = new ElsaInstanceLifecycleRecordedFailure(
-                    held.Id,
-                    ElsaInstanceCommercialOperation.EntitlementSafeExitSuperseded,
-                    "The entitlement-held operation was superseded by a safe lifecycle exit.",
-                    outbox.CreatedAt);
-                if (_deploymentRuns.Values.SingleOrDefault(x => x.Operation.Id == held.Id) is { } priorRun)
+                var priorRun = _deploymentRuns.Values.SingleOrDefault(x => x.Operation.Id == predecessor.Id);
+                if (predecessor.State == ElsaInstanceOperationState.Queued &&
+                    priorRun is not null &&
+                    priorRun.Run.Status != WorkspaceDeploymentRunStatus.Queued)
                 {
-                    _deploymentRuns[priorRun.Run.Id] = priorRun with
-                    {
-                        Operation = cancelled,
-                        Run = priorRun.Run with
-                        {
-                            Status = WorkspaceDeploymentRunStatus.Cancelled,
-                            CompletedAt = outbox.CreatedAt,
-                            RecoveryReason = ElsaInstanceCommercialOperation.EntitlementSafeExitSuperseded,
-                            WorkerId = null,
-                            WorkerHeartbeatAt = null
-                        }
-                    };
+                    // A committed provider hand-off still needs Delete to wait.
                 }
-                active = null;
+                else
+                {
+                    var failureCode = predecessor.State == ElsaInstanceOperationState.EntitlementHeld
+                        ? ElsaInstanceCommercialOperation.EntitlementSafeExitSuperseded
+                        : ManagedElsaReasonCodeCatalog.ProviderSubmissionNeverSubmittedSuperseded;
+                    var cancelled = predecessor.TransitionTo(ElsaInstanceOperationState.Cancelled);
+                    _operations[predecessor.Id] = cancelled;
+                    _claims.Remove(predecessor.Id);
+                    _failures[predecessor.Id] = new ElsaInstanceLifecycleRecordedFailure(
+                        predecessor.Id,
+                        failureCode,
+                        "The operation was superseded by a safe lifecycle exit.",
+                        outbox.CreatedAt);
+                    if (priorRun is not null)
+                    {
+                        _deploymentRuns[priorRun.Run.Id] = priorRun with
+                        {
+                            Operation = cancelled,
+                            Run = priorRun.Run with
+                            {
+                                Status = WorkspaceDeploymentRunStatus.Cancelled,
+                                CompletedAt = outbox.CreatedAt,
+                                RecoveryReason = failureCode,
+                                WorkerId = null,
+                                WorkerHeartbeatAt = null
+                            }
+                        };
+                    }
+                    active = null;
+                }
             }
             if (active is not null)
             {
@@ -1083,10 +1151,29 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                             WorkspaceDeploymentRunStatus.RecoveryRequired).ToArray();
                     if (priorBlocking.Length != 0 || uncertainRuns.Length != 0)
                     {
-                        if (priorBlocking is not [{ State: ElsaInstanceOperationState.RecoveryRequired } predecessor] ||
-                            predecessor.Action == ElsaInstanceOperationAction.Delete ||
-                            uncertainRuns is not [{ Run.Status: WorkspaceDeploymentRunStatus.RecoveryRequired } predecessorRun] ||
-                            predecessorRun.Operation.Id != predecessor.Id ||
+                        ElsaInstanceOperation? predecessor = null;
+                        ElsaInstanceLifecycleDeploymentRun? predecessorRun = null;
+                        string? failureCode = null;
+                        if (priorBlocking is [{ State: ElsaInstanceOperationState.Queued } queuedPredecessor] &&
+                            queuedPredecessor.Action != ElsaInstanceOperationAction.Delete &&
+                            uncertainRuns is [{ Run.Status: WorkspaceDeploymentRunStatus.Queued } queuedRun] &&
+                            queuedRun.Operation.Id == queuedPredecessor.Id)
+                        {
+                            predecessor = queuedPredecessor;
+                            predecessorRun = queuedRun;
+                            failureCode = ManagedElsaReasonCodeCatalog.ProviderSubmissionNeverSubmittedSuperseded;
+                        }
+                        else if (priorBlocking is [{ State: ElsaInstanceOperationState.RecoveryRequired } recoveryPredecessor] &&
+                                 recoveryPredecessor.Action != ElsaInstanceOperationAction.Delete &&
+                                 uncertainRuns is [{ Run.Status: WorkspaceDeploymentRunStatus.RecoveryRequired } recoveryRun] &&
+                                 recoveryRun.Operation.Id == recoveryPredecessor.Id)
+                        {
+                            predecessor = recoveryPredecessor;
+                            predecessorRun = recoveryRun;
+                            failureCode = ElsaInstanceDeletionDiagnosticCodes.PredecessorRecoverySuperseded;
+                        }
+
+                        if (predecessor is null || predecessorRun is null || failureCode is null ||
                             instance.Intent.DesiredLifecycle != ElsaDesiredLifecycle.Deleting ||
                             instance.LastOperationId is not { } lastOperationId ||
                             !string.Equals(lastOperationId.Value, operation.Id.ToString("D"), StringComparison.OrdinalIgnoreCase) ||
@@ -1100,8 +1187,10 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                         _claims.Remove(predecessor.Id);
                         _failures[predecessor.Id] = new ElsaInstanceLifecycleRecordedFailure(
                             predecessor.Id,
-                            ElsaInstanceDeletionDiagnosticCodes.PredecessorRecoverySuperseded,
-                            "The recovery-required predecessor was superseded by confirmed deletion cleanup.",
+                            failureCode,
+                            failureCode == ManagedElsaReasonCodeCatalog.ProviderSubmissionNeverSubmittedSuperseded
+                                ? "The never-submitted predecessor was superseded by confirmed deletion cleanup."
+                                : "The recovery-required predecessor was superseded by confirmed deletion cleanup.",
                             now);
                         _deploymentRuns[predecessorRun.Run.Id] = predecessorRun with
                         {
@@ -1110,7 +1199,7 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                             {
                                 Status = WorkspaceDeploymentRunStatus.Cancelled,
                                 CompletedAt = now,
-                                RecoveryReason = ElsaInstanceDeletionDiagnosticCodes.PredecessorRecoverySuperseded,
+                                RecoveryReason = failureCode,
                                 FailureMessage = null,
                                 WorkerId = null,
                                 WorkerHeartbeatAt = null

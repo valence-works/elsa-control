@@ -1274,6 +1274,45 @@ public sealed class AzureElsaInstanceProviderTests
         Assert.DoesNotContain("Customer.SecretPackage", exception.ToString(), StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Unsupported_registry_is_rejected_with_the_translator_finding_before_assignment()
+    {
+        var workspaceId = Guid.NewGuid();
+        var instanceId = Guid.NewGuid();
+        var operationId = Guid.NewGuid();
+        var translated = Translate("5.0", "5.0.0");
+        var service = new CapturingOperationService(CreateOperation(workspaceId, translated, operationId));
+        var assignmentStore = new InMemoryAssignmentStore();
+        var provider = new AzureElsaInstanceProvider(service, new CapturingOperationStore(), assignmentStore, options: EnabledOptions());
+        var request = CreateSubmission(workspaceId, instanceId, operationId, translated);
+        var component = request.Plan.Topology.Components[0];
+        request = request with
+        {
+            Plan = request.Plan with
+            {
+                Topology = request.Plan.Topology with
+                {
+                    Components = [component with
+                    {
+                        Image = component.Image with
+                        {
+                            RegistryClass = "community",
+                            Repository = "ghcr.io/example/runtime",
+                            Reference = "ghcr.io/example/runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        }
+                    }]
+                }
+            }
+        };
+
+        var exception = await Assert.ThrowsAsync<ElsaInstanceProviderSubmissionException>(() => provider.SubmitAsync(request));
+
+        Assert.Equal(ElsaInstanceProviderSubmissionFailureKind.Rejected, exception.Kind);
+        Assert.Contains("azure.imageRegistry.unsupported", exception.FindingCodes);
+        Assert.Empty(service.Submissions);
+        Assert.Null(await assignmentStore.GetAsync(workspaceId, assignmentStore.AssignmentId));
+    }
+
     [Theory]
     [InlineData(1, 1, 500, 1024, true)]
     [InlineData(1, 3, 1000, 2048, true)]

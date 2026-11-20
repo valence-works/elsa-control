@@ -42,7 +42,11 @@ public sealed record ManagedElsaProvisioningProgress(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     int? AttemptNumber = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    DateTimeOffset? AttemptStartedAt = null);
+    DateTimeOffset? AttemptStartedAt = null,
+    // Value-free translator finding when a Create was rejected before hand-off.
+    // Omitted when null so ordinary snapshots do not grow a new key.
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? ReasonCode = null);
 
 /// <summary>A stable customer-facing provisioning stage.</summary>
 public sealed record ManagedElsaProvisioningStage(

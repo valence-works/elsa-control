@@ -584,6 +584,21 @@ public sealed class AzureManagedElsaProvisioningProgressProjectorTests
         Assert.Contains(result.Activity, entry => entry.MessageCode == "engine.ready");
     }
 
+    [Fact]
+    public void Rejected_create_exposes_the_submission_code_and_translator_finding()
+    {
+        var result = Project(
+            lifecycleState: ElsaInstanceOperationState.Failed,
+            failureCode: ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected,
+            reconciliationDiagnosticCode: "azure.imageRegistry.unsupported",
+            completedAt: AcceptedAt.AddMinutes(1));
+
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Failed, result.State);
+        Assert.Equal(ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected, result.DiagnosticCode);
+        Assert.Equal("azure.imageRegistry.unsupported", result.ReasonCode);
+        Assert.Contains(result.Activity, entry => entry.Status == ManagedElsaProvisioningProgressActivityStatuses.Blocked);
+    }
+
     [Theory]
     [InlineData(ElsaInstanceOperationState.Failed, "provisioning.failed")]
     [InlineData(ElsaInstanceOperationState.Cancelled, "provisioning.cancelled")]
@@ -1111,12 +1126,14 @@ public sealed class AzureManagedElsaProvisioningProgressProjectorTests
         IReadOnlyList<AzureProviderOperationTransition>? blockingTransitions = null,
         int attemptNumber = 1,
         DateTimeOffset? attemptStartedAt = null,
-        DateTimeOffset? lifecycleUpdatedAt = null) =>
+        DateTimeOffset? lifecycleUpdatedAt = null,
+        string? reconciliationDiagnosticCode = null) =>
         AzureManagedElsaProvisioningProgressProjector.Project(
             new AzureManagedElsaProvisioningProgressProjectionInput(
                 Topology(observedLifecycle, topologyOperations),
                 Lifecycle(lifecycleState, completedAt, failureCode, action, id, organizationId, blockingOperationId,
-                    attemptNumber: attemptNumber, attemptStartedAt: attemptStartedAt, updatedAt: lifecycleUpdatedAt),
+                    attemptNumber: attemptNumber, attemptStartedAt: attemptStartedAt, updatedAt: lifecycleUpdatedAt,
+                    reconciliationDiagnosticCode: reconciliationDiagnosticCode),
                 provider,
                 transitions,
                 RecoveryReason: recoveryReason,
@@ -1142,9 +1159,11 @@ public sealed class AzureManagedElsaProvisioningProgressProjectorTests
         string? recoveryReason = null,
         int attemptNumber = 1,
         DateTimeOffset? attemptStartedAt = null,
-        DateTimeOffset? updatedAt = null) =>
+        DateTimeOffset? updatedAt = null,
+        string? reconciliationDiagnosticCode = null) =>
         new(id ?? Guid.Parse("33333333-3333-3333-3333-333333333333"), action, state, 1, attemptNumber,
-            acceptedAt ?? AcceptedAt, (acceptedAt ?? AcceptedAt).AddSeconds(1), completedAt, null, failureCode, null, null, null,
+            acceptedAt ?? AcceptedAt, (acceptedAt ?? AcceptedAt).AddSeconds(1), completedAt, null, failureCode, null,
+            reconciliationDiagnosticCode, null,
             RecoveryReason: recoveryReason, OrganizationId: organizationId, BlockingOperationId: blockingOperationId,
             AttemptStartedAt: attemptStartedAt, UpdatedAt: updatedAt);
 

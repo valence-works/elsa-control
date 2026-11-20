@@ -104,6 +104,33 @@ public sealed partial class ElsaInstanceProviderReconciliationHostedServiceTests
     }
 
     [Fact]
+    public async Task Corrupt_stored_handoff_logs_the_distinct_reason_code()
+    {
+        var provider = new RecordingSubmissionPort();
+        var recoveryProvider = new RecordingRecoveryPort();
+        var reconciler = new RecordingReconciliationService();
+        await using var services = CreateServices(provider, reconciler,
+            [new ElsaInstanceProviderPendingOperation(WorkspaceId, OperationId)
+            {
+                HandoffInvalid = true,
+                HandoffInvalidReason = ManagedElsaReasonCodeCatalog.ProviderHandoffReservationIncomplete
+            }],
+            recoveryProvider);
+        var logger = new RecordingLogger();
+
+        await CreateHostedService(services, logger: logger).ProcessPendingAsync(CancellationToken.None);
+
+        var warning = Assert.Single(logger.Messages);
+        Assert.Equal(LogLevel.Warning, warning.Level);
+        Assert.Equal(
+            $"Managed Elsa provider hand-off metadata is invalid for pending operation {OperationId} ({ManagedElsaReasonCodeCatalog.ProviderHandoffReservationIncomplete}).",
+            warning.Message);
+        Assert.Equal(0, provider.Calls);
+        Assert.Equal(0, recoveryProvider.Calls);
+        Assert.Equal(0, reconciler.Calls);
+    }
+
+    [Fact]
     public async Task Normal_replay_preserves_the_returned_assignment_binding()
     {
         var provider = new RecordingSubmissionPort();
@@ -201,19 +228,29 @@ public sealed partial class ElsaInstanceProviderReconciliationHostedServiceTests
     }
 
     [Fact]
-    public async Task Rejected_submission_remains_retryable_without_reconciling_nonexistent_provider_work()
+    public async Task Rejected_submission_fails_durably_and_does_not_replay_or_reconcile()
     {
         var provider = new RecordingSubmissionPort(new ElsaInstanceProviderSubmissionException(
-            ElsaInstanceProviderSubmissionFailureKind.Rejected));
+            ElsaInstanceProviderSubmissionFailureKind.Rejected,
+            findingCodes: ["azure.imageRegistry.unsupported"]));
         var reconciler = new RecordingReconciliationService();
-        await using var services = CreateServices(provider, reconciler, [Pending(withSubmission: true)]);
+        var submissionStore = new SubmissionStore();
+        await using var services = CreateServices(
+            provider,
+            reconciler,
+            [Pending(withSubmission: true)],
+            submissionStore: submissionStore);
         var hosted = CreateHostedService(services);
 
         await hosted.ProcessPendingAsync(CancellationToken.None);
         await hosted.ProcessPendingAsync(CancellationToken.None);
 
-        Assert.Equal(2, provider.Calls);
+        Assert.Equal(1, provider.Calls);
         Assert.Equal(0, reconciler.Calls);
+        var rejection = Assert.Single(submissionStore.Rejections);
+        Assert.Equal(OperationId, rejection.OperationId);
+        Assert.Equal(["azure.imageRegistry.unsupported"], rejection.SafeFindingCodes);
+        Assert.Empty(submissionStore.Commits);
     }
 
     [Fact]
@@ -779,7 +816,9 @@ public sealed partial class ElsaInstanceProviderReconciliationHostedServiceTests
         IElsaInstanceProviderSubmissionStore? submissionStore = null)
     {
         var services = new ServiceCollection();
-        services.AddSingleton<IElsaInstanceProviderPendingOperationStore>(new PendingStore(pending));
+        var resolvedSubmissionStore = submissionStore ?? new SubmissionStore();
+        services.AddSingleton<IElsaInstanceProviderPendingOperationStore>(
+            new PendingStore(pending, resolvedSubmissionStore as SubmissionStore));
         services.AddSingleton<IElsaInstanceProviderSubmissionPort>(provider);
         if (recoveryProvider is not null)
             services.AddSingleton<IElsaInstanceProviderRecoveryPort>(recoveryProvider);
@@ -787,7 +826,7 @@ public sealed partial class ElsaInstanceProviderReconciliationHostedServiceTests
             services.AddSingleton<IElsaInstanceCommercialGate>(commercialGate);
         if (entitlementHoldStore is not null)
             services.AddSingleton<IElsaInstanceEntitlementHoldStore>(entitlementHoldStore);
-        services.AddSingleton<IElsaInstanceProviderSubmissionStore>(submissionStore ?? new SubmissionStore());
+        services.AddSingleton<IElsaInstanceProviderSubmissionStore>(resolvedSubmissionStore);
         services.AddSingleton<IElsaInstanceProviderReconciliationService>(reconciler);
         return services.BuildServiceProvider();
     }
@@ -872,23 +911,39 @@ public sealed partial class ElsaInstanceProviderReconciliationHostedServiceTests
                 ? RecoverySubmission() with { AttemptNumber = 1 }
                 : null);
 
-    private sealed class PendingStore(IReadOnlyList<ElsaInstanceProviderPendingOperation> pending)
+    private sealed class PendingStore(
+        IReadOnlyList<ElsaInstanceProviderPendingOperation> pending,
+        SubmissionStore? submissionStore = null)
         : IElsaInstanceProviderPendingOperationStore
     {
         public Task<IReadOnlyList<ElsaInstanceProviderPendingOperation>> ListPendingProviderOperationsAsync(
             int limit,
-            CancellationToken cancellationToken = default) => Task.FromResult(pending);
+            CancellationToken cancellationToken = default)
+        {
+            if (submissionStore is { Rejections.Count: > 0 })
+                return Task.FromResult<IReadOnlyList<ElsaInstanceProviderPendingOperation>>([]);
+            return Task.FromResult(pending);
+        }
     }
 
     private sealed class SubmissionStore : IElsaInstanceProviderSubmissionStore
     {
         public List<ElsaInstanceProviderSubmissionCommit> Commits { get; } = [];
+        public List<ElsaInstanceProviderSubmissionRejection> Rejections { get; } = [];
 
         public Task CommitProviderSubmissionAsync(
             ElsaInstanceProviderSubmissionCommit commit,
             CancellationToken cancellationToken = default)
         {
             Commits.Add(commit);
+            return Task.CompletedTask;
+        }
+
+        public Task FailRejectedProviderSubmissionAsync(
+            ElsaInstanceProviderSubmissionRejection rejection,
+            CancellationToken cancellationToken = default)
+        {
+            Rejections.Add(rejection);
             return Task.CompletedTask;
         }
     }

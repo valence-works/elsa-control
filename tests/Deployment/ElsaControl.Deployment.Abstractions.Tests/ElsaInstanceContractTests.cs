@@ -271,7 +271,6 @@ public sealed class ElsaInstanceContractTests
 
     [Theory]
     [InlineData(ElsaInstanceOperationState.Accepted)]
-    [InlineData(ElsaInstanceOperationState.Queued)]
     [InlineData(ElsaInstanceOperationState.Running)]
     [InlineData(ElsaInstanceOperationState.RecoveryRequired)]
     public void Delete_waits_behind_an_active_or_uncertain_operation(ElsaInstanceOperationState state)
@@ -284,6 +283,27 @@ public sealed class ElsaInstanceContractTests
         Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, result.Operation.State);
         Assert.Equal(ElsaDesiredLifecycle.Deleting, result.Instance.DesiredLifecycle);
         Assert.Equal(instance.Id, active.InstanceId);
+        Assert.True(active.HoldsReservation);
+    }
+
+    [Theory]
+    [InlineData(ElsaInstanceOperationState.Queued, ElsaInstanceOperationAction.Delete)]
+    [InlineData(ElsaInstanceOperationState.Queued, ElsaInstanceOperationAction.Stop)]
+    [InlineData(ElsaInstanceOperationState.EntitlementHeld, ElsaInstanceOperationAction.Delete)]
+    [InlineData(ElsaInstanceOperationState.EntitlementHeld, ElsaInstanceOperationAction.Stop)]
+    public void Delete_and_stop_supersede_never_submitted_queued_or_held_work(
+        ElsaInstanceOperationState predecessorState,
+        ElsaInstanceOperationAction exit)
+    {
+        var instance = CreateInstance(ElsaObservedLifecycle.Ready);
+        var active = OperationFor(instance, predecessorState);
+
+        var result = ElsaInstanceStateMachine.Request(instance, exit, active);
+
+        Assert.Equal(ElsaInstanceOperationState.Accepted, result.Operation.State);
+        Assert.Equal(exit == ElsaInstanceOperationAction.Delete
+            ? ElsaDesiredLifecycle.Deleting
+            : ElsaDesiredLifecycle.Stopped, result.Instance.DesiredLifecycle);
         Assert.True(active.HoldsReservation);
     }
 
@@ -1094,6 +1114,8 @@ public sealed class ElsaInstanceContractTests
             ElsaInstanceOperationState.WaitingForPriorOperation => operation
                 .TransitionTo(ElsaInstanceOperationState.WaitingForPriorOperation),
             ElsaInstanceOperationState.Queued => operation.TransitionTo(ElsaInstanceOperationState.Queued),
+            ElsaInstanceOperationState.EntitlementHeld => operation.TransitionTo(ElsaInstanceOperationState.Queued)
+                .TransitionTo(ElsaInstanceOperationState.EntitlementHeld),
             ElsaInstanceOperationState.Running => operation.TransitionTo(ElsaInstanceOperationState.Queued)
                 .TransitionTo(ElsaInstanceOperationState.Running),
             ElsaInstanceOperationState.RecoveryRequired => operation.TransitionTo(ElsaInstanceOperationState.Queued)

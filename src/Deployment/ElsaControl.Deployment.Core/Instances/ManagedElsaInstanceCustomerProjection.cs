@@ -42,6 +42,7 @@ public static class ManagedElsaInstanceCustomerProjection
         ManagedElsaReasonCodeCatalog.AzureRecoveryRetrying,
         ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeExhausted,
         ManagedElsaReasonCodeCatalog.AzureRecoveryNeedsOperator,
+        ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected,
         ProvisioningUnavailableReasonCode,
         FailedUnavailableReasonCode,
         UnknownUnavailableReasonCode,
@@ -261,7 +262,9 @@ public static class ManagedElsaInstanceCustomerProjection
     /// are discarded. Generic operation and Delete DTOs share this boundary.
     /// </summary>
     public static string? CustomerSafeOperationReason(string? reasonCode) =>
-        !string.IsNullOrWhiteSpace(reasonCode) && CustomerSafeOperationReasonCodes.Contains(reasonCode)
+        !string.IsNullOrWhiteSpace(reasonCode) &&
+        (CustomerSafeOperationReasonCodes.Contains(reasonCode) ||
+         ManagedElsaReasonCodeCatalog.IsSafeTranslatorFinding(reasonCode))
             ? reasonCode
             : null;
 

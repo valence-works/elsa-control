@@ -1,6 +1,7 @@
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.RuntimeBuilder.Abstractions.Plans;
 using ElsaControl.Deployment.Core.Telemetry;
+using ElsaControl.Deployment.Core.Workspace;
 
 namespace ElsaControl.Deployment.Core.Instances;
 
@@ -282,14 +283,41 @@ public sealed class ElsaInstanceLifecycleWorker(
             catch (ElsaInstanceProviderSubmissionException exception)
                 when (exception.Kind == ElsaInstanceProviderSubmissionFailureKind.Rejected)
             {
-                // Deterministic local/provider rejection leaves the durable reservation queued.
-                // It must not be represented as an uncertain remote hand-off.
+                // A plan rejection is deterministic: no remote hand-off exists, so the
+                // reserved run fails immediately instead of being replayed forever.
                 telemetry.RecordError(
                     item.Instance.DesiredLifecycle,
                     item.Instance.ObservedLifecycle,
                     item.Instance.Health,
                     result.Operation.State,
                     ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected);
+                if (_submissionStore is not null)
+                {
+                    await _submissionStore.FailRejectedProviderSubmissionAsync(new(
+                        submission.WorkspaceId,
+                        submission.InstanceId,
+                        submission.OperationId,
+                        submission.AttemptNumber,
+                        _timeProvider.GetUtcNow(),
+                        exception.FindingCodes), cancellationToken);
+                    var failedOperation = result.Operation.TransitionTo(
+                        ElsaControl.Deployment.Abstractions.Instances.ElsaInstanceOperationState.Failed);
+                    result = result with
+                    {
+                        Outcome = ElsaInstanceLifecycleWorkerOutcome.Failed,
+                        Operation = failedOperation,
+                        Run = result.Run is null
+                            ? null
+                            : result.Run with
+                            {
+                                Status = WorkspaceDeploymentRunStatus.Failed,
+                                CompletedAt = _timeProvider.GetUtcNow(),
+                                RecoveryReason = ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected
+                            },
+                        FailureCode = ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected,
+                        FailureSummary = "The provider rejected the submission before a durable hand-off."
+                    };
+                }
             }
             catch
             {
@@ -384,6 +412,8 @@ public sealed class ElsaInstanceLifecycleWorker(
             "resolution.commit-invalid" => "Resolved plan could not be committed as a safe immutable identity.",
             "resolution.plan-replace-invalid" => "Resolved plan could not replace the instance's current release projection.",
             "resolution.unexpected" => "Lifecycle plan resolution failed unexpectedly.",
+            ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected =>
+                "The provider rejected the submission before a durable hand-off.",
             _ => "Lifecycle plan resolution was rejected."
         };
 

@@ -143,12 +143,16 @@ public enum ElsaInstanceProviderSubmissionFailureKind
 /// </summary>
 public sealed class ElsaInstanceProviderSubmissionException(
     ElsaInstanceProviderSubmissionFailureKind kind,
-    Exception? innerException = null)
+    Exception? innerException = null,
+    IReadOnlyList<string>? findingCodes = null)
     : Exception("Provider submission failed.", innerException)
 {
     public ElsaInstanceProviderSubmissionFailureKind Kind { get; } = Enum.IsDefined(kind)
         ? kind
         : throw new ArgumentOutOfRangeException(nameof(kind));
+
+    public IReadOnlyList<string> FindingCodes { get; } =
+        ManagedElsaReasonCodeCatalog.SanitizeTranslatorFindings(findingCodes);
 }
 
 public sealed record ElsaInstanceProviderSubmission(

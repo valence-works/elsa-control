@@ -570,23 +570,25 @@ public static class ElsaInstanceStateMachine
             ElsaInstanceOperationGuard.IsBlocking(activeOperation.State))
             throw new ElsaInstanceStateConflictException(ElsaInstanceStateConflictReason.OperationActive);
 
-        // Stop and confirmed Delete are safe exits from entitlement-held work. The
-        // acceptance store supersedes that held predecessor in the same transaction,
-        // so these exits must not be stranded behind a provider mutation that cannot
-        // currently be submitted.
-        var supersedesEntitlementHeld = activeOperation is { State: ElsaInstanceOperationState.EntitlementHeld } &&
+        // Stop and confirmed Delete are safe exits from entitlement-held or
+        // never-submitted queued work. The acceptance store supersedes that
+        // predecessor in the same transaction, so these exits must not wait on
+        // a provider mutation that cannot currently be submitted.
+        var supersedesSafePredecessor = activeOperation is not null &&
                                         activeOperation.Action != ElsaInstanceOperationAction.Delete &&
-                                        action is ElsaInstanceOperationAction.Stop or ElsaInstanceOperationAction.Delete;
+                                        action is ElsaInstanceOperationAction.Stop or ElsaInstanceOperationAction.Delete &&
+                                        activeOperation.State is ElsaInstanceOperationState.EntitlementHeld
+                                            or ElsaInstanceOperationState.Queued;
         var waitForPriorOperation = action == ElsaInstanceOperationAction.Delete &&
                                     activeOperation is not null &&
                                     ElsaInstanceOperationGuard.IsBlocking(activeOperation.State) &&
-                                    !supersedesEntitlementHeld;
+                                    !supersedesSafePredecessor;
         if (waitForPriorOperation)
             ElsaInstanceOperationGuard.EnsureExpectedVersion(instance, expected);
         else
             ElsaInstanceOperationGuard.EnsureCanAccept(
                 instance,
-                supersedesEntitlementHeld ? null : activeOperation,
+                supersedesSafePredecessor ? null : activeOperation,
                 expected,
                 operationScope,
                 key,
