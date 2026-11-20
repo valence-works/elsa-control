@@ -53,6 +53,13 @@ public sealed class GovernedReleaseCatalogIngestionService(
         if (!string.Equals(admission.Manifest.SchemaVersion, ReleaseManifestSchema.CurrentVersion, StringComparison.Ordinal))
             return Rejected("catalog.schema.downgrade", "Only the current producer manifest schema can enter the governed catalog.", "manifest.schemaVersion");
 
+        if (!GovernedReleaseCatalogLifecycle.CanBeSupported(
+                catalogLifecycle, admission.Manifest.Distribution.ReleaseVersion))
+            return Rejected(
+                GovernedReleaseCatalogLifecycle.SupportedPrereleaseCode,
+                "A supported catalog row cannot use a prerelease version.",
+                "catalogLifecycle");
+
         IReadOnlyList<GovernedReleaseCatalogEntry> entries;
         try
         {

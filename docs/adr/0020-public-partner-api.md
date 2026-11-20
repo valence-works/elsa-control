@@ -174,7 +174,7 @@ and identity layer. Control owns everything else.
 | Route | Maps to | Notes |
 | --- | --- | --- |
 | `GET /account` | organization, allowance, status | Allowance and usage per engine type; no prices. |
-| `GET /releases` | governed catalog (`onboarding-options`) | Stable releases only. Preview is excluded. |
+| `GET /releases` | governed catalog (`onboarding-options`) | Same Supported selector as onboarding-options: NuGet semver descending, `recommended` on the newest, `ManagedElsa:ReleasePicker:MaxChoices` cap, no Preview. |
 | `POST /engines` | Create | `Idempotency-Key` required. Body: `externalReference`, `name`, `placement`, `releaseId`. Returns 202 with the engine and its operation. |
 | `GET /engines`, `GET /engines/{id}` | list, read | Filter by `externalReference`. Page size capped. Response carries `version` and an `ETag`. |
 | `GET /engines/{id}/operations/{opId}` | operation read | Public state enum below. |

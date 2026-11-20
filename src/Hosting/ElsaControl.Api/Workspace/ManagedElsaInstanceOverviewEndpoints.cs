@@ -10,6 +10,7 @@ using ElsaControl.Deployment.Core.Workspace;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.RuntimeBuilder.Abstractions.ReleaseCatalog;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 
 namespace ElsaControl.Api.Workspace;
 
@@ -42,7 +43,6 @@ public static class ManagedElsaInstanceOverviewEndpoints
         ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReasonCode;
     internal const int DefaultActivityLimit = 25;
     internal const int MaxActivityLimit = 100;
-    internal const int MaxAvailableReleases = 20;
     private const int ActivityLookupWindow = 500;
 
     private static readonly FrozenSet<string> CustomerActivityEventTypes = new HashSet<string>(StringComparer.Ordinal)
@@ -212,13 +212,15 @@ public static class ManagedElsaInstanceOverviewEndpoints
             HttpContext context,
             IElsaInstanceLifecycleStore lifecycle,
             IGovernedReleaseCatalogStore catalog,
+            IOptions<ManagedElsaReleasePickerOptions> pickerOptions,
             CancellationToken cancellationToken) =>
         {
             var instance = await lifecycle.GetInstanceAsync(workspaceId, instanceId, cancellationToken);
             if (instance is null)
                 return Results.NotFound();
             return Results.Ok(new ManagedElsaInstanceAvailableReleasesResponse(
-                await ListAvailableReleasesAsync(catalog, instance, cancellationToken)));
+                await ListAvailableReleasesAsync(
+                    catalog, instance, cancellationToken, pickerOptions.Value.EffectiveMaxChoices)));
         }).RequireWorkspaceAccess().AllowCloudBff().AllowHubBff();
 
         group.MapGet("/{instanceId:guid}/activity", async (
@@ -300,12 +302,13 @@ public static class ManagedElsaInstanceOverviewEndpoints
     internal static async Task<IReadOnlyList<ManagedElsaInstanceAvailableReleaseResponse>> ListAvailableReleasesAsync(
         IGovernedReleaseCatalogStore catalog,
         ElsaInstance instance,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int? maxChoices = null)
     {
         var instanceChannel = instance.Intent.Release.Channel;
         var entries = await catalog.QueryAsync(new GovernedReleaseCatalogQuery(
             DistributionId: instance.Intent.Release.DistributionId,
-            CatalogLifecycle: "supported",
+            CatalogLifecycle: GovernedReleaseCatalogLifecycle.Supported,
             RegistryClass: "paid",
             Channel: instanceChannel,
             TopologyId: instance.Intent.Application.TopologyId), cancellationToken);
@@ -313,9 +316,9 @@ public static class ManagedElsaInstanceOverviewEndpoints
         if (!TryReadMajor(instance.Intent.Release.ReleaseLine, out var currentMajor))
             return [];
 
-        return entries
+        var compatible = ManagedElsaReleasePicker.WhereStableReleaseVersion(entries)
             .Where(entry =>
-                string.Equals(entry.CatalogLifecycle, "supported", StringComparison.OrdinalIgnoreCase) &&
+                GovernedReleaseCatalogLifecycle.IsSupported(entry.CatalogLifecycle) &&
                 string.Equals(entry.RegistryClass, "paid", StringComparison.OrdinalIgnoreCase) &&
                 IsCustomerChannel(entry.Distribution.Channel, instanceChannel) &&
                 TryReadMajor(entry.Distribution.ReleaseLine, out var major) &&
@@ -334,9 +337,12 @@ public static class ManagedElsaInstanceOverviewEndpoints
             .GroupBy(release => release.Version, StringComparer.OrdinalIgnoreCase)
             .Select(group => group.First())
             .OrderByDescending(release => release.Version, ReleaseVersionComparer.Instance)
-            .ThenBy(release => release.ReleaseLine, StringComparer.OrdinalIgnoreCase)
-            .Take(MaxAvailableReleases)
-            .ToList();
+            .ThenBy(release => release.ReleaseLine, StringComparer.OrdinalIgnoreCase);
+        // The picker cap is display-only. Apply-release validation still sees every
+        // compatible Supported row so existing intents and automation keep working.
+        return (maxChoices is { } cap
+            ? compatible.Take(ManagedElsaReleasePicker.NormalizeMaxChoices(cap))
+            : compatible).ToList();
     }
 
     private static async Task<IResult> ExecuteCustomerMutationAsync(

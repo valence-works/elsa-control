@@ -141,6 +141,8 @@ builder.Services.Configure<CloudBffOptions>(builder.Configuration.GetSection(Clo
 builder.Services.Configure<CloudAccountIdentityOptions>(builder.Configuration.GetSection(CloudAccountIdentityDefaults.ConfigurationSection));
 builder.Services.Configure<HubAccountIdentityOptions>(builder.Configuration.GetSection(HubAccountIdentityDefaults.ConfigurationSection));
 builder.Services.Configure<ManagedElsaHandoffOptions>(builder.Configuration.GetSection(ManagedElsaHandoffDefaults.ConfigurationSection));
+builder.Services.Configure<ManagedElsaReleasePickerOptions>(
+    builder.Configuration.GetSection(ManagedElsaReleasePickerOptions.ConfigurationSection));
 var configuredControlIdentity = builder.Configuration.GetSection(ControlIdentityDefaults.ConfigurationSection).Get<ControlIdentityOptions>() ?? new ControlIdentityOptions();
 var authentication = builder.Services.AddAuthentication(options =>
     {

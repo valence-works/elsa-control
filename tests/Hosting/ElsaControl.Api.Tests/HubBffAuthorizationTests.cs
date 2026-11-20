@@ -246,6 +246,59 @@ public sealed class HubBffAuthorizationTests
     }
 
     [Fact]
+    public async Task Hub_onboarding_never_returns_preview_even_with_includePreview()
+    {
+        var catalog = CreateCatalogStore(
+            CatalogEntry("3.8.4", 'a'),
+            CatalogEntry("3.8.0-preview.1", 'p', catalogLifecycle: "preview", channel: "preview"));
+        await using var app = CreateLifecycleHubApplication(catalog);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var client = CreateHubClient(app, HubSubject);
+        var workspaceId = await BootstrapWorkspaceAsync(client);
+        await EnableManagedHostingAsync(app, workspaceId, maxInstances: int.MaxValue);
+
+        using var response = await client.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/onboarding-options?includePreview=true");
+        var options = await response.Content.ReadControlJsonAsync<ManagedElsaInstanceOnboardingOptionsResponse>();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var release = Assert.Single(options!.Releases);
+        Assert.Equal("3.8.4", release.Version);
+        Assert.True(release.Recommended);
+        Assert.Null(options.PreviewReleases);
+    }
+
+    [Fact]
+    public async Task Hub_create_rejects_an_explicit_preview_pin()
+    {
+        var digest = $"sha256:{new string('a', 64)}";
+        var catalog = CreateCatalogStore(
+            CatalogEntry("3.8.0-preview.1", 'a', catalogLifecycle: "preview", channel: "preview"));
+        await using var app = CreateLifecycleHubApplication(catalog);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var client = CreateHubClient(app, HubSubject);
+        var workspaceId = await BootstrapWorkspaceAsync(client);
+        await EnableManagedHostingAsync(app, workspaceId, maxInstances: int.MaxValue);
+        var intent = Intent() with
+        {
+            Release = new ElsaReleaseIntent(
+                "valence-runtime", "3.8", "3.8.0-preview.1", "preview", previewManifestDigest: digest)
+        };
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/workspaces/{workspaceId:D}/instances")
+        {
+            Content = JsonContent.Create(
+                new ManagedElsaInstanceCreateRequest("Hub preview", "hub-preview-runtime", intent),
+                options: ControlApiTestApplication.JsonOptions)
+        };
+        request.Headers.Add("Idempotency-Key", "hub-preview-create");
+
+        using var create = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, create.StatusCode);
+        Assert.Contains("instance.catalog-selection-unavailable", await create.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Workspace_reader_hub_session_can_read_and_is_denied_on_mutations()
     {
         var catalog = CreateCatalogStore(CatalogEntry("3.8.4", 'a'), CatalogEntry("3.8.5", 'b'));
@@ -918,7 +971,11 @@ public sealed class HubBffAuthorizationTests
         return store;
     }
 
-    private static GovernedReleaseCatalogEntry CatalogEntry(string version, char digestMarker) => new(
+    private static GovernedReleaseCatalogEntry CatalogEntry(
+        string version,
+        char digestMarker,
+        string catalogLifecycle = "supported",
+        string channel = "stable") => new(
         "1.0",
         $"oci://registry.example.test/releases/manifest@sha256:{new string(digestMarker, 64)}",
         $"sha256:{new string(digestMarker, 64)}",
@@ -927,10 +984,10 @@ public sealed class HubBffAuthorizationTests
         $"sha256:{new string((char)(digestMarker + 2), 64)}",
         "paid",
         new GovernedReleaseDistribution(
-            "valence-runtime", "3", "3.8", version, "stable", "supported", null,
+            "valence-runtime", "3", "3.8", version, channel, "supported", null,
             "https://github.com/valence-works/elsa", "0123456789abcdef", "run-1"),
         new GovernedReleaseTopology("combined", "1.0", ["server"], [], [], [], []),
-        "supported",
+        catalogLifecycle,
         DateTimeOffset.Parse("2026-09-01T00:00:00Z", CultureInfo.InvariantCulture));
 
     private sealed class TestProvisioningModule : IEngineProvisioningModule

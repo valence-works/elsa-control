@@ -84,11 +84,19 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.Equal("3.8.4", release.Version);
         Assert.Equal("stable", release.Channel);
         Assert.Equal("combined", release.TopologyId);
-        var preview = Assert.Single(options.PreviewReleases!);
+        Assert.True(release.Recommended);
+        Assert.Null(options.PreviewReleases);
+        Assert.Contains(_fixture.ReleaseCatalog.Queries, query => query.CatalogLifecycle == "supported" && query.RegistryClass == "paid");
+        Assert.DoesNotContain(_fixture.ReleaseCatalog.Queries, query => query.CatalogLifecycle == "preview");
+
+        var previewResponse = await client.GetAsync(
+            $"/api/workspaces/{workspaceId}/instances/onboarding-options?includePreview=true");
+        var previewOptions = await previewResponse.Content.ReadFromJsonAsync<ManagedElsaInstanceOnboardingOptionsResponse>(
+            ControlApiTestApplication.JsonOptions);
+        var preview = Assert.Single(previewOptions!.PreviewReleases!);
         Assert.Equal("valence-runtime", preview.DistributionId);
         Assert.Equal("3.8.0-preview.1", preview.Version);
         Assert.Equal("sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", preview.ManifestDigest);
-        Assert.Contains(_fixture.ReleaseCatalog.Queries, query => query.CatalogLifecycle == "supported" && query.RegistryClass == "paid");
         Assert.Contains(_fixture.ReleaseCatalog.Queries, query => query.CatalogLifecycle == "preview" && query.RegistryClass == "paid");
     }
 
@@ -119,17 +127,24 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.Equal("public", options.LaunchProfile.NetworkOutcome);
         Assert.Equal("managed", options.LaunchProfile.DomainOutcome);
         Assert.Contains(_fixture.ReleaseCatalog.Queries, query => query.CatalogLifecycle == "supported" && query.RegistryClass == "paid");
-        Assert.Contains(_fixture.ReleaseCatalog.Queries, query => query.CatalogLifecycle == "preview" && query.RegistryClass == "paid");
+        Assert.DoesNotContain(_fixture.ReleaseCatalog.Queries, query => query.CatalogLifecycle == "preview");
         var release = Assert.Single(options.Releases);
         Assert.Equal("future-runtime", release.DistributionId);
         Assert.Equal("5.0", release.ReleaseLine);
         Assert.Equal("5.0.1", release.Version);
         Assert.Equal("stable", release.Channel);
         Assert.Equal("combined", release.TopologyId);
-        var preview = Assert.Single(options.PreviewReleases!);
+        Assert.True(release.Recommended);
+        Assert.Null(options.PreviewReleases);
+
+        var previewResponse = await client.GetAsync(
+            $"/api/workspaces/{workspaceId}/instances/onboarding-options?includePreview=true");
+        var previewOptions = await previewResponse.Content.ReadFromJsonAsync<ManagedElsaInstanceOnboardingOptionsResponse>(
+            ControlApiTestApplication.JsonOptions);
+        var preview = Assert.Single(previewOptions!.PreviewReleases!);
         Assert.Equal("preview-runtime", preview.DistributionId);
         Assert.Equal("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", preview.ManifestDigest);
-        Assert.DoesNotContain(options.PreviewReleases!, x => x.DistributionId == "ambiguous-runtime");
+        Assert.DoesNotContain(previewOptions.PreviewReleases!, x => x.DistributionId == "ambiguous-runtime");
     }
 
     [Fact]
@@ -150,6 +165,147 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.Contains(ElsaInstanceCommercialOperation.LifecycleConstrained, body, StringComparison.Ordinal);
         Assert.Contains(ManagedElsaProvisioningProgressCopy.EntitlementHeldCreate, body, StringComparison.Ordinal);
         Assert.Null(_fixture.ReleaseCatalog.Query);
+    }
+
+    [Fact]
+    public async Task Onboarding_options_recommend_the_newest_stable_supported_release_by_nuget_semver()
+    {
+        var app = await PrepareApplicationAsync([], [
+            CatalogEntry("valence-runtime", "3.8", "3.8.0-preview.5413", "preview", "combined", "supported", "paid", 'p'),
+            CatalogEntry("valence-runtime", "3.8", "3.8.x", "stable", "combined", "supported", "paid", 'x'),
+            CatalogEntry("valence-runtime", "3.10", "3.10.2", "stable", "combined", "supported", "paid", 't')
+        ]);
+        var client = app.CreateControlIdentityClient(subject: "managed-semver-owner");
+        var workspaceId = await client.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+
+        var options = await client.GetControlJsonAsync<ManagedElsaInstanceOnboardingOptionsResponse>(
+            $"/api/workspaces/{workspaceId}/instances/onboarding-options");
+
+        var release = Assert.Single(options!.Releases);
+        Assert.Equal("3.10.2", release.Version);
+        Assert.True(release.Recommended);
+        Assert.DoesNotContain(options.Releases, item => item.Version.Contains("preview", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(options.Releases, item => item.Version == "3.8.x");
+        Assert.Null(options.PreviewReleases);
+    }
+
+    [Fact]
+    public async Task Onboarding_options_cap_supported_releases_and_mark_exactly_one_recommended()
+    {
+        var app = await PrepareApplicationAsync([], [
+            CatalogEntry("valence-runtime", "3.8", "3.8.4", "stable", "combined", "supported", "paid", 'a'),
+            CatalogEntry("valence-runtime", "3.9", "3.9.0", "stable", "combined", "supported", "paid", 'b'),
+            CatalogEntry("valence-runtime", "3.10", "3.10.1", "stable", "combined", "supported", "paid", 'c'),
+            CatalogEntry("valence-runtime", "3.10", "3.10.2", "stable", "combined", "supported", "paid", 'd'),
+            CatalogEntry("valence-runtime", "3.11", "3.11.0", "stable", "combined", "supported", "paid", 'e')
+        ]);
+        var client = app.CreateControlIdentityClient(subject: "managed-cap-owner");
+        var workspaceId = await client.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+
+        var options = await client.GetControlJsonAsync<ManagedElsaInstanceOnboardingOptionsResponse>(
+            $"/api/workspaces/{workspaceId}/instances/onboarding-options");
+
+        Assert.Equal(["3.11.0", "3.10.2", "3.10.1"], options!.Releases.Select(item => item.Version));
+        Assert.Equal(1, options.Releases.Count(item => item.Recommended));
+        Assert.True(options.Releases[0].Recommended);
+        Assert.All(options.Releases.Skip(1), item => Assert.False(item.Recommended));
+        Assert.Null(options.PreviewReleases);
+    }
+
+    [Fact]
+    public async Task Onboarding_options_hide_preview_from_readers_and_fail_closed_without_supported()
+    {
+        var app = await PrepareApplicationAsync([], [
+            CatalogEntry("preview-runtime", "4.1", "4.1.0-preview.1", "preview", "combined", "preview", "paid")
+        ]);
+        var owner = app.CreateTrustedWorkspaceClient("managed-fail-closed-owner");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        await app.AddWorkspaceMemberAsync(workspaceId, "managed-fail-closed-reader", WorkspaceRole.Reader);
+        var reader = app.CreateTrustedWorkspaceClient("managed-fail-closed-reader");
+
+        var ownerDefault = await owner.GetControlJsonAsync<ManagedElsaInstanceOnboardingOptionsResponse>(
+            $"/api/workspaces/{workspaceId}/instances/onboarding-options");
+        var readerPreview = await reader.GetControlJsonAsync<ManagedElsaInstanceOnboardingOptionsResponse>(
+            $"/api/workspaces/{workspaceId}/instances/onboarding-options?includePreview=true");
+        using var create = await SendCreateRequestAsync(
+            owner, workspaceId, "Missing supported", "missing-supported", Intent(), "create-missing-supported");
+
+        Assert.Empty(ownerDefault!.Releases);
+        Assert.Null(ownerDefault.PreviewReleases);
+        Assert.Empty(readerPreview!.Releases);
+        Assert.Null(readerPreview.PreviewReleases);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, create.StatusCode);
+        Assert.Contains("instance.catalog-selection-unavailable", await create.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(null, "3.8.0-preview.5413", "preview", "create-leftover-preview-omitted")]
+    [InlineData("3.8.0-preview.5413", "3.8.0-preview.5413", "preview", "create-leftover-preview-explicit")]
+    [InlineData(null, "3.8.x", "stable", "create-leftover-unparseable-omitted")]
+    public async Task Create_refuses_supported_labelled_prerelease_or_unparseable_catalog_rows(
+        string? requestedVersion,
+        string catalogVersion,
+        string channel,
+        string idempotencyKey)
+    {
+        var app = await PrepareApplicationAsync([], [
+            CatalogEntry("valence-runtime", "3.8", catalogVersion, channel, "combined", "supported", "paid", 'p')
+        ]);
+        var client = app.CreateTrustedWorkspaceClient($"managed-leftover-supported-owner-{idempotencyKey}");
+        var workspaceId = await client.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var intent = Intent() with
+        {
+            Release = new ElsaReleaseIntent("valence-runtime", "3.8", requestedVersion, channel)
+        };
+
+        using var create = await SendCreateRequestAsync(
+            client, workspaceId, "Leftover supported", "leftover-supported", intent, idempotencyKey);
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, create.StatusCode);
+        Assert.Contains("instance.catalog-selection-unavailable", await create.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        Assert.Equal(0, await CountRowsAsync(db, "ElsaInstances"));
+    }
+
+    [Fact]
+    public async Task Create_rejects_preview_pin_from_a_console_source_admin()
+    {
+        var app = await PrepareApplicationAsync([], [PreviewCatalogEntry()]);
+        var owner = app.CreateTrustedWorkspaceClient("managed-preview-source-admin-owner");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        await app.AddWorkspaceMemberAsync(workspaceId, "managed-preview-source-admin", WorkspaceRole.SourceAdmin);
+        var sourceAdmin = app.CreateTrustedWorkspaceClient("managed-preview-source-admin");
+
+        using var create = await SendCreateRequestAsync(
+            sourceAdmin, workspaceId, "Preview runtime", "preview-source-admin",
+            PreviewIntent(Digest('a')), "create-preview-source-admin");
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, create.StatusCode);
+        Assert.Contains("instance.catalog-selection-unavailable", await create.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        Assert.Equal(0, await CountRowsAsync(db, "ElsaInstances"));
+    }
+
+    [Fact]
+    public async Task Onboarding_options_openapi_documents_recommended_and_include_preview()
+    {
+        var app = await PrepareApplicationAsync([]);
+        using var client = app.CreateClient();
+
+        using var response = await client.GetAsync("/openapi/v1.json");
+        var document = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("includePreview", document, StringComparison.Ordinal);
+        Assert.Contains("recommended", document, StringComparison.Ordinal);
+        Assert.Contains("/api/workspaces/{workspaceId}/instances/onboarding-options", document, StringComparison.Ordinal);
     }
 
     [Fact]

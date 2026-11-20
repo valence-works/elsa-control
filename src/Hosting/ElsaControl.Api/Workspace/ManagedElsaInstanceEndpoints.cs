@@ -1,3 +1,5 @@
+using System.ComponentModel;
+using System.Text.Json.Serialization;
 using ElsaControl.Api.Authentication;
 using ElsaControl.Api.OrganizationBilling;
 using ElsaControl.Deployment.Abstractions.Instances;
@@ -7,6 +9,7 @@ using ElsaControl.Deployment.Core.Workspace;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.RuntimeBuilder.Abstractions.ReleaseCatalog;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 
 namespace ElsaControl.Api.Workspace;
@@ -84,9 +87,14 @@ public static class ManagedElsaInstanceEndpoints
 
         group.MapGet("/onboarding-options", async (
             Guid workspaceId,
+            [FromQuery][Description("When true, Console workspace Owners also receive previewReleases. Hub, Cloud BFF, and Partner API callers never receive Preview.")] bool? includePreview,
             HttpContext context,
             IElsaInstanceCommercialGate commercialGate,
             IGovernedReleaseCatalogStore catalog,
+            IOptions<ManagedElsaReleasePickerOptions> pickerOptions,
+            IOptions<CloudBffOptions> cloudBff,
+            IOptions<CloudAccountIdentityOptions> cloudAccount,
+            IOptions<HubAccountIdentityOptions> hubAccount,
             CancellationToken cancellationToken) =>
         {
             var access = context.GetWorkspaceAccess();
@@ -98,51 +106,49 @@ public static class ManagedElsaInstanceEndpoints
             // Match the lifecycle resolver's fail-closed eligibility boundary so
             // every option shown here can be resolved when the customer submits it.
             var entries = await catalog.QueryAsync(new GovernedReleaseCatalogQuery(
-                CatalogLifecycle: "supported",
+                CatalogLifecycle: GovernedReleaseCatalogLifecycle.Supported,
                 RegistryClass: "paid"), cancellationToken);
-            var supportedIdentities = entries
-                .Select(ReleaseIdentity)
-                .ToHashSet();
-            // The durable resolver requires one exact governed row. Do not offer
-            // a display-equivalent choice when multiple immutable admissions
-            // would make that later resolution ambiguous.
-            var releases = entries
-                .GroupBy(ReleaseIdentity)
-                .Where(group => group.Take(2).Count() == 1)
-                .Select(group => group.Single())
-                .Select(entry => new ManagedElsaInstanceReleaseOption(
-                    entry.Distribution.Id,
-                    entry.Distribution.ReleaseLine,
-                    entry.Distribution.ReleaseVersion,
-                    entry.Distribution.Channel,
-                    entry.Topology.Id))
-                .OrderBy(x => x.ReleaseLine, StringComparer.OrdinalIgnoreCase)
-                .ThenBy(x => x.Version, StringComparer.OrdinalIgnoreCase)
-                .ThenBy(x => x.DistributionId, StringComparer.OrdinalIgnoreCase)
-                .ThenBy(x => x.TopologyId, StringComparer.OrdinalIgnoreCase)
-                .ToArray();
-            var previewEntries = await catalog.QueryAsync(new GovernedReleaseCatalogQuery(
-                CatalogLifecycle: "preview",
-                RegistryClass: "paid"), cancellationToken);
-            var previewReleases = previewEntries
-                .GroupBy(ReleaseIdentity)
-                .Where(group => group.Take(2).Count() == 1 &&
-                                !supportedIdentities.Contains(group.Key))
-                .Select(group => group.Single())
-                .Select(entry => new ManagedElsaInstancePreviewReleaseOption(
+            var uniqueNewestFirst = ManagedElsaReleasePicker.SelectUniqueNewestFirst(
+                ManagedElsaReleasePicker.WhereStableReleaseVersion(entries));
+            var capped = ManagedElsaReleasePicker.Cap(uniqueNewestFirst, pickerOptions.Value.EffectiveMaxChoices);
+            var releases = capped
+                .Select((entry, index) => new ManagedElsaInstanceReleaseOption(
                     entry.Distribution.Id,
                     entry.Distribution.ReleaseLine,
                     entry.Distribution.ReleaseVersion,
                     entry.Distribution.Channel,
                     entry.Topology.Id,
-                    entry.ManifestDigest))
-                .OrderBy(x => x.ReleaseLine, StringComparer.OrdinalIgnoreCase)
-                .ThenBy(x => x.Version, StringComparer.OrdinalIgnoreCase)
-                .ThenBy(x => x.DistributionId, StringComparer.OrdinalIgnoreCase)
-                .ThenBy(x => x.TopologyId, StringComparer.OrdinalIgnoreCase)
+                    Recommended: index == 0))
                 .ToArray();
+
+            IReadOnlyList<ManagedElsaInstancePreviewReleaseOption>? previewReleases = null;
+            if (ShouldIncludePreviewReleases(context, access, includePreview == true, cloudBff.Value, cloudAccount.Value, hubAccount.Value))
+            {
+                var supportedIdentities = entries
+                    .Select(ManagedElsaReleasePicker.ReleaseIdentity)
+                    .ToHashSet();
+                var previewEntries = await catalog.QueryAsync(new GovernedReleaseCatalogQuery(
+                    CatalogLifecycle: GovernedReleaseCatalogLifecycle.Preview,
+                    RegistryClass: "paid"), cancellationToken);
+                previewReleases = ManagedElsaReleasePicker.SelectUniqueNewestFirst(previewEntries)
+                    .Where(entry => !supportedIdentities.Contains(ManagedElsaReleasePicker.ReleaseIdentity(entry)))
+                    .Select(entry => new ManagedElsaInstancePreviewReleaseOption(
+                        entry.Distribution.Id,
+                        entry.Distribution.ReleaseLine,
+                        entry.Distribution.ReleaseVersion,
+                        entry.Distribution.Channel,
+                        entry.Topology.Id,
+                        entry.ManifestDigest))
+                    .ToArray();
+            }
+
             return Results.Ok(new ManagedElsaInstanceOnboardingOptionsResponse(releases, InitialLaunchProfile, previewReleases));
         }).RequireWorkspaceAccess().AllowCloudBff().AllowHubBff()
+            .WithDescription(
+                "Returns a curated Supported release list for managed-instance create. " +
+                "Exactly one choice is recommended (newest by NuGet semver). " +
+                "Preview is omitted unless a Console workspace Owner passes includePreview=true. " +
+                "Hub, Cloud BFF, and Partner API callers never receive previewReleases.")
             .AddEndpointFilter<EngineProvisioningRequiredFilter>();
 
         group.MapPost("", async (
@@ -173,7 +179,8 @@ public static class ManagedElsaInstanceEndpoints
             if (!commercialDecision.Allowed)
                 return Problem(commercialDecision.Code, commercialDecision.Summary, StatusCodes.Status422UnprocessableEntity);
             if (!MatchesInitialLaunchProfile(request.Intent.Placement) ||
-                !await HasOneEligibleCatalogMatchAsync(catalog, request.Intent, cancellationToken))
+                !await HasOneEligibleCatalogMatchAsync(
+                    catalog, request.Intent, CallerMaySelectPreviewReleases(context), cancellationToken))
                 return Problem("instance.catalog-selection-unavailable", "The selected managed release or launch profile is unavailable.", StatusCodes.Status422UnprocessableEntity);
 
             try
@@ -296,7 +303,8 @@ public static class ManagedElsaInstanceEndpoints
             if (!commercialDecision.Allowed)
                 return Problem(commercialDecision.Code, commercialDecision.Summary, StatusCodes.Status422UnprocessableEntity);
             if (request.Intent is not null &&
-                !await HasOneEligibleCatalogMatchAsync(catalog, request.Intent, cancellationToken))
+                !await HasOneEligibleCatalogMatchAsync(
+                    catalog, request.Intent, CallerMaySelectPreviewReleases(context), cancellationToken))
                 return Problem("instance.catalog-selection-unavailable", "The selected managed release is unavailable.", StatusCodes.Status422UnprocessableEntity);
             try
             {
@@ -550,7 +558,8 @@ public static class ManagedElsaInstanceEndpoints
             if (!commercialDecision.Allowed)
                 return Problem(commercialDecision.Code, commercialDecision.Summary, StatusCodes.Status422UnprocessableEntity);
             if (request.Intent is not null &&
-                !await HasOneEligibleCatalogMatchAsync(catalog, request.Intent, cancellationToken))
+                !await HasOneEligibleCatalogMatchAsync(
+                    catalog, request.Intent, CallerMaySelectPreviewReleases(context), cancellationToken))
                 return Problem("instance.catalog-selection-unavailable", "The selected managed release is unavailable.", StatusCodes.Status422UnprocessableEntity);
 
             try
@@ -844,27 +853,33 @@ public static class ManagedElsaInstanceEndpoints
     private static async Task<bool> HasOneEligibleCatalogMatchAsync(
         IGovernedReleaseCatalogStore catalog,
         ElsaInstanceIntent intent,
+        bool allowPreview,
         CancellationToken cancellationToken)
-        => await FindEligibleCatalogEntryAsync(catalog, intent, cancellationToken) is not null;
+        => await FindEligibleCatalogEntryAsync(catalog, intent, allowPreview, cancellationToken) is not null;
 
     internal static async Task<GovernedReleaseCatalogEntry?> FindEligibleCatalogEntryAsync(
         IGovernedReleaseCatalogStore catalog,
         ElsaInstanceIntent intent,
+        bool allowPreview,
         CancellationToken cancellationToken)
     {
         var previewConsentDigest = intent.Release.PreviewManifestDigest;
+        if (previewConsentDigest is not null && !allowPreview)
+            return null;
+
         var entries = await catalog.QueryAsync(new GovernedReleaseCatalogQuery(
             DistributionId: intent.Release.DistributionId,
             ReleaseLine: intent.Release.ReleaseLine,
             ReleaseVersion: intent.Release.RequestedVersion,
             Channel: intent.Release.Channel,
-            CatalogLifecycle: previewConsentDigest is null ? "supported" : null,
+            CatalogLifecycle: previewConsentDigest is null ? GovernedReleaseCatalogLifecycle.Supported : null,
             RegistryClass: "paid",
             TopologyId: intent.Application.TopologyId), cancellationToken);
-        var eligible = entries
-            .Where(entry => IsEligibleCatalogLifecycle(entry.CatalogLifecycle, previewConsentDigest is not null))
-            .Take(2)
-            .ToArray();
+        IEnumerable<GovernedReleaseCatalogEntry> candidates = entries
+            .Where(entry => IsEligibleCatalogLifecycle(entry.CatalogLifecycle, previewConsentDigest is not null));
+        if (previewConsentDigest is null)
+            candidates = ManagedElsaReleasePicker.WhereStableReleaseVersion(candidates);
+        var eligible = candidates.Take(2).ToArray();
         return eligible.Length == 1 &&
                (previewConsentDigest is null ||
                 string.Equals(eligible[0].ManifestDigest, previewConsentDigest, StringComparison.OrdinalIgnoreCase))
@@ -872,17 +887,34 @@ public static class ManagedElsaInstanceEndpoints
     }
 
     private static bool IsEligibleCatalogLifecycle(string lifecycle, bool allowPreview) =>
-        string.Equals(lifecycle, "supported", StringComparison.OrdinalIgnoreCase) ||
-        allowPreview && string.Equals(lifecycle, "preview", StringComparison.OrdinalIgnoreCase);
+        GovernedReleaseCatalogLifecycle.IsSupported(lifecycle) ||
+        allowPreview && GovernedReleaseCatalogLifecycle.IsPreview(lifecycle);
 
-    private static (string DistributionId, string ReleaseLine, string Version, string Channel, string TopologyId)
-        ReleaseIdentity(GovernedReleaseCatalogEntry entry) =>
-        (
-            entry.Distribution.Id.Trim().ToUpperInvariant(),
-            entry.Distribution.ReleaseLine.Trim().ToUpperInvariant(),
-            entry.Distribution.ReleaseVersion.Trim().ToUpperInvariant(),
-            entry.Distribution.Channel.Trim().ToUpperInvariant(),
-            entry.Topology.Id.Trim().ToUpperInvariant());
+    internal static bool CallerMaySelectPreviewReleases(HttpContext context) =>
+        ShouldIncludePreviewReleases(
+            context,
+            context.GetWorkspaceAccess(),
+            includePreview: true,
+            context.RequestServices.GetRequiredService<IOptions<CloudBffOptions>>().Value,
+            context.RequestServices.GetRequiredService<IOptions<CloudAccountIdentityOptions>>().Value,
+            context.RequestServices.GetRequiredService<IOptions<HubAccountIdentityOptions>>().Value);
+
+    internal static bool ShouldIncludePreviewReleases(
+        HttpContext context,
+        WorkspaceAccess access,
+        bool includePreview,
+        CloudBffOptions cloudBff,
+        CloudAccountIdentityOptions cloudAccount,
+        HubAccountIdentityOptions hubAccount)
+    {
+        if (!includePreview || access.Role is not WorkspaceRole.Owner)
+            return false;
+        if (HubAccountTokenSelector.IsValidatedHubAccount(context.User, hubAccount))
+            return false;
+        if (CloudAccountTokenSelector.IsValidatedCloudAccount(context.User, cloudAccount))
+            return false;
+        return CloudBffAuthorization.Classify(context.User, cloudBff) != CloudBffTokenDecision.Valid;
+    }
 
     private static ManagedElsaInstanceOperationalHealthResponse ToOperationalHealthResponse(
         ManagedLifecycleOperationalHealthSnapshot snapshot,
@@ -1273,13 +1305,16 @@ public sealed record ManagedElsaInstanceOperationListResponse(IReadOnlyList<Mana
 public sealed record ManagedElsaInstanceOnboardingOptionsResponse(
     IReadOnlyList<ManagedElsaInstanceReleaseOption> Releases,
     ManagedElsaInstanceLaunchProfile LaunchProfile,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     IReadOnlyList<ManagedElsaInstancePreviewReleaseOption>? PreviewReleases = null);
 public sealed record ManagedElsaInstanceReleaseOption(
     string DistributionId,
     string ReleaseLine,
     string Version,
     string Channel,
-    string TopologyId);
+    string TopologyId,
+    [property: Description("True on the newest Supported release by NuGet semver. Clients must not rely on array order.")]
+    bool Recommended = false);
 public sealed record ManagedElsaInstancePreviewReleaseOption(
     string DistributionId,
     string ReleaseLine,

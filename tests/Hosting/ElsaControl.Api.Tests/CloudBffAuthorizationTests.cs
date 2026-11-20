@@ -548,6 +548,75 @@ public sealed class CloudBffAuthorizationTests
     }
 
     [Fact]
+    public async Task Cloud_bff_onboarding_never_returns_preview_even_with_includePreview()
+    {
+        var catalog = new MutableReleaseCatalogStore(
+        [
+            CloudCatalogEntry("3.8.4", 'a'),
+            CloudCatalogEntry("3.8.0-preview.1", 'p', catalogLifecycle: "preview", channel: "preview")
+        ]);
+        await using var app = CreateBffApplication(configureServices: services =>
+        {
+            services.AddSingleton<IEngineProvisioningModule, TestProvisioningModule>();
+            services.RemoveAll<IGovernedReleaseCatalogStore>();
+            services.AddSingleton<IGovernedReleaseCatalogStore>(catalog);
+        });
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var client = CreateBffClient(app);
+        var workspaceId = (await client.GetControlJsonAsync<MeWorkspacesResponse>("/api/me/workspaces"))!
+            .Workspaces.Single().Id;
+        await EnableManagedHostingAsync(app, workspaceId);
+
+        using var response = await client.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/onboarding-options?includePreview=true");
+        var options = await response.Content.ReadControlJsonAsync<ManagedElsaInstanceOnboardingOptionsResponse>();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var release = Assert.Single(options!.Releases);
+        Assert.Equal("3.8.4", release.Version);
+        Assert.True(release.Recommended);
+        Assert.Null(options.PreviewReleases);
+    }
+
+    [Fact]
+    public async Task Cloud_bff_create_rejects_an_explicit_preview_pin()
+    {
+        var digest = $"sha256:{new string('a', 64)}";
+        var catalog = new MutableReleaseCatalogStore(
+        [
+            CloudCatalogEntry("3.8.0-preview.1", 'a', catalogLifecycle: "preview", channel: "preview")
+        ]);
+        await using var app = CreateBffApplication(configureServices: services =>
+        {
+            services.AddSingleton<IEngineProvisioningModule, TestProvisioningModule>();
+            services.RemoveAll<IGovernedReleaseCatalogStore>();
+            services.AddSingleton<IGovernedReleaseCatalogStore>(catalog);
+        });
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var client = CreateBffClient(app);
+        var workspaceId = (await client.GetControlJsonAsync<MeWorkspacesResponse>("/api/me/workspaces"))!
+            .Workspaces.Single().Id;
+        await EnableManagedHostingAsync(app, workspaceId);
+        var intent = Intent() with
+        {
+            Release = new ElsaReleaseIntent(
+                "valence-runtime", "3.8", "3.8.0-preview.1", "preview", previewManifestDigest: digest)
+        };
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/workspaces/{workspaceId:D}/instances")
+        {
+            Content = JsonContent.Create(
+                new ManagedElsaInstanceCreateRequest("Cloud preview", "cloud-preview-runtime", intent),
+                options: ControlApiTestApplication.JsonOptions)
+        };
+        request.Headers.Add("Idempotency-Key", "cloud-preview-create");
+
+        using var create = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, create.StatusCode);
+        Assert.Contains("instance.catalog-selection-unavailable", await create.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Ordinary_control_bearer_remains_available_when_bff_restrictions_are_enabled()
     {
         await using var app = CreateBffApplication();
@@ -746,6 +815,43 @@ public sealed class CloudBffAuthorizationTests
     {
         public string Id => "test";
         public string DisplayName => "Test provider";
+    }
+
+    private static GovernedReleaseCatalogEntry CloudCatalogEntry(
+        string version,
+        char digestMarker,
+        string catalogLifecycle = "supported",
+        string channel = "stable") => new(
+        "1.0",
+        $"oci://registry.example.test/releases/manifest@sha256:{new string(digestMarker, 64)}",
+        $"sha256:{new string(digestMarker, 64)}",
+        $"sha256:{new string((char)(digestMarker + 1), 64)}",
+        "https://evidence.example.test/signatures/manifest",
+        $"sha256:{new string((char)(digestMarker + 2), 64)}",
+        "paid",
+        new GovernedReleaseDistribution(
+            "valence-runtime", "3", "3.8", version, channel, "supported", null,
+            "https://github.com/valence-works/elsa", "0123456789abcdef", "run-1"),
+        new GovernedReleaseTopology("combined", "1.0", ["server"], [], [], [], []),
+        catalogLifecycle,
+        DateTimeOffset.Parse("2026-09-01T00:00:00Z"));
+
+    private sealed class MutableReleaseCatalogStore(IReadOnlyList<GovernedReleaseCatalogEntry> entries)
+        : IGovernedReleaseCatalogStore
+    {
+        public Task<GovernedReleaseCatalogWriteResult> StoreAsync(
+            IReadOnlyList<GovernedReleaseCatalogEntry> stored,
+            CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
+        public Task<IReadOnlyList<GovernedReleaseCatalogEntry>> QueryAsync(
+            GovernedReleaseCatalogQuery query,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<GovernedReleaseCatalogEntry>>(entries
+                .Where(entry => query.CatalogLifecycle is null ||
+                                string.Equals(entry.CatalogLifecycle, query.CatalogLifecycle, StringComparison.OrdinalIgnoreCase))
+                .Where(entry => query.RegistryClass is null ||
+                                string.Equals(entry.RegistryClass, query.RegistryClass, StringComparison.OrdinalIgnoreCase))
+                .ToArray());
     }
 
     private sealed class StaticReleaseCatalogStore : IGovernedReleaseCatalogStore

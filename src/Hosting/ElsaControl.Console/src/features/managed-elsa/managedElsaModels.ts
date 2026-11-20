@@ -71,6 +71,7 @@ export type ManagedElsaReleaseOption = {
   version: string;
   channel: string;
   topologyId: string;
+  recommended?: boolean;
 };
 
 export type ManagedElsaOnboardingOptions = {

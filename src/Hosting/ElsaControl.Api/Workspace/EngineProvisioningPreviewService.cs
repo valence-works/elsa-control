@@ -29,6 +29,7 @@ public sealed class EngineProvisioningPreviewService(
     public async Task<EngineProvisioningPreviewResponse> PreviewAsync(
         Guid workspaceId,
         EngineProvisioningRequest request,
+        bool allowPreview,
         CancellationToken cancellationToken = default)
     {
         var findings = new List<ElsaInstancePlanResolutionFinding>();
@@ -95,7 +96,8 @@ public sealed class EngineProvisioningPreviewService(
 
         if (!ManagedElsaInstanceEndpoints.MatchesInitialLaunchProfile(request.Intent.Placement))
             return Invalid("provisioning.hosting.unavailable", "The selected hosting options are unavailable.", "hosting");
-        var release = await ManagedElsaInstanceEndpoints.FindEligibleCatalogEntryAsync(releaseCatalog, request.Intent, cancellationToken);
+        var release = await ManagedElsaInstanceEndpoints.FindEligibleCatalogEntryAsync(
+            releaseCatalog, request.Intent, allowPreview, cancellationToken);
         if (release is null || !CatalogElsaInstanceLifecycleResolutionInputSource.TryBuildManifest(release, out var admission))
             return Invalid("provisioning.release.unavailable", "The selected release cannot be provisioned. Choose an available governed release.", "release");
         if (!authority.Value.TryGetOrigin(out var origin))
