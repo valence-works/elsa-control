@@ -518,6 +518,25 @@ public sealed class ElsaInstanceContractTests
         Assert.Throws<InvalidOperationException>(() => operation.TransitionTo(ElsaInstanceOperationState.Queued));
     }
 
+    [Theory]
+    [InlineData("worker-1", null, null, null)]
+    [InlineData(null, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", null, null)]
+    [InlineData(null, null, true, null)]
+    [InlineData(null, null, null, true)]
+    public void In_flight_worker_lease_is_any_worker_or_lease_field(
+        string? workerId,
+        string? leaseTokenHash,
+        bool? hasLeaseExpiry,
+        bool? hasHeartbeat)
+    {
+        DateTimeOffset? leaseExpiresAt = hasLeaseExpiry == true ? DateTimeOffset.UnixEpoch : null;
+        DateTimeOffset? heartbeatAt = hasHeartbeat == true ? DateTimeOffset.UnixEpoch : null;
+
+        Assert.True(ElsaInstanceOperationGuard.HasInFlightWorkerLease(
+            workerId, leaseTokenHash, leaseExpiresAt, heartbeatAt));
+        Assert.False(ElsaInstanceOperationGuard.HasInFlightWorkerLease(null, null, null, null));
+    }
+
     [Fact]
     public void Invalid_enum_values_fail_closed_in_transition_guards()
     {

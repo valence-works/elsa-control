@@ -138,6 +138,25 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
     /// deterministic core tests. Durable adapters perform the equivalent transition
     /// while retaining their existing deployment-run reservation.
     /// </summary>
+    /// <summary>
+    /// Test seam: plants an in-flight worker lease so accept-time Delete/Stop
+    /// can prove they wait behind a Queued predecessor that still holds a worker.
+    /// </summary>
+    public void SeedWorkerLease(Guid operationId, string workerId, DateTimeOffset expiresAt)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(workerId);
+        lock (_gate)
+        {
+            if (!_operations.ContainsKey(operationId))
+                throw new KeyNotFoundException("Lifecycle operation does not exist.");
+            _claims[operationId] = new LifecycleClaim(
+                workerId.Trim(),
+                CreateLeaseToken(),
+                1,
+                expiresAt.ToUniversalTime());
+        }
+    }
+
     public void MarkRecoveryRequired(Guid operationId, string? reasonCode = null)
     {
         lock (_gate)
@@ -988,11 +1007,14 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                         "The safe-exit predecessor changed concurrently.",
                         ElsaInstanceLifecycleConflictReason.OperationActive);
                 var priorRun = _deploymentRuns.Values.SingleOrDefault(x => x.Operation.Id == predecessor.Id);
-                if (predecessor.State == ElsaInstanceOperationState.Queued &&
+                var predecessorHasInFlightWorkerLease = PredecessorHasInFlightWorkerLease(predecessor.Id);
+                if ((predecessor.State == ElsaInstanceOperationState.Queued &&
                     priorRun is not null &&
-                    priorRun.Run.Status != WorkspaceDeploymentRunStatus.Queued)
+                    priorRun.Run.Status != WorkspaceDeploymentRunStatus.Queued) ||
+                    predecessorHasInFlightWorkerLease)
                 {
-                    // A committed provider hand-off still needs Delete to wait.
+                    // A committed, uncertain, or still-leased provider hand-off
+                    // still needs Delete/Stop to wait.
                 }
                 else
                 {
@@ -1028,10 +1050,12 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
             if (active is not null)
             {
                 var isDeleteSuccessor = operation.Action == ElsaInstanceOperationAction.Delete &&
-                    operation.State == ElsaInstanceOperationState.WaitingForPriorOperation &&
+                    operation.State is (ElsaInstanceOperationState.Accepted or ElsaInstanceOperationState.WaitingForPriorOperation) &&
                     active.Action != ElsaInstanceOperationAction.Delete;
                 if (!isDeleteSuccessor)
                     throw new ElsaInstanceLifecycleConflictException("An instance operation is already active.", ElsaInstanceLifecycleConflictReason.OperationActive);
+                if (operation.State == ElsaInstanceOperationState.Accepted)
+                    operation = operation.TransitionTo(ElsaInstanceOperationState.WaitingForPriorOperation);
             }
 
             if (operation.Action == ElsaInstanceOperationAction.Delete &&
@@ -1179,7 +1203,7 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                             !string.Equals(lastOperationId.Value, operation.Id.ToString("D"), StringComparison.OrdinalIgnoreCase) ||
                             operation.ExpectedVersion + 1 != instance.Version ||
                             predecessor.AcceptedAt > operation.AcceptedAt ||
-                            (_claims.TryGetValue(predecessor.Id, out var predecessorClaim) && predecessorClaim.ExpiresAt > now))
+                            PredecessorHasInFlightWorkerLease(predecessor.Id))
                             continue;
 
                         var cancelled = predecessor.TransitionTo(ElsaInstanceOperationState.Cancelled);
@@ -1691,6 +1715,17 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
         if (string.IsNullOrWhiteSpace(value))
             throw new ArgumentException("Idempotency key is required.", nameof(value));
         return value.Trim();
+    }
+
+    private bool PredecessorHasInFlightWorkerLease(Guid predecessorId)
+    {
+        if (!_claims.TryGetValue(predecessorId, out var claim))
+            return false;
+        return ElsaInstanceOperationGuard.HasInFlightWorkerLease(
+            claim.WorkerId,
+            claim.Token,
+            claim.ExpiresAt,
+            heartbeatAt: null);
     }
 
     private static string CreateLeaseToken() =>

@@ -193,6 +193,41 @@ public sealed class ElsaInstanceLifecycleWorkerTests
     }
 
     [Fact]
+    public async Task Delete_at_accept_time_waits_behind_a_queued_create_with_an_active_worker_lease()
+    {
+        var authority = new InMemoryElsaInstanceDeleteConfirmationAuthority();
+        var store = new InMemoryElsaInstanceLifecycleStore(new StaticTimeProvider(Now), authority);
+        var service = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
+        var accepted = await service.CreateAsync(CreateRequest("claims-leased-delete", "create-leased-delete"));
+        store.RegisterResolutionInput(accepted.Operation.Id, ResolutionInput(accepted.Instance));
+        await new ElsaInstanceLifecycleWorker(
+                store,
+                new RecordingResolver(SuccessfulResolution(WorkspaceId, accepted.Instance.Id)),
+                new StaticTimeProvider(Now))
+            .ProcessAvailableAsync("lifecycle-worker-1");
+        store.SeedWorkerLease(accepted.Operation.Id, "lifecycle-worker-1", Now.AddMinutes(5));
+
+        var confirmationId = Guid.NewGuid();
+        var actorAccountId = Guid.NewGuid();
+        authority.Add(new ActionConfirmation(
+            confirmationId,
+            WorkspaceId,
+            ConfirmationActionType.DeleteManagedInstance,
+            accepted.Instance.Id.ToString("D"),
+            actorAccountId,
+            Now,
+            Now.AddMinutes(5),
+            null));
+        var deletion = await service.DeleteAsync(new ElsaInstanceLifecycleRequest(
+            WorkspaceId, accepted.Instance.Id, store.Instances.Single().Version, "delete-after-leased",
+            DeleteConfirmationId: confirmationId, ActorAccountId: actorAccountId));
+
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, deletion.Operation.State);
+        Assert.Equal(ElsaInstanceOperationState.Queued, store.Operations.Single(x => x.Id == accepted.Operation.Id).State);
+        Assert.Null(await store.TryClaimNextDeletionAsync("deletion-worker-1", Now.AddMinutes(1)));
+    }
+
+    [Fact]
     public async Task Rejected_create_does_not_deadlock_a_later_delete()
     {
         var authority = new InMemoryElsaInstanceDeleteConfirmationAuthority();

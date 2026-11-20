@@ -741,9 +741,17 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                          await dbContext.AzureProviderOperations.AsNoTracking()
                             .AnyAsync(x => x.WorkspaceId == instance.WorkspaceId &&
                                            x.InstanceId == instance.Id, cancellationToken));
-                    if (queuedHandOffCommitted || queuedHasAzureProvenance)
+                    var predecessorHasInFlightWorkerLease = ElsaInstanceOperationGuard.HasInFlightWorkerLease(
+                        predecessor.WorkerId,
+                        predecessor.LeaseTokenHash,
+                        predecessor.LeaseExpiresAt,
+                        predecessor.HeartbeatAt);
+                    if (queuedHandOffCommitted || queuedHasAzureProvenance || predecessorHasInFlightWorkerLease)
                     {
-                        // A committed or uncertain provider hand-off still needs Delete to wait.
+                        // A committed, uncertain, or still-leased provider hand-off
+                        // still needs Delete/Stop to wait. The lease guard matches
+                        // TrySupersedeNeverSubmittedPredecessorAsync so an in-flight
+                        // SubmitAsync cannot finish after this Create is cancelled.
                     }
                     else
                     {
@@ -4381,8 +4389,11 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             predecessor.Action == ElsaInstanceOperationAction.Delete ||
             predecessor.DeploymentRunId is not { } runId ||
             predecessor.AcceptedAt > deleteOperation.AcceptedAt ||
-            predecessor.WorkerId is not null || predecessor.LeaseTokenHash is not null ||
-            predecessor.LeaseExpiresAt is not null || predecessor.HeartbeatAt is not null)
+            ElsaInstanceOperationGuard.HasInFlightWorkerLease(
+                predecessor.WorkerId,
+                predecessor.LeaseTokenHash,
+                predecessor.LeaseExpiresAt,
+                predecessor.HeartbeatAt))
             return false;
 
         var activeRuns = await dbContext.DeploymentRuns.AsNoTracking()
@@ -4482,8 +4493,11 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             predecessor.Action == ElsaInstanceOperationAction.Delete ||
             predecessor.DeploymentRunId is not { } runId ||
             predecessor.AcceptedAt > deleteOperation.AcceptedAt ||
-            predecessor.WorkerId is not null || predecessor.LeaseTokenHash is not null ||
-            predecessor.LeaseExpiresAt is not null || predecessor.HeartbeatAt is not null)
+            ElsaInstanceOperationGuard.HasInFlightWorkerLease(
+                predecessor.WorkerId,
+                predecessor.LeaseTokenHash,
+                predecessor.LeaseExpiresAt,
+                predecessor.HeartbeatAt))
             return false;
 
         var activeRuns = await dbContext.DeploymentRuns.AsNoTracking()

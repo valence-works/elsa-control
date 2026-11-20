@@ -330,6 +330,21 @@ public static class ElsaInstanceOperationGuard
     }
 
     /// <summary>
+    /// Indicates whether a worker still holds the operation. Presence of any
+    /// worker or lease field means a remote hand-off may still be in flight, so
+    /// a safe-exit successor must wait instead of cancelling the predecessor.
+    /// </summary>
+    public static bool HasInFlightWorkerLease(
+        string? workerId,
+        string? leaseTokenHash,
+        DateTimeOffset? leaseExpiresAt,
+        DateTimeOffset? heartbeatAt) =>
+        workerId is not null ||
+        leaseTokenHash is not null ||
+        leaseExpiresAt is not null ||
+        heartbeatAt is not null;
+
+    /// <summary>
     /// Indicates whether an operation is unfinished and therefore blocks a new
     /// mutation. Waiting successors remain blocking even though they do not hold
     /// the execution reservation themselves.
