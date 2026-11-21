@@ -5,6 +5,7 @@ using ElsaControl.Deployment.Artifacts;
 using ElsaControl.Deployment.Core.Cockpit;
 using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.Deployment.Core.Workspace;
+using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models;
 using Microsoft.EntityFrameworkCore;
 
@@ -413,6 +414,17 @@ public sealed class DeploymentWorkspaceStore(CatalogDbContext dbContext) : IWork
             .Where(x => x.WorkspaceId == workspaceId && x.AccountId == accountId)
             .Select(x => (DateTimeOffset?)x.CreatedAt)
             .SingleOrDefaultAsync(cancellationToken);
+
+    public Task<bool> IsPartnerProvisionerAsync(
+        Guid workspaceId,
+        Guid accountId,
+        CancellationToken cancellationToken = default) =>
+        dbContext.WorkspaceMemberships.AsNoTracking()
+            .AnyAsync(
+                x => x.WorkspaceId == workspaceId &&
+                     x.AccountId == accountId &&
+                     x.Role == WorkspaceRole.PartnerProvisioner,
+                cancellationToken);
 
     public async Task<IReadOnlyList<WorkspacePermissionGrant>> GetPermissionGrantsAsync(
         Guid workspaceId,

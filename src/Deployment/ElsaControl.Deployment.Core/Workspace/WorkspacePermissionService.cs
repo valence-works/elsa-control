@@ -38,6 +38,9 @@ public sealed class WorkspacePermissionService
         Guid accountId,
         CancellationToken cancellationToken = default)
     {
+        if (await _store.IsPartnerProvisionerAsync(workspaceId, accountId, cancellationToken))
+            throw new UnauthorizedAccessException("PartnerProvisioner cannot be granted Owner.");
+
         var membershipCreatedAt = await _store.GetWorkspaceMembershipCreatedAtAsync(workspaceId, accountId, cancellationToken)
             ?? throw new ArgumentException("The target account is not a member of this workspace.", nameof(accountId));
         var existingPermissions = (await _store.GetPermissionGrantsAsync(workspaceId, accountId, cancellationToken))
@@ -55,11 +58,26 @@ public sealed class WorkspacePermissionService
         return await GetEffectivePermissionsAsync(workspaceId, accountId, cancellationToken);
     }
 
+    public EffectiveWorkspacePermissions GetPartnerProvisionerPermissions(
+        Guid workspaceId,
+        Guid accountId,
+        IEnumerable<string> scopes)
+    {
+        ArgumentNullException.ThrowIfNull(scopes);
+        var permissions = PartnerProvisionerPermissions.FromScopes(scopes)
+            .Where(_allPermissions.Contains)
+            .ToHashSet(StringComparer.Ordinal);
+        return new EffectiveWorkspacePermissions(workspaceId, accountId, permissions);
+    }
+
     public async Task<EffectiveWorkspacePermissions> GetEffectivePermissionsAsync(
         Guid workspaceId,
         Guid accountId,
         CancellationToken cancellationToken = default)
     {
+        if (await _store.IsPartnerProvisionerAsync(workspaceId, accountId, cancellationToken))
+            return new EffectiveWorkspacePermissions(workspaceId, accountId, new HashSet<string>(StringComparer.Ordinal));
+
         var membershipCreatedAt = await _store.GetWorkspaceMembershipCreatedAtAsync(workspaceId, accountId, cancellationToken);
         if (!membershipCreatedAt.HasValue)
             return new EffectiveWorkspacePermissions(workspaceId, accountId, new HashSet<string>(StringComparer.Ordinal));
@@ -105,6 +123,8 @@ public sealed class WorkspacePermissionService
     {
         ValidateMutation(workspaceId, request.AccountId, request.Permission, request.GrantedByAccountId, nameof(request));
         await ValidateMutationMembersAsync(workspaceId, request.AccountId, request.GrantedByAccountId, nameof(request), cancellationToken);
+        if (await _store.IsPartnerProvisionerAsync(workspaceId, request.AccountId, cancellationToken))
+            throw new UnauthorizedAccessException("PartnerProvisioner cannot receive additional workspace permission grants.");
 
         return await _store.GrantPermissionAsync(workspaceId, request, cancellationToken);
     }

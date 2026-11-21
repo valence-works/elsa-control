@@ -130,7 +130,8 @@ internal static class ApiRateLimitRejection
         var policyName = context.HttpContext.GetEndpoint()?.Metadata.GetMetadata<EnableRateLimitingAttribute>()?.PolicyName;
         var (title, code) = CodeFor(policyName);
         if (string.Equals(policyName, CloudBootstrapRateLimitDefaults.PolicyName, StringComparison.Ordinal) ||
-            string.Equals(policyName, ManagedElsaInstanceLifecycleRateLimitDefaults.PolicyName, StringComparison.Ordinal))
+            string.Equals(policyName, ManagedElsaInstanceLifecycleRateLimitDefaults.PolicyName, StringComparison.Ordinal) ||
+            string.Equals(policyName, PartnerApiRateLimitDefaults.PolicyName, StringComparison.Ordinal))
         {
             context.HttpContext.Response.Headers.RetryAfter = RetryAfterSeconds(context.Lease)
                 .ToString(CultureInfo.InvariantCulture);
@@ -158,6 +159,9 @@ internal static class ApiRateLimitRejection
                 ManagedElsaInstanceLifecycleRateLimitDefaults.ExceededTitle,
                 ManagedElsaInstanceLifecycleRateLimitDefaults.ExceededCode),
             ExternalEngineHeartbeatPolicyName => (HeartbeatExceededTitle, HeartbeatExceededCode),
+            PartnerApiRateLimitDefaults.PolicyName => (
+                "Partner API authentication rate limit was exceeded.",
+                CloudBootstrapRateLimitDefaults.ExceededCode),
             _ => (HandoffExceededTitle, HandoffExceededCode)
         };
 

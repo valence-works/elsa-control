@@ -333,6 +333,13 @@ public sealed class AccountWorkspaceService
         if (!await _store.OrganizationAccountMembershipExistsAsync(organizationId, accountId, cancellationToken))
             return OrganizationWorkspaceMembershipResult.Denied(OrganizationWorkspaceFailure.TargetAccountNotOrganizationMember);
 
+        if (role is WorkspaceRole.Owner &&
+            await _store.IsPartnerProvisionerAsync(workspaceId, accountId, cancellationToken))
+            return OrganizationWorkspaceMembershipResult.Denied(OrganizationWorkspaceFailure.PartnerProvisionerCannotBeOwner);
+
+        if (role is WorkspaceRole.PartnerProvisioner)
+            return OrganizationWorkspaceMembershipResult.Denied(OrganizationWorkspaceFailure.OrganizationRoleNotAllowed);
+
         var membership = await _store.SetWorkspaceMembershipAsync(organizationId, workspaceId, accountId, role, cancellationToken);
         if (role is WorkspaceRole.Owner)
             await ProvisionOwnerAsync(workspaceId, accountId, cancellationToken);
@@ -407,6 +414,7 @@ public interface IAccountWorkspaceStore
     Task<OrganizationWorkspaceMutationResult> CreateOrganizationWorkspaceAsync(Guid organizationId, Guid creatorAccountId, CreateOrganizationWorkspaceRequest request, CancellationToken cancellationToken = default);
     Task<WorkspaceSummary?> UpdateOrganizationWorkspaceAsync(Guid organizationId, Guid workspaceId, Guid accountId, UpdateOrganizationWorkspaceRequest request, CancellationToken cancellationToken = default);
     Task<WorkspaceSummary> SetWorkspaceMembershipAsync(Guid organizationId, Guid workspaceId, Guid accountId, WorkspaceRole role, CancellationToken cancellationToken = default);
+    Task<bool> IsPartnerProvisionerAsync(Guid workspaceId, Guid accountId, CancellationToken cancellationToken = default);
     Task<bool> CanRemoveWorkspaceMembershipAsync(Guid workspaceId, Guid accountId, CancellationToken cancellationToken = default);
     Task RemoveWorkspaceMembershipAsync(Guid workspaceId, Guid accountId, CancellationToken cancellationToken = default);
     Task<WorkspaceEntitlementSnapshot?> GetLatestEntitlementAsync(Guid workspaceId, CancellationToken cancellationToken = default);
@@ -533,7 +541,8 @@ public enum OrganizationWorkspaceFailure
     DuplicateWorkspaceName,
     WorkspaceNotFound,
     TargetAccountNotOrganizationMember,
-    LastWorkspaceOwner
+    LastWorkspaceOwner,
+    PartnerProvisionerCannotBeOwner
 }
 
 public sealed record OrganizationAccessResult(Guid? AccountId, OrganizationRole? Role, OrganizationWorkspaceFailure? Failure)
