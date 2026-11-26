@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using System.Threading.Tasks;
 
 using ElsaControl.Deployment.Azure;
 
@@ -48,17 +49,208 @@ public sealed class AzureCommandProcessTests
     }
 
     [Fact]
+    public async Task Waits_for_stdout_eof_after_the_short_stderr_drain_expires()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        // Holds the first stdout commit past the 50 ms stderr drain. The previous drain-and-cancel
+        // path would snapshot an empty capture and succeed; this must keep waiting until EOF.
+        var observed = string.Empty;
+        var result = await new AzureCommandProcess(
+                TimeSpan.FromSeconds(5),
+                4096,
+                captureDrainTimeout: TimeSpan.FromMilliseconds(50),
+                stdoutEofTimeout: TimeSpan.FromSeconds(2),
+                wrapStandardOutput: stream => new DelayedReadStream(stream, TimeSpan.FromMilliseconds(400)))
+            .ExecuteAsync(
+                Shell("printf '%s' true"),
+                output =>
+                {
+                    observed = output.ToString();
+                    return AzureCommandNoOutput.Instance;
+                });
+
+        Assert.True(result.Succeeded, $"Delayed stdout EOF classified as {result.Status}/{result.FailureKind}.");
+        Assert.Equal("true", observed);
+    }
+
+    [Fact]
+    public async Task Returns_invalid_output_when_stdout_does_not_reach_eof_within_the_bound()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var stopwatch = Stopwatch.StartNew();
+        var observed = string.Empty;
+        var result = await new AzureCommandProcess(
+                TimeSpan.FromSeconds(5),
+                4096,
+                captureDrainTimeout: TimeSpan.FromMilliseconds(50),
+                stdoutEofTimeout: TimeSpan.FromMilliseconds(200),
+                wrapStandardOutput: stream => new DelayedReadStream(stream, TimeSpan.FromSeconds(2)))
+            .ExecuteAsync(
+                Shell("printf '%s' true"),
+                output =>
+                {
+                    observed = output.ToString();
+                    return AzureCommandNoOutput.Instance;
+                });
+        stopwatch.Stop();
+
+        Assert.Equal(AzureCommandProcessStatus.Failed, result.Status);
+        Assert.Equal(AzureCommandProcessFailureKind.InvalidOutput, result.FailureKind);
+        Assert.Equal(string.Empty, observed);
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(2), $"The fail-closed wait took {stopwatch.Elapsed}.");
+    }
+
+    [Fact]
+    public async Task Captures_stdout_when_a_descendant_keeps_stderr_open()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var observed = string.Empty;
+        var result = await new AzureCommandProcess(
+                TimeSpan.FromSeconds(5),
+                4096,
+                captureDrainTimeout: TimeSpan.FromMilliseconds(50))
+            .ExecuteAsync(
+                Shell("printf '%s' true; sleep 5 >&2 &"),
+                output =>
+                {
+                    observed = output.ToString();
+                    return AzureCommandNoOutput.Instance;
+                });
+
+        Assert.True(result.Succeeded);
+        Assert.Equal("true", observed);
+        Assert.True(result.ExitCode == 0);
+    }
+
+    [Fact]
     public async Task Does_not_wait_for_a_descendant_that_inherits_redirected_output_handles()
     {
         if (OperatingSystem.IsWindows())
             return;
 
         var stopwatch = Stopwatch.StartNew();
-        var result = await Process().ExecuteAsync(Shell("sleep 5 &"), ProjectNoOutput);
+        var result = await new AzureCommandProcess(
+                TimeSpan.FromSeconds(5),
+                4096,
+                stdoutEofTimeout: TimeSpan.FromMilliseconds(200))
+            .ExecuteAsync(Shell("sleep 5 &"), ProjectNoOutput);
         stopwatch.Stop();
 
-        Assert.True(result.Succeeded);
-        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(2), $"The completed parent took {stopwatch.Elapsed}.");
+        Assert.Equal(AzureCommandProcessStatus.Failed, result.Status);
+        Assert.Equal(AzureCommandProcessFailureKind.InvalidOutput, result.FailureKind);
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(2), $"The descendant-held stdout wait took {stopwatch.Elapsed}.");
+    }
+
+    [Fact]
+    public async Task Captures_a_four_byte_character_split_across_the_read_boundary()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var payload = new byte[4095 + 4 + 3];
+        Array.Fill(payload, (byte)'a', 0, 4095);
+        payload[4095] = 0xF0;
+        payload[4096] = 0x9F;
+        payload[4097] = 0x98;
+        payload[4098] = 0x80;
+        payload[4099] = (byte)'e';
+        payload[4100] = (byte)'n';
+        payload[4101] = (byte)'d';
+        var path = Path.Combine(Path.GetTempPath(), $"elsa-command-utf8-{Guid.NewGuid():N}");
+        try
+        {
+            await File.WriteAllBytesAsync(path, payload);
+            var observed = string.Empty;
+            var result = await new AzureCommandProcess(
+                    TimeSpan.FromSeconds(5),
+                    8192,
+                    wrapStandardOutput: stream => new MaxChunkStream(stream, 4096))
+                .ExecuteAsync(
+                    Shell($"cat '{path}'"),
+                    output =>
+                    {
+                        observed = output.ToString();
+                        return AzureCommandNoOutput.Instance;
+                    });
+
+            Assert.True(result.Succeeded, $"Split UTF-8 capture classified as {result.Status}/{result.FailureKind}.");
+            Assert.Equal(new string('a', 4095) + "\U0001F600end", observed);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task Captures_utf8_when_a_decoder_leftover_plus_a_full_read_fills_max_char_count()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var payload = new byte[3 + 4096];
+        payload[0] = 0xF0;
+        payload[1] = 0x9F;
+        payload[2] = 0x98;
+        Array.Fill(payload, (byte)'x', 3, 4096);
+        var path = Path.Combine(Path.GetTempPath(), $"elsa-command-utf8-overflow-{Guid.NewGuid():N}");
+        try
+        {
+            await File.WriteAllBytesAsync(path, payload);
+            var observed = string.Empty;
+            var result = await new AzureCommandProcess(
+                    TimeSpan.FromSeconds(5),
+                    8192,
+                    wrapStandardOutput: stream => new ChunkedReadStream(stream, [3, 4096]))
+                .ExecuteAsync(
+                    Shell($"cat '{path}'"),
+                    output =>
+                    {
+                        observed = output.ToString();
+                        return AzureCommandNoOutput.Instance;
+                    });
+
+            Assert.True(result.Succeeded, $"UTF-8 leftover overflow classified as {result.Status}/{result.FailureKind}.");
+            Assert.Equal("\uFFFD" + new string('x', 4096), observed);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task Flushes_a_trailing_incomplete_utf8_sequence_at_eof()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var path = Path.Combine(Path.GetTempPath(), $"elsa-command-utf8-flush-{Guid.NewGuid():N}");
+        try
+        {
+            await File.WriteAllBytesAsync(path, [0xF0, 0x9F, 0x98]); // incomplete U+1F600 prefix
+            var observed = string.Empty;
+            var result = await Process().ExecuteAsync(
+                Shell($"cat '{path}'"),
+                output =>
+                {
+                    observed = output.ToString();
+                    return AzureCommandNoOutput.Instance;
+                });
+
+            Assert.True(result.Succeeded, $"Incomplete UTF-8 flush classified as {result.Status}/{result.FailureKind}.");
+            Assert.Equal("\uFFFD", observed);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
     }
 
     [Fact]
@@ -245,4 +437,102 @@ public sealed class AzureCommandProcessTests
     private static string SleepThenCreateScript(TimeSpan duration, string marker) => OperatingSystem.IsWindows()
         ? $"ping 127.0.0.1 -n {(int)duration.TotalSeconds + 1} > nul & echo created > \"{marker}\""
         : $"sleep {duration.TotalSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)}; touch \"{marker}\"";
+
+    private abstract class DelegatingStream(Stream inner) : Stream
+    {
+        protected Stream Inner => inner;
+
+        public override bool CanRead => inner.CanRead;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush() => inner.Flush();
+        public override int Read(byte[] buffer, int offset, int count) => inner.Read(buffer, offset, count);
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override IAsyncResult BeginRead(byte[] buffer, int offset, int count, AsyncCallback? callback, object? state) =>
+            inner.BeginRead(buffer, offset, count, callback, state);
+        public override int EndRead(IAsyncResult asyncResult) => inner.EndRead(asyncResult);
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+            inner.ReadAsync(buffer, offset, count, cancellationToken);
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+            inner.ReadAsync(buffer, cancellationToken);
+    }
+
+    private sealed class DelayedReadStream(Stream inner, TimeSpan delay) : DelegatingStream(inner)
+    {
+        public override IAsyncResult BeginRead(byte[] buffer, int offset, int count, AsyncCallback? callback, object? state) =>
+            TaskToAsyncResult.Begin(ReadDelayedAsync(buffer.AsMemory(offset, count)), callback, state);
+
+        public override int EndRead(IAsyncResult asyncResult) => TaskToAsyncResult.End<int>(asyncResult);
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+            ReadDelayedAsync(buffer.AsMemory(offset, count));
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+            new(ReadDelayedAsync(buffer));
+
+        private async Task<int> ReadDelayedAsync(Memory<byte> buffer)
+        {
+            var read = await Inner.ReadAsync(buffer).ConfigureAwait(false);
+            if (read > 0 && delay > TimeSpan.Zero)
+                await Task.Delay(delay).ConfigureAwait(false);
+            return read;
+        }
+    }
+
+    private sealed class MaxChunkStream(Stream inner, int maxChunk) : DelegatingStream(inner)
+    {
+        public override IAsyncResult BeginRead(byte[] buffer, int offset, int count, AsyncCallback? callback, object? state) =>
+            Inner.BeginRead(buffer, offset, Math.Min(count, maxChunk), callback, state);
+
+        public override int Read(byte[] buffer, int offset, int count) =>
+            Inner.Read(buffer, offset, Math.Min(count, maxChunk));
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+            Inner.ReadAsync(buffer, offset, Math.Min(count, maxChunk), cancellationToken);
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (buffer.Length > maxChunk)
+                buffer = buffer[..maxChunk];
+            return Inner.ReadAsync(buffer, cancellationToken);
+        }
+    }
+
+    private sealed class ChunkedReadStream(Stream inner, int[] chunks) : DelegatingStream(inner)
+    {
+        private int _index;
+
+        private int NextCount(int count)
+        {
+            if (_index >= chunks.Length)
+                return count;
+            return Math.Min(count, chunks[_index++]);
+        }
+
+        public override IAsyncResult BeginRead(byte[] buffer, int offset, int count, AsyncCallback? callback, object? state) =>
+            Inner.BeginRead(buffer, offset, NextCount(count), callback, state);
+
+        public override int Read(byte[] buffer, int offset, int count) =>
+            Inner.Read(buffer, offset, NextCount(count));
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+            Inner.ReadAsync(buffer, offset, NextCount(count), cancellationToken);
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            var count = NextCount(buffer.Length);
+            if (buffer.Length > count)
+                buffer = buffer[..count];
+            return Inner.ReadAsync(buffer, cancellationToken);
+        }
+    }
 }

@@ -135,7 +135,7 @@ public sealed partial class ElsaInstanceProviderReconciliationHostedServiceTests
                    [ "$5" = --name ] && [ "$6" = "$expected_resource_group" ] &&
                    [ "$7" = --output ] && [ "$8" = tsv ] && [ "$9" = --only-show-errors ]; then
                     record foundation-group-exists
-                    printf '%s' true
+                    printf '%s\n' true
                     exit 0
                 fi
                 if [ "$#" -eq 11 ] &&
@@ -145,7 +145,7 @@ public sealed partial class ElsaInstanceProviderReconciliationHostedServiceTests
                    [ "$7" = --query ] && [ "$8" = tags ] &&
                    [ "$9" = --output ] && [ "${10}" = json ] && [ "${11}" = --only-show-errors ]; then
                     record foundation-group-tags
-                    printf '%s' '{"proof":"108","owner":"elsa-control","proof-name":"'"{{workloadName}}"'","expiry":"2026-12-31","sqlBootstrapObjectId":"33333333-3333-3333-3333-333333333333"}'
+                    printf '%s\n' '{"proof":"108","owner":"elsa-control","proof-name":"'"{{workloadName}}"'","expiry":"2026-12-31","sqlBootstrapObjectId":"33333333-3333-3333-3333-333333333333"}'
                     exit 0
                 fi
                 if [ "$#" -eq 14 ] &&
@@ -156,7 +156,7 @@ public sealed partial class ElsaInstanceProviderReconciliationHostedServiceTests
                    [ "${10}" = --query ] && [ "${11}" = properties.provisioningState ] &&
                    [ "${12}" = --output ] && [ "${13}" = tsv ] && [ "${14}" = --only-show-errors ]; then
                     record foundation-deployment
-                    printf '%s' Succeeded
+                    printf '%s\n' Succeeded
                     exit 0
                 fi
                 if [ "$#" -eq 13 ] &&
