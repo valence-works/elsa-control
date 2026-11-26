@@ -20,6 +20,7 @@
     <PackageReference Include="Pulumi" />
     <PackageReference Include="Pulumi.Automation" />
     <PackageReference Include="Pulumi.AzureNative" />
+    <PackageReference Include="Pulumi.Random" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="ElsaControl.Provisioning.Providers.Azure.Tests" />

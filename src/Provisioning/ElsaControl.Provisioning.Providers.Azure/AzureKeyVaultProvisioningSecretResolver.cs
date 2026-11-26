@@ -1,29 +1,17 @@
 using Azure.Identity;
 using Azure.Security.KeyVault.Secrets;
+using ElsaControl.Provisioning.Core;
 
 namespace ElsaControl.Provisioning.Providers.Azure;
 
 /// <summary>
-/// Resolves the three engine seed values from Key Vault using the runtime
-/// identity. Locators may be <c>secret://name</c> in stack config; values
-/// never are. Fail closed when the vault or a seed is missing.
+/// Resolves allowlisted secret locators from Key Vault using the runtime
+/// identity. Engine seeds are generated per stack and are never loaded from
+/// the shared vault. Fail closed if a locator cannot be fetched or if a
+/// shared seed key is present.
 /// </summary>
 public sealed class AzureKeyVaultProvisioningSecretResolver : IProvisioningSecretResolver
 {
-    public const string SqlConnectionConfigKey = "sqlConnectionSecretValue";
-    public const string SigningKeyConfigKey = "signingKeySecretValue";
-    public const string AdminPasswordConfigKey = "adminPasswordSecretValue";
-    public const string SqlConnectionSecretName = "sql-connection";
-    public const string SigningKeySecretName = "identity-signing-key";
-    public const string AdminPasswordSecretName = "admin-password";
-
-    private static readonly (string ConfigKey, string SecretName)[] Seeds =
-    [
-        (SqlConnectionConfigKey, SqlConnectionSecretName),
-        (SigningKeyConfigKey, SigningKeySecretName),
-        (AdminPasswordConfigKey, AdminPasswordSecretName)
-    ];
-
     private readonly Uri? _vaultUri;
     private readonly Func<SecretClient> _client;
 
@@ -40,14 +28,12 @@ public sealed class AzureKeyVaultProvisioningSecretResolver : IProvisioningSecre
 
     public bool IsReady => _vaultUri is not null;
 
-    public async Task EnsureReadyAsync(CancellationToken cancellationToken = default)
+    public Task EnsureReadyAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!IsReady)
             throw new InvalidOperationException("Provisioning seed vault is not configured.");
-        _ = await ResolveSecretConfigAsync(
-            new Dictionary<string, string>(StringComparer.Ordinal),
-            cancellationToken).ConfigureAwait(false);
+        return Task.CompletedTask;
     }
 
     public async Task<IReadOnlyDictionary<string, string>> ResolveSecretConfigAsync(
@@ -56,20 +42,22 @@ public sealed class AzureKeyVaultProvisioningSecretResolver : IProvisioningSecre
     {
         cancellationToken.ThrowIfCancellationRequested();
         ArgumentNullException.ThrowIfNull(stackConfig);
+        AzureEngineProgramPolicy.RejectSharedSeedValues(stackConfig);
         if (!IsReady)
             throw new InvalidOperationException("Provisioning seed vault is not configured.");
 
         var client = _client();
         var resolved = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var (configKey, secretName) in Seeds)
+        foreach (var pair in stackConfig)
         {
-            var name = secretName;
-            if (stackConfig.TryGetValue(configKey, out var locator)
-                && locator.StartsWith("secret://", StringComparison.OrdinalIgnoreCase))
+            if (!ProvisioningEventSanitizer.IsSecretLocator(pair.Value))
+                continue;
+            if (!ProvisioningEventSanitizer.IsAdmittedSecretConfigKey(pair.Key))
             {
-                name = locator["secret://".Length..].Trim().Trim('/');
+                throw new InvalidOperationException("Shared engine seed values are not admitted.");
             }
 
+            var name = pair.Value["secret://".Length..].Trim().Trim('/');
             if (string.IsNullOrWhiteSpace(name))
                 throw new InvalidOperationException("Provisioning seed vault secret is missing.");
 
@@ -78,7 +66,7 @@ public sealed class AzureKeyVaultProvisioningSecretResolver : IProvisioningSecre
             var value = secret.Value.Value;
             if (string.IsNullOrWhiteSpace(value))
                 throw new InvalidOperationException("Provisioning seed vault secret is missing.");
-            resolved[configKey] = value;
+            resolved[pair.Key] = value;
         }
 
         return resolved;

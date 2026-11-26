@@ -2,6 +2,9 @@ using ElsaControl.Provisioning.Abstractions;
 using ElsaControl.Provisioning.Core.Stores;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace ElsaControl.Provisioning.Core;
 
@@ -34,6 +37,7 @@ public static class ProvisioningServiceCollectionExtensions
         });
         services.AddSingleton<ProvisioningRunRegistry>();
         services.AddSingleton<ProvisioningReplicaIdentity>();
+        services.TryAddSingleton(TimeProvider.System);
 
         var configured = configuration.GetSection(ProvisioningOptions.ConfigurationSection).Get<ProvisioningOptions>()
                          ?? new ProvisioningOptions();
@@ -68,7 +72,10 @@ public static class ProvisioningServiceCollectionExtensions
                 provider.GetRequiredService<IProvisioningOperationStore>(),
                 provider.GetRequiredService<IProvisioningEventStore>(),
                 provider.GetRequiredService<IInfrastructureProvider>(),
-                provider.GetRequiredService<ProvisioningRunRegistry>()));
+                provider.GetRequiredService<ProvisioningRunRegistry>(),
+                provider.GetRequiredService<TimeProvider>(),
+                provider.GetService<ILogger<ProvisioningOperationWorker>>(),
+                provider.GetRequiredService<IOptions<ProvisioningOptions>>().Value.HeartbeatInterval));
         services.AddSingleton<ProvisioningProviderGuard>();
 
         if (runWorker && configured.WorkerEnabled)

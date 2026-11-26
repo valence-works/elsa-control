@@ -56,12 +56,19 @@ internal sealed class EmptyMocks : IMocks
     }
 }
 
-internal sealed class PlatformStackReferenceMocks : IMocks
+internal sealed class PlatformStackReferenceMocks(string? stamp = null) : IMocks
 {
+    public string PasswordResult { get; private set; } = "";
+
+    public string BytesResult { get; private set; } = "";
+
+    public string SqlFqdn { get; private set; } = "";
+
     public Task<(string? id, object state)> NewResourceAsync(MockResourceArgs args)
     {
         var outputs = ImmutableDictionary.CreateBuilder<string, object>();
         outputs.AddRange(args.Inputs);
+        var marker = stamp ?? "default";
         if (args.Type == "pulumi:pulumi:StackReference")
         {
             outputs["outputs"] = ImmutableDictionary<string, object>.Empty
@@ -98,7 +105,27 @@ internal sealed class PlatformStackReferenceMocks : IMocks
 
         if (args.Type is "azure-native:sql/server:Server" or "azure-native:sql:Server")
         {
-            outputs["fullyQualifiedDomainName"] = "sql.example";
+            SqlFqdn = stamp is null ? "sql.example" : $"sql-{stamp}.example";
+            outputs["fullyQualifiedDomainName"] = SqlFqdn;
+            outputs["name"] = args.Name ?? "engine-sql";
+        }
+
+        if ((args.Type ?? "").Contains("sql", StringComparison.OrdinalIgnoreCase)
+            && (args.Type ?? "").Contains("Database", StringComparison.OrdinalIgnoreCase))
+        {
+            outputs["name"] = "Elsa";
+        }
+
+        if ((args.Type ?? "").Contains("randomPassword", StringComparison.OrdinalIgnoreCase))
+        {
+            PasswordResult = $"pw-{marker}-{args.Name}";
+            outputs["result"] = PasswordResult;
+        }
+
+        if ((args.Type ?? "").Contains("randomBytes", StringComparison.OrdinalIgnoreCase))
+        {
+            BytesResult = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes($"{marker}:{args.Name}"));
+            outputs["base64"] = BytesResult;
         }
 
         args.Id ??= $"{args.Name}_id";
@@ -123,9 +150,11 @@ internal sealed class PlatformStackReferenceMocks : IMocks
     }
 }
 
-internal sealed class RecordingMocks(List<string> types) : IMocks
+internal sealed class RecordingMocks(List<string> types, string? stamp = null) : IMocks
 {
-    private readonly PlatformStackReferenceMocks _inner = new();
+    private readonly PlatformStackReferenceMocks _inner = new(stamp);
+
+    public PlatformStackReferenceMocks Inner => _inner;
 
     public List<MockResourceArgs> Args { get; } = [];
 
@@ -177,6 +206,53 @@ internal static class OutputExtensions
     }
 }
 
+internal sealed class RecordingGrant : IEngineSqlContainedUserGrant
+{
+    public List<(string Fqdn, string ClientId, string DisplayName, string DatabaseId)> Calls { get; } = [];
+
+    public IReadOnlyList<string> DatabaseIds => Calls.Select(call => call.DatabaseId).ToArray();
+
+    public void Apply(string fullyQualifiedDomainName, string clientId, string displayName, string databaseId) =>
+        Calls.Add((fullyQualifiedDomainName, clientId, displayName, databaseId));
+}
+
+internal static class MockSecretValues
+{
+    public static IReadOnlyList<string> From(RecordingMocks mocks)
+    {
+        var values = new List<string>();
+        foreach (var args in mocks.Args)
+        {
+            var type = args.Type ?? "";
+            var isVaultSecret = type.Contains("keyvault", StringComparison.OrdinalIgnoreCase)
+                                && (type.Contains("/secret:", StringComparison.OrdinalIgnoreCase)
+                                    || type.EndsWith(":Secret", StringComparison.OrdinalIgnoreCase));
+            if (!isVaultSecret || !args.Inputs.TryGetValue("properties", out var properties))
+                continue;
+
+            var value = PropertyValue(properties);
+            if (!string.IsNullOrWhiteSpace(value))
+                values.Add(value);
+        }
+
+        return values;
+    }
+
+    private static string? PropertyValue(object properties)
+    {
+        if (properties is System.Collections.IDictionary map)
+        {
+            foreach (var key in new[] { "value", "Value" })
+            {
+                if (map.Contains(key) && map[key] is not null)
+                    return map[key]!.ToString();
+            }
+        }
+
+        return null;
+    }
+}
+
 internal static class EngineTestConfig
 {
     public static readonly Guid InstanceId = Guid.Parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
@@ -199,10 +275,7 @@ internal static class EngineTestConfig
             ["maxReplicas"] = "1",
             ["elsaVersion"] = "3.8",
             ["sqlBootstrapObjectId"] = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
-            ["sqlBootstrapLogin"] = "elsa-control-bootstrap",
-            ["sqlConnectionSecretValue"] = "seeded-sql",
-            ["signingKeySecretValue"] = "seeded-signing",
-            ["adminPasswordSecretValue"] = "seeded-admin"
+            ["sqlBootstrapLogin"] = "elsa-control-bootstrap"
         };
 
     public static Dictionary<string, string> Platform(string environmentName = "staging") =>

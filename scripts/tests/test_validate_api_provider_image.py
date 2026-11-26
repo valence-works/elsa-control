@@ -69,7 +69,9 @@ esac
                          "curl --fail --silent --max-time 2", "deadline=$((SECONDS + 60))",
                          'docker stop --time 30 "$container_id"', "Application is shutting down...",
                          'docker rm --force "$container_id"',
-                         'test "$PULUMI_DISABLE_AUTOMATIC_PLUGIN_ACQUISITION" = true'):
+                         'test "$PULUMI_DISABLE_AUTOMATIC_PLUGIN_ACQUISITION" = true',
+                         "test -x /opt/pulumi/plugins/resource-azure-native-v3.11.0/pulumi-resource-azure-native",
+                         "test -x /opt/pulumi/plugins/resource-random-v4.18.5/pulumi-resource-random"):
             self.assertIn(required, source)
         for forbidden in ("--publish", "--volume"):
             self.assertNotIn(forbidden, source)

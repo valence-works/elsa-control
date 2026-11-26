@@ -1,4 +1,5 @@
 using ElsaControl.Provisioning.Abstractions;
+using ElsaControl.Provisioning.Core;
 using ElsaControl.Provisioning.Core.Stores;
 using ElsaControl.Provisioning.Persistence.EntityFrameworkCore;
 using Microsoft.Data.Sqlite;
@@ -101,10 +102,11 @@ public sealed class EfProvisioningStoreTests : IDisposable
         var claimed = await first.ClaimAsync(enqueued.OperationId, now);
         Assert.Equal(ProvisioningOperationState.Running, claimed!.State);
 
+        await Task.Delay(1500);
         var second = new EfProvisioningStore(
             _factory,
             new ProvisioningReplicaIdentity("reclaim", TimeSpan.FromMinutes(5)));
-        var interrupted = await second.FailInterruptedAsync(now.AddSeconds(1));
+        var interrupted = await second.FailInterruptedAsync(DateTimeOffset.UtcNow);
         Assert.Contains(interrupted, operation => operation.Id == claimed.Id);
         var loaded = await second.GetAsync(claimed.Id);
         Assert.Equal(ProvisioningOperationState.Failed, loaded!.State);
@@ -112,7 +114,7 @@ public sealed class EfProvisioningStoreTests : IDisposable
         Assert.True(loaded.StateLockMayBeHeld);
         Assert.Equal(claimed.Id, await second.GetHolderAsync(ProvisioningStackKind.Platform, "ef-expired"));
 
-        await second.MarkStateLockClearedAsync(claimed.Id);
+        Assert.True(await second.MarkStateLockClearedAsync(claimed.Id));
         Assert.Null(await second.GetHolderAsync(ProvisioningStackKind.Platform, "ef-expired"));
         var next = await second.CreateOrGetAsync(
             ProvisioningFixtures.Request(
@@ -121,9 +123,99 @@ public sealed class EfProvisioningStoreTests : IDisposable
                 ProvisioningFixtures.PlatformSpec("ef-expired"),
                 "ef-expired-next"),
             ProvisioningRequestHash.Compute(request) + "-next",
-            now.AddSeconds(2));
+            DateTimeOffset.UtcNow);
         Assert.False(next.LockConflict);
         Assert.Equal(ProvisioningOperationState.Queued, next.State);
+    }
+
+    [Fact]
+    public async Task Stale_run_cannot_complete_clear_or_release_after_takeover()
+    {
+        var request = ProvisioningFixtures.Request(
+            ProvisioningCommand.Provision,
+            ProvisioningFixtures.PlatformTarget("ef-stale"),
+            ProvisioningFixtures.PlatformSpec("ef-stale"),
+            "ef-stale");
+        var first = new EfProvisioningStore(
+            _factory,
+            new ProvisioningReplicaIdentity("stale", TimeSpan.FromMilliseconds(1)));
+        var enqueued = await first.CreateOrGetAsync(
+            request,
+            ProvisioningRequestHash.Compute(request),
+            DateTimeOffset.UtcNow);
+        var claimed = await first.ClaimAsync(enqueued.OperationId, DateTimeOffset.UtcNow);
+        Assert.Equal(1, claimed!.FencingToken);
+
+        await Task.Delay(1500);
+        var second = new EfProvisioningStore(
+            _factory,
+            new ProvisioningReplicaIdentity("owner", TimeSpan.FromMinutes(5)));
+        var interrupted = await second.FailInterruptedAsync(DateTimeOffset.UtcNow);
+        Assert.Contains(interrupted, operation => operation.Id == claimed.Id);
+
+        Assert.Null(await first.CompleteAsync(
+            claimed.Id,
+            ProvisioningOperationState.Succeeded,
+            DateTimeOffset.UtcNow,
+            failureCode: null,
+            fencingToken: claimed.FencingToken));
+        Assert.False(await first.ReleaseAsync(
+            ProvisioningStackKind.Platform,
+            "ef-stale",
+            claimed.Id,
+            fencingToken: claimed.FencingToken));
+        Assert.False(await first.MarkStateLockClearedAsync(claimed.Id, fencingToken: claimed.FencingToken));
+        Assert.Equal(claimed.Id, await second.GetHolderAsync(ProvisioningStackKind.Platform, "ef-stale"));
+        Assert.True(await second.MarkStateLockClearedAsync(claimed.Id));
+        Assert.Null(await second.GetHolderAsync(ProvisioningStackKind.Platform, "ef-stale"));
+    }
+
+    [Fact]
+    public async Task Stale_in_flight_run_aborts_without_backend_cancel()
+    {
+        var first = new EfProvisioningStore(
+            _factory,
+            new ProvisioningReplicaIdentity("a", TimeSpan.FromMilliseconds(1)));
+        var second = new EfProvisioningStore(
+            _factory,
+            new ProvisioningReplicaIdentity("b", TimeSpan.FromMinutes(5)));
+        var provider = new FakeInfrastructureProvider { Stall = TimeSpan.FromSeconds(30) };
+        var worker = new ProvisioningOperationWorker(
+            first,
+            first,
+            provider,
+            heartbeat: TimeSpan.FromSeconds(3));
+        var request = ProvisioningFixtures.Request(
+            ProvisioningCommand.Provision,
+            ProvisioningFixtures.PlatformTarget("ef-abort"),
+            ProvisioningFixtures.PlatformSpec("ef-abort"),
+            "ef-abort");
+        var enqueued = await first.CreateOrGetAsync(
+            request,
+            ProvisioningRequestHash.Compute(request),
+            DateTimeOffset.UtcNow);
+
+        var processing = worker.ProcessOnceAsync();
+        var started = provider.Started.Task;
+        var firstDone = await Task.WhenAny(started, processing).WaitAsync(TimeSpan.FromSeconds(5));
+        if (firstDone == processing)
+            await processing;
+        await started.WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.Delay(1500);
+        var interrupted = await second.FailInterruptedAsync(DateTimeOffset.UtcNow);
+        Assert.Contains(interrupted, operation => operation.Id == enqueued.OperationId);
+        await processing.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(0, provider.CancelCalls);
+        var loaded = await second.GetAsync(enqueued.OperationId);
+        Assert.Equal(ProvisioningOperationState.Failed, loaded!.State);
+        Assert.Equal(ProvisioningFailureCodes.Interrupted, loaded.FailureCode);
+        Assert.Null(await first.CompleteAsync(
+            enqueued.OperationId,
+            ProvisioningOperationState.Succeeded,
+            DateTimeOffset.UtcNow,
+            failureCode: null,
+            fencingToken: 1));
     }
 
     [Fact]

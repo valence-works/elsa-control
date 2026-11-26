@@ -124,87 +124,97 @@ public sealed class ElsaEngineStackTests
     [Fact]
     public async Task Contained_user_grant_is_skipped_during_preview()
     {
-        var granted = new List<string>();
-        EngineSqlContainedUser.GrantOverride = (_, _, name) => granted.Add(name);
-        try
-        {
-            using var config = PulumiTestConfig.Set(PulumiProjectNames.Engine, EngineTestConfig.Values());
-            var resources = await PulumiDeployment.TestAsync<ElsaEngineStack>(
-                new PlatformStackReferenceMocks(),
-                new TestOptions
-                {
-                    IsPreview = true,
-                    ProjectName = PulumiProjectNames.Engine,
-                    StackName = "engine-" + EngineTestConfig.InstanceId.ToString("N")
-                });
-            Assert.Empty(granted);
-            Assert.Contains(
-                resources,
-                resource => resource.GetResourceType() == EngineSqlContainedUser.ResourceTypeName);
-        }
-        finally
-        {
-            EngineSqlContainedUser.GrantOverride = null;
-        }
+        var grant = new RecordingGrant();
+        using var seam = EngineSqlContainedUserSeam.Use(grant);
+        using var config = PulumiTestConfig.Set(PulumiProjectNames.Engine, EngineTestConfig.Values());
+        var resources = await PulumiDeployment.TestAsync<ElsaEngineStack>(
+            new PlatformStackReferenceMocks(),
+            new TestOptions
+            {
+                IsPreview = true,
+                ProjectName = PulumiProjectNames.Engine,
+                StackName = "engine-" + EngineTestConfig.InstanceId.ToString("N")
+            });
+        Assert.Empty(grant.Calls);
+        Assert.Contains(
+            resources,
+            resource => resource.GetResourceType() == EngineSqlContainedUser.ResourceTypeName);
     }
 
     [Fact]
-    public async Task Contained_user_grant_runs_after_the_database_on_apply()
+    public async Task Contained_user_grant_waits_for_the_database_output()
     {
-        var granted = new List<string>();
+        var grant = new RecordingGrant();
+        using var seam = EngineSqlContainedUserSeam.Use(grant);
         var recorded = new List<string>();
         var mocks = new RecordingMocks(recorded);
-        EngineSqlContainedUser.GrantOverride = (_, _, name) => granted.Add(name);
-        try
-        {
-            using var config = PulumiTestConfig.Set(PulumiProjectNames.Engine, EngineTestConfig.Values());
-            var resources = await PulumiDeployment.TestAsync<ElsaEngineStack>(
-                mocks,
-                new TestOptions
-                {
-                    IsPreview = false,
-                    ProjectName = PulumiProjectNames.Engine,
-                    StackName = "engine-" + EngineTestConfig.InstanceId.ToString("N")
-                });
-            Assert.NotEmpty(granted);
-            var databaseIndex = recorded.FindIndex(type =>
-                type.Contains("sql", StringComparison.OrdinalIgnoreCase)
-                && type.Contains("Database", StringComparison.Ordinal));
-            var userIndex = recorded.FindIndex(type =>
-                type.Contains("ContainedUser", StringComparison.Ordinal));
-            Assert.True(databaseIndex >= 0);
-            Assert.True(userIndex > databaseIndex);
-            Assert.Contains(
-                resources,
-                resource => resource.GetResourceType() == EngineSqlContainedUser.ResourceTypeName);
-        }
-        finally
-        {
-            EngineSqlContainedUser.GrantOverride = null;
-        }
+        using var config = PulumiTestConfig.Set(PulumiProjectNames.Engine, EngineTestConfig.Values());
+        var resources = await PulumiDeployment.TestAsync<ElsaEngineStack>(
+            mocks,
+            new TestOptions
+            {
+                IsPreview = false,
+                ProjectName = PulumiProjectNames.Engine,
+                StackName = "engine-" + EngineTestConfig.InstanceId.ToString("N")
+            });
+        Assert.NotEmpty(grant.Calls);
+        Assert.Contains("Elsa", grant.DatabaseIds);
+        Assert.Contains(
+            resources,
+            resource => resource.GetResourceType() == EngineSqlContainedUser.ResourceTypeName);
     }
 
     [Fact]
     public async Task Contained_user_grant_is_idempotent()
     {
-        var calls = 0;
-        EngineSqlContainedUser.GrantOverride = (_, _, _) => calls++;
-        try
-        {
-            EngineSqlContainedUser.Grant(
-                "sql.database.windows.net",
-                "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-                "engine-runtime");
-            EngineSqlContainedUser.Grant(
-                "sql.database.windows.net",
-                "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-                "engine-runtime");
-            Assert.Equal(2, calls);
-        }
-        finally
-        {
-            EngineSqlContainedUser.GrantOverride = null;
-        }
+        var grant = new RecordingGrant();
+        using var seam = EngineSqlContainedUserSeam.Use(grant);
+        EngineSqlContainedUserSeam.Active.Apply(
+            "sql.example",
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "engine-runtime",
+            "engine-db_id");
+        EngineSqlContainedUserSeam.Active.Apply(
+            "sql.example",
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "engine-runtime",
+            "engine-db_id");
+        Assert.Equal(2, grant.Calls.Count);
+    }
+
+    [Fact]
+    public async Task Two_engines_get_distinct_values_for_all_three_seeds()
+    {
+        var first = await SeedsFor("engine-one");
+        var second = await SeedsFor("engine-two");
+        Assert.False(string.IsNullOrWhiteSpace(first.Inner.PasswordResult));
+        Assert.False(string.IsNullOrWhiteSpace(first.Inner.BytesResult));
+        Assert.False(string.IsNullOrWhiteSpace(first.Inner.SqlFqdn));
+        Assert.NotEqual(first.Inner.PasswordResult, second.Inner.PasswordResult);
+        Assert.NotEqual(first.Inner.BytesResult, second.Inner.BytesResult);
+        Assert.NotEqual(first.Inner.SqlFqdn, second.Inner.SqlFqdn);
+        var firstSecrets = MockSecretValues.From(first);
+        var secondSecrets = MockSecretValues.From(second);
+        if (firstSecrets.Count == 3 && secondSecrets.Count == 3)
+            Assert.Empty(firstSecrets.Intersect(secondSecrets, StringComparer.Ordinal));
+    }
+
+    private static async Task<RecordingMocks> SeedsFor(string engineName)
+    {
+        var recorded = new List<string>();
+        var mocks = new RecordingMocks(recorded, engineName);
+        using var config = PulumiTestConfig.Set(
+            PulumiProjectNames.Engine,
+            EngineTestConfig.Values(engineName));
+        await PulumiDeployment.TestAsync<ElsaEngineStack>(
+            mocks,
+            new TestOptions
+            {
+                IsPreview = false,
+                ProjectName = PulumiProjectNames.Engine,
+                StackName = engineName
+            });
+        return mocks;
     }
 
     private static string? SkuName(object? sku)

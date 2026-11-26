@@ -160,6 +160,41 @@ public sealed class ProvisioningServiceTests
     }
 
     [Fact]
+    public async Task Admin_password_override_locator_is_admitted()
+    {
+        var store = new InMemoryProvisioningStore();
+        var service = new ProvisioningService(store, store);
+        var result = await service.ProvisionAsync(ProvisioningFixtures.Request(
+            ProvisioningCommand.Provision,
+            ProvisioningFixtures.PlatformTarget("override"),
+            ProvisioningFixtures.PlatformSpec("override"),
+            "override-locator",
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [ProvisioningEventSanitizer.AdminPasswordOverrideKey] = "secret://engine-admin"
+            }));
+        Assert.Equal(ProvisioningOperationState.Queued, result.State);
+    }
+
+    [Fact]
+    public async Task Admin_password_override_plaintext_is_rejected()
+    {
+        var store = new InMemoryProvisioningStore();
+        var service = new ProvisioningService(store, store);
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.ProvisionAsync(ProvisioningFixtures.Request(
+                ProvisioningCommand.Provision,
+                ProvisioningFixtures.PlatformTarget("override-plain"),
+                ProvisioningFixtures.PlatformSpec("override-plain"),
+                "override-plain",
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    [ProvisioningEventSanitizer.AdminPasswordOverrideKey] = "must-not-appear"
+                })));
+        Assert.Equal("Admin password override must be a secret locator.", error.Message);
+    }
+
+    [Fact]
     public async Task Stack_config_rejects_credential_bearing_urls()
     {
         var store = new InMemoryProvisioningStore();

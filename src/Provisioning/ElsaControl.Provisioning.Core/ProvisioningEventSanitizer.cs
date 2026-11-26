@@ -11,6 +11,7 @@ public static partial class ProvisioningEventSanitizer
 {
     public const string DefaultResourceKind = "resource";
     public const string DefaultMessage = "Resource update.";
+    public const string AdminPasswordOverrideKey = "adminPasswordOverride";
 
     public static ProvisioningEvent Sanitize(ProvisioningEvent value)
     {
@@ -64,6 +65,13 @@ public static partial class ProvisioningEventSanitizer
         value.StartsWith("secret://", StringComparison.OrdinalIgnoreCase)
         && !value.Contains('=', StringComparison.Ordinal)
         && !UrlCredential().IsMatch(value);
+
+    /// <summary>
+    /// Allowlisted stack-config keys whose names match a secret token. Values
+    /// must still be locators, never plaintext.
+    /// </summary>
+    public static bool IsAdmittedSecretConfigKey(string key) =>
+        string.Equals(key, AdminPasswordOverrideKey, StringComparison.Ordinal);
 
     [GeneratedRegex(@"subscriptions[/\\]", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex SubscriptionPath();

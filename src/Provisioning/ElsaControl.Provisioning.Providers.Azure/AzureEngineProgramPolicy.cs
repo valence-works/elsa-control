@@ -13,6 +13,17 @@ public static class AzureEngineProgramPolicy
     public const string SupportedIsolation = "Dedicated";
     public const string SupportedTopology = "combined";
     public const string ImageDigestPrefix = "sha256:";
+    public const string SqlConnectionSecretValueKey = "sqlConnectionSecretValue";
+    public const string SigningKeySecretValueKey = "signingKeySecretValue";
+    public const string AdminPasswordSecretValueKey = "adminPasswordSecretValue";
+    public const string AdminPasswordOverrideKey = ProvisioningEventSanitizer.AdminPasswordOverrideKey;
+
+    public static readonly string[] SharedSeedConfigKeys =
+    [
+        SqlConnectionSecretValueKey,
+        SigningKeySecretValueKey,
+        AdminPasswordSecretValueKey
+    ];
 
     public static IReadOnlySet<string> AdmittedLocations { get; } =
         new HashSet<string>(["westeurope", "northeurope", "swedencentral"], StringComparer.OrdinalIgnoreCase);
@@ -57,9 +68,7 @@ public static class AzureEngineProgramPolicy
         Require(config, "sqlBootstrapLogin", out var bootstrapLogin);
         if (bootstrapLogin.Length > 128)
             throw new InvalidOperationException("SQL bootstrap login is invalid.");
-        Require(config, "sqlConnectionSecretValue", out _);
-        Require(config, "signingKeySecretValue", out _);
-        Require(config, "adminPasswordSecretValue", out _);
+        RejectSharedSeedValues(config);
 
         var revisionSuffix = Get(config, "revisionSuffix");
         if (!string.IsNullOrWhiteSpace(revisionSuffix))
@@ -89,6 +98,16 @@ public static class AzureEngineProgramPolicy
         if (digest.StartsWith(ImageDigestPrefix, StringComparison.OrdinalIgnoreCase))
             digest = digest[ImageDigestPrefix.Length..];
         return $"{config["imageRepository"].Trim()}@{ImageDigestPrefix}{digest.ToLowerInvariant()}";
+    }
+
+    public static void RejectSharedSeedValues(IReadOnlyDictionary<string, string> config)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        foreach (var key in SharedSeedConfigKeys)
+        {
+            if (config.ContainsKey(key))
+                throw new InvalidOperationException("Shared engine seed values are not admitted.");
+        }
     }
 
     private static void Require(IReadOnlyDictionary<string, string> config, string key, out string value)

@@ -22,12 +22,20 @@ public sealed class ProvisioningOptions
     public bool AllowFileBackend { get; set; }
 
     /// <summary>
-    /// Key Vault URI for the three engine seed values. Required when the
-    /// worker is on outside tests.
+    /// Optional vault for allowlisted secret locators such as an admin
+    /// password override. Engine seeds are generated per stack, not loaded
+    /// from this vault.
     /// </summary>
     public string? SeedVaultUri { get; set; }
 
     public TimeSpan PollInterval { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Lease heartbeat. Default 5s; the replica lease is 30s so several
+    /// missed beats are still live.
+    /// </summary>
+    public TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromSeconds(
+        ProvisioningReplicaIdentity.DefaultHeartbeatSeconds);
 
     public int BatchSize { get; set; } = 10;
 }

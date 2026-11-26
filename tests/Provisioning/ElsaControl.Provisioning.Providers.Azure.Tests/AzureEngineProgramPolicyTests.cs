@@ -64,12 +64,12 @@ public sealed class AzureEngineProgramPolicyTests
     }
 
     [Fact]
-    public void Missing_vault_seed_value_fails_closed()
+    public void Shared_engine_seed_values_are_rejected()
     {
         var values = EngineTestConfig.Values();
-        values.Remove("sqlConnectionSecretValue");
+        values["sqlConnectionSecretValue"] = "seeded-sql";
         var error = Assert.Throws<InvalidOperationException>(() => AzureEngineProgramPolicy.Validate(values));
-        Assert.Equal("Required engine stack config is missing.", error.Message);
+        Assert.Equal("Shared engine seed values are not admitted.", error.Message);
     }
 
     [Fact]

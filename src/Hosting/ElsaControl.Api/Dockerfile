@@ -102,6 +102,23 @@ RUN case "$TARGETARCH" in \
     && tar --extract --gzip --file /tmp/azure-native.tar.gz --directory /opt/pulumi/plugins/resource-azure-native-v${PULUMI_AZURE_NATIVE_VERSION} \
     && chmod 0755 /opt/pulumi/plugins/resource-azure-native-v${PULUMI_AZURE_NATIVE_VERSION}/pulumi-resource-azure-native \
     && rm /tmp/azure-native.tar.gz
+
+ARG PULUMI_RANDOM_VERSION=4.18.5
+ARG PULUMI_RANDOM_AMD64_SHA256=2f0e2e420022186f5ae94e0b84ee78ce2f6c9b9d7bd2e72995f8f95d03ac9137
+ARG PULUMI_RANDOM_ARM64_SHA256=d82e69672cc9d89b2ab23ce23754cdb5abeb18a8462df07ba46107fa078762a3
+RUN case "$TARGETARCH" in \
+      amd64) plugin_sha256="$PULUMI_RANDOM_AMD64_SHA256"; plugin_arch="amd64" ;; \
+      arm64) plugin_sha256="$PULUMI_RANDOM_ARM64_SHA256"; plugin_arch="arm64" ;; \
+      *) echo "Unsupported target architecture" >&2; exit 1 ;; \
+    esac \
+    && curl --fail --silent --show-error --location \
+      "https://github.com/pulumi/pulumi-random/releases/download/v${PULUMI_RANDOM_VERSION}/pulumi-resource-random-v${PULUMI_RANDOM_VERSION}-linux-${plugin_arch}.tar.gz" \
+      --output /tmp/random.tar.gz \
+    && echo "${plugin_sha256}  /tmp/random.tar.gz" | sha256sum --check --status \
+    && mkdir -p /opt/pulumi/plugins/resource-random-v${PULUMI_RANDOM_VERSION} \
+    && tar --extract --gzip --file /tmp/random.tar.gz --directory /opt/pulumi/plugins/resource-random-v${PULUMI_RANDOM_VERSION} \
+    && chmod 0755 /opt/pulumi/plugins/resource-random-v${PULUMI_RANDOM_VERSION}/pulumi-resource-random \
+    && rm /tmp/random.tar.gz
 COPY --from=runtime /usr/share/dotnet /usr/share/dotnet
 RUN ln -s /usr/share/dotnet/dotnet /usr/bin/dotnet \
     && dotnet --list-runtimes | grep --fixed-strings 'Microsoft.AspNetCore.App 10.' >/dev/null

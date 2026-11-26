@@ -90,6 +90,17 @@ public sealed class ProvisioningService(
 
         foreach (var pair in request.StackConfig)
         {
+            if (ProvisioningEventSanitizer.IsAdmittedSecretConfigKey(pair.Key))
+            {
+                if (!ProvisioningEventSanitizer.IsSecretLocator(pair.Value))
+                {
+                    throw new InvalidOperationException(
+                        "Admin password override must be a secret locator.");
+                }
+
+                continue;
+            }
+
             if (ProvisioningEventSanitizer.ContainsSecretOrResourceIdentifier(pair.Key)
                 || ProvisioningEventSanitizer.ContainsSecretOrResourceIdentifier(pair.Value))
             {

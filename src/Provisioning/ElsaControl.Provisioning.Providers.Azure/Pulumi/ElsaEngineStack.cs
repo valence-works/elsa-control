@@ -13,6 +13,7 @@ using Pulumi.AzureNative.OperationalInsights;
 using Pulumi.AzureNative.Resources;
 using Pulumi.AzureNative.Sql;
 using Pulumi.AzureNative.Sql.Inputs;
+using Pulumi.Random;
 using SkuName = Pulumi.AzureNative.KeyVault.SkuName;
 
 namespace ElsaControl.Provisioning.Providers.Azure.Programs;
@@ -99,9 +100,36 @@ public sealed class ElsaEngineStack : Stack
         var sqlRef = SecretRef(values, "sqlConnectionSecretName", "sql-connection");
         var signingRef = SecretRef(values, "signingKeySecretName", "identity-signing-key");
         var adminRef = SecretRef(values, "adminPasswordSecretName", "admin-password");
-        var sqlSecret = SeedVaultSecret("engine-sql-secret", sqlRef, values["sqlConnectionSecretValue"], resourceGroup, vault, keyVaultOfficer);
-        var signingSecret = SeedVaultSecret("engine-signing-secret", signingRef, values["signingKeySecretValue"], resourceGroup, vault, keyVaultOfficer);
-        var adminSecret = SeedVaultSecret("engine-admin-secret", adminRef, values["adminPasswordSecretValue"], resourceGroup, vault, keyVaultOfficer);
+        var signingKey = new RandomBytes("engine-signing-key", new RandomBytesArgs { Length = 32 });
+        Output<string> adminPasswordValue;
+        if (!string.IsNullOrWhiteSpace(config.Get(AzureEngineProgramPolicy.AdminPasswordOverrideKey)))
+        {
+            adminPasswordValue = config.GetSecret(AzureEngineProgramPolicy.AdminPasswordOverrideKey)
+                ?? throw new InvalidOperationException("Admin password override is missing.");
+        }
+        else
+        {
+            adminPasswordValue = new RandomPassword("engine-admin-password", new RandomPasswordArgs
+            {
+                Length = 32,
+                Special = true
+            }).Result;
+        }
+
+        var signingSecret = SeedVaultSecret(
+            "engine-signing-secret",
+            signingRef,
+            signingKey.Base64,
+            resourceGroup,
+            vault,
+            keyVaultOfficer);
+        var adminSecret = SeedVaultSecret(
+            "engine-admin-secret",
+            adminRef,
+            adminPasswordValue,
+            resourceGroup,
+            vault,
+            keyVaultOfficer);
 
         var logs = new Workspace("engine-logs", new WorkspaceArgs
         {
@@ -222,13 +250,25 @@ public sealed class ElsaEngineStack : Stack
             EndIpAddress = "0.0.0.0"
         });
 
+        var sqlConnection = Output.Tuple(server.FullyQualifiedDomainName, database.Name).Apply(tuple =>
+            Output.CreateSecret(
+                $"Server={tuple.Item1};Database={tuple.Item2};Authentication=Active Directory Default;Encrypt=True;TrustServerCertificate=False;"));
+        var sqlSecret = SeedVaultSecret(
+            "engine-sql-secret",
+            sqlRef,
+            sqlConnection,
+            resourceGroup,
+            vault,
+            keyVaultOfficer);
+
         var runtimeUser = new EngineSqlContainedUser(
             "engine-sql-user",
             new EngineSqlContainedUserArgs
             {
                 FullyQualifiedDomainName = server.FullyQualifiedDomainName,
                 ClientId = identity.ClientId,
-                DisplayName = identity.Name
+                DisplayName = identity.Name,
+                DatabaseId = database.Name
             },
             new ComponentResourceOptions
             {
@@ -406,7 +446,10 @@ public sealed class ElsaEngineStack : Stack
             "sqlWorkflowPackageVersion", "sqlQuartzPackageVersion",
             "elsaVersion", "sqlConnectionSecretName", "signingKeySecretName", "adminPasswordSecretName",
             "adminUsername", "sqlBootstrapObjectId", "sqlBootstrapLogin",
-            "sqlConnectionSecretValue", "signingKeySecretValue", "adminPasswordSecretValue"
+            AzureEngineProgramPolicy.SqlConnectionSecretValueKey,
+            AzureEngineProgramPolicy.SigningKeySecretValueKey,
+            AzureEngineProgramPolicy.AdminPasswordSecretValueKey,
+            AzureEngineProgramPolicy.AdminPasswordOverrideKey
         };
         var values = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var key in keys)
@@ -455,7 +498,7 @@ public sealed class ElsaEngineStack : Stack
     private static Pulumi.AzureNative.KeyVault.Secret SeedVaultSecret(
         string resourceName,
         string secretName,
-        string value,
+        Input<string> value,
         ResourceGroup resourceGroup,
         Vault vault,
         RoleAssignment officer) =>
@@ -466,7 +509,7 @@ public sealed class ElsaEngineStack : Stack
                 ResourceGroupName = resourceGroup.Name,
                 VaultName = vault.Name,
                 SecretName = secretName,
-                Properties = new SecretPropertiesArgs { Value = Output.CreateSecret(value) }
+                Properties = new SecretPropertiesArgs { Value = value }
             },
             new CustomResourceOptions { DependsOn = { officer } });
 

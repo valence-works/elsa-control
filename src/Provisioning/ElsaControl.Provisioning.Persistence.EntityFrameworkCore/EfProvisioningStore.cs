@@ -138,11 +138,11 @@ public sealed class EfProvisioningStore :
         await using var db = await _factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var running = ProvisioningOperationState.Running.ToString();
         var cancelling = ProvisioningOperationState.Cancelling.ToString();
-        var row = await db.Operations.AsNoTracking()
+        var rows = await db.Operations.AsNoTracking()
             .Where(item => item.LockKey == lockKey && (item.State == running || item.State == cancelling))
-            .OrderBy(item => item.AcceptedAt)
-            .FirstOrDefaultAsync(cancellationToken)
+            .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
+        var row = rows.OrderBy(item => item.AcceptedAt).FirstOrDefault();
         return row is null ? null : FromEntity(row);
     }
 
@@ -156,11 +156,11 @@ public sealed class EfProvisioningStore :
         await using var db = await _factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var queued = ProvisioningOperationState.Queued.ToString();
         var cancel = ProvisioningCommand.Cancel.ToString();
-        var row = await db.Operations.AsNoTracking()
+        var rows = await db.Operations.AsNoTracking()
             .Where(item => item.LockKey == lockKey && item.State == queued && item.Command != cancel)
-            .OrderBy(item => item.AcceptedAt)
-            .FirstOrDefaultAsync(cancellationToken)
+            .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
+        var row = rows.OrderBy(item => item.AcceptedAt).FirstOrDefault();
         return row is null ? null : FromEntity(row);
     }
 
@@ -176,11 +176,13 @@ public sealed class EfProvisioningStore :
         var queued = ProvisioningOperationState.Queued.ToString();
         var rows = await db.Operations.AsNoTracking()
             .Where(item => item.State == queued)
-            .OrderBy(item => item.AcceptedAt)
-            .Take(limit)
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
-        return rows.Select(FromEntity).ToArray();
+        return rows
+            .OrderBy(item => item.AcceptedAt)
+            .Take(limit)
+            .Select(FromEntity)
+            .ToArray();
     }
 
     public async Task<ProvisioningOperation?> ClaimAsync(
@@ -216,6 +218,7 @@ public sealed class EfProvisioningStore :
                 operation,
                 ProvisioningOperationState.Running,
                 now);
+            ProvisioningLockEntity? held = null;
             if (operation.Command != ProvisioningCommand.Cancel)
             {
                 running = running with
@@ -224,14 +227,15 @@ public sealed class EfProvisioningStore :
                     LeaseExpiresAt = _replica.ExpiresAt(now),
                     FencingToken = 1
                 };
-                db.Locks.Add(new ProvisioningLockEntity
+                held = new ProvisioningLockEntity
                 {
                     LockKey = row.LockKey,
                     OperationId = operation.Id,
                     Owner = _replica.Id,
                     LeaseExpiresAt = running.LeaseExpiresAt!.Value,
                     FencingToken = 1
-                });
+                };
+                db.Locks.Add(held);
             }
 
             Apply(row, running);
@@ -255,6 +259,13 @@ public sealed class EfProvisioningStore :
                 return conflicted;
             }
 
+            if (held is not null)
+            {
+                await StampLeaseExpiryAsync(db, held, row, cancellationToken).ConfigureAwait(false);
+                await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                running = FromEntity(row);
+            }
+
             return running;
         }, cancellationToken).ConfigureAwait(false);
     }
@@ -265,7 +276,8 @@ public sealed class EfProvisioningStore :
         DateTimeOffset now,
         string? failureCode,
         CancellationToken cancellationToken = default,
-        bool stateLockMayBeHeld = false)
+        bool stateLockMayBeHeld = false,
+        long? fencingToken = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         await using var db = await _factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
@@ -277,8 +289,18 @@ public sealed class EfProvisioningStore :
             if (row is null)
                 return null;
 
+            var operation = FromEntity(row);
+            var held = await db.Locks
+                .SingleOrDefaultAsync(item => item.LockKey == row.LockKey, cancellationToken)
+                .ConfigureAwait(false);
+            if (operation.Command != ProvisioningCommand.Cancel
+                && !HoldsFence(held, operationId, fencingToken ?? operation.FencingToken))
+            {
+                return null;
+            }
+
             var completed = ProvisioningOperationStateMachine.Transition(
-                FromEntity(row),
+                operation,
                 state,
                 now,
                 failureCode) with
@@ -286,15 +308,12 @@ public sealed class EfProvisioningStore :
                 StateLockMayBeHeld = stateLockMayBeHeld
             };
             Apply(row, completed);
-            if (ProvisioningOperationStateMachine.IsTerminal(completed.State) && !stateLockMayBeHeld)
+            if (ProvisioningOperationStateMachine.IsTerminal(completed.State)
+                && !stateLockMayBeHeld
+                && HoldsFence(held, operationId, fencingToken ?? operation.FencingToken)
+                && held is not null)
             {
-                var held = await db.Locks
-                    .SingleOrDefaultAsync(
-                        item => item.LockKey == row.LockKey && item.OperationId == operationId,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-                if (held is not null)
-                    db.Locks.Remove(held);
+                db.Locks.Remove(held);
             }
 
             await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
@@ -365,17 +384,19 @@ public sealed class EfProvisioningStore :
         {
             if (await LockHeldAsync(db, lockKey, cancellationToken).ConfigureAwait(false))
                 return false;
-            db.Locks.Add(new ProvisioningLockEntity
+            var held = new ProvisioningLockEntity
             {
                 LockKey = lockKey,
                 OperationId = operationId,
                 Owner = _replica.Id,
                 LeaseExpiresAt = _replica.ExpiresAt(now),
                 FencingToken = 1
-            });
+            };
+            db.Locks.Add(held);
             try
             {
                 await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                await StampLeaseExpiryAsync(db, held, row: null, cancellationToken).ConfigureAwait(false);
                 return true;
             }
             catch (DbUpdateException)
@@ -385,29 +406,27 @@ public sealed class EfProvisioningStore :
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task ReleaseAsync(
+    public async Task<bool> ReleaseAsync(
         ProvisioningStackKind kind,
         string stackName,
         Guid operationId,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        long? fencingToken = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var lockKey = ProvisioningStackLockKey.Format(kind, ProvisioningStackName.Canonicalize(stackName));
         await using var db = await _factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-        await WriteAsync(db, async () =>
+        return await WriteAsync(db, async () =>
         {
             var held = await db.Locks
-                .SingleOrDefaultAsync(
-                    item => item.LockKey == lockKey && item.OperationId == operationId,
-                    cancellationToken)
+                .SingleOrDefaultAsync(item => item.LockKey == lockKey, cancellationToken)
                 .ConfigureAwait(false);
-            if (held is not null)
-            {
-                db.Locks.Remove(held);
-                await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-            }
+            if (!HoldsFence(held, operationId, fencingToken))
+                return false;
 
-            return 0;
+            db.Locks.Remove(held!);
+            await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            return true;
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -451,9 +470,7 @@ public sealed class EfProvisioningStore :
             if (held is null)
                 return false;
 
-            held.LeaseExpiresAt = _replica.ExpiresAt(now);
-            row.LeaseExpiresAt = held.LeaseExpiresAt;
-            row.LeaseOwner = held.Owner;
+            await StampLeaseExpiryAsync(db, held, row, cancellationToken).ConfigureAwait(false);
             await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             return true;
         }, cancellationToken).ConfigureAwait(false);
@@ -502,28 +519,50 @@ public sealed class EfProvisioningStore :
         return rows.Select(FromEntity).ToArray();
     }
 
-    public async Task MarkStateLockClearedAsync(Guid operationId, CancellationToken cancellationToken = default)
+    public async Task<bool> HoldsFenceAsync(
+        Guid operationId,
+        long fencingToken,
+        CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         await using var db = await _factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-        await WriteAsync(db, async () =>
+        var row = await db.Operations.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.Id == operationId, cancellationToken)
+            .ConfigureAwait(false);
+        if (row is null)
+            return false;
+
+        var held = await db.Locks.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.LockKey == row.LockKey, cancellationToken)
+            .ConfigureAwait(false);
+        return HoldsFence(held, operationId, fencingToken);
+    }
+
+    public async Task<bool> MarkStateLockClearedAsync(
+        Guid operationId,
+        CancellationToken cancellationToken = default,
+        long? fencingToken = null)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        await using var db = await _factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        return await WriteAsync(db, async () =>
         {
             var row = await db.Operations
                 .SingleOrDefaultAsync(item => item.Id == operationId, cancellationToken)
                 .ConfigureAwait(false);
             if (row is null)
-                return 0;
+                return false;
+
+            var held = await db.Locks
+                .SingleOrDefaultAsync(item => item.LockKey == row.LockKey, cancellationToken)
+                .ConfigureAwait(false);
+            if (!HoldsFence(held, operationId, fencingToken ?? row.FencingToken))
+                return false;
 
             row.StateLockMayBeHeld = false;
-            var held = await db.Locks
-                .SingleOrDefaultAsync(
-                    item => item.LockKey == row.LockKey && item.OperationId == operationId,
-                    cancellationToken)
-                .ConfigureAwait(false);
-            if (held is not null)
-                db.Locks.Remove(held);
+            db.Locks.Remove(held!);
             await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-            return 0;
+            return true;
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -575,7 +614,7 @@ public sealed class EfProvisioningStore :
                 held.Owner = _replica.Id;
                 held.FencingToken++;
                 held.LeaseExpiresAt = _replica.ExpiresAt(now);
-                var completed = ProvisioningOperationStateMachine.Transition(
+                Apply(row, ProvisioningOperationStateMachine.Transition(
                     FromEntity(row),
                     ProvisioningOperationState.Failed,
                     now,
@@ -585,10 +624,11 @@ public sealed class EfProvisioningStore :
                     LeaseOwner = held.Owner,
                     LeaseExpiresAt = held.LeaseExpiresAt,
                     FencingToken = held.FencingToken
-                };
-                Apply(row, completed);
+                });
                 await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-                return completed;
+                await StampLeaseExpiryAsync(db, held, row, cancellationToken).ConfigureAwait(false);
+                await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                return FromEntity(row);
             }, cancellationToken).ConfigureAwait(false);
             if (reclaimed is not null)
                 failed.Add(reclaimed);
@@ -610,16 +650,16 @@ public sealed class EfProvisioningStore :
         var cancellingState = ProvisioningOperationState.Cancelling.ToString();
         var queuedState = ProvisioningOperationState.Queued.ToString();
         var cancelCommand = ProvisioningCommand.Cancel.ToString();
-        var running = await db.Operations
+        var runningRows = await db.Operations
             .Where(item => item.LockKey == lockKey && (item.State == runningState || item.State == cancellingState))
-            .OrderBy(item => item.AcceptedAt)
-            .FirstOrDefaultAsync(cancellationToken)
+            .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
-        var queued = await db.Operations
+        var running = runningRows.OrderBy(item => item.AcceptedAt).FirstOrDefault();
+        var queuedRows = await db.Operations
             .Where(item => item.LockKey == lockKey && item.State == queuedState && item.Command != cancelCommand)
-            .OrderBy(item => item.AcceptedAt)
-            .FirstOrDefaultAsync(cancellationToken)
+            .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
+        var queued = queuedRows.OrderBy(item => item.AcceptedAt).FirstOrDefault();
 
         string code;
         if (running is not null)
@@ -662,6 +702,57 @@ public sealed class EfProvisioningStore :
             Replayed: false,
             LockConflict: false,
             operation.FailureCode);
+    }
+
+    private bool HoldsFence(ProvisioningLockEntity? held, Guid operationId, long? fencingToken)
+    {
+        if (held is null || held.OperationId != operationId)
+            return false;
+        if (!string.Equals(held.Owner, _replica.Id, StringComparison.Ordinal))
+            return false;
+        if (fencingToken is { } token && held.FencingToken != token)
+            return false;
+        return true;
+    }
+
+    private async Task StampLeaseExpiryAsync(
+        ProvisioningDbContext db,
+        ProvisioningLockEntity held,
+        ProvisioningOperationEntity? row,
+        CancellationToken cancellationToken)
+    {
+        var seconds = Math.Max(1, (int)Math.Ceiling(_replica.Lease.TotalSeconds));
+        if (db.Database.IsSqlServer())
+        {
+            await db.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                 UPDATE [{ProvisioningDbContext.SchemaName}].[Locks]
+                 SET [LeaseExpiresAt] = TODATETIMEOFFSET(DATEADD(second, {seconds}, SYSUTCDATETIME()), 0)
+                 WHERE [LockKey] = {held.LockKey}
+                   AND [Owner] = {held.Owner}
+                   AND [FencingToken] = {held.FencingToken}
+                 """,
+                cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            await db.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                 UPDATE Locks
+                 SET LeaseExpiresAt = datetime('now', '+' || {seconds} || ' seconds')
+                 WHERE LockKey = {held.LockKey}
+                   AND Owner = {held.Owner}
+                   AND FencingToken = {held.FencingToken}
+                 """,
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        await db.Entry(held).ReloadAsync(cancellationToken).ConfigureAwait(false);
+        if (row is not null)
+        {
+            row.LeaseExpiresAt = held.LeaseExpiresAt;
+            row.LeaseOwner = held.Owner;
+        }
     }
 
     private static async Task<T> WriteAsync<T>(

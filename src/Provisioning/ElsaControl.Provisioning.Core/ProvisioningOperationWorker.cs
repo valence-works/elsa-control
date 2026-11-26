@@ -24,7 +24,7 @@ public sealed class ProvisioningOperationWorker(
     private readonly ILogger<ProvisioningOperationWorker> _logger = logger ?? NullLogger<ProvisioningOperationWorker>.Instance;
     private readonly TimeSpan _heartbeat = heartbeat is { } value && value > TimeSpan.Zero
         ? value
-        : TimeSpan.FromMilliseconds(250);
+        : TimeSpan.FromSeconds(ProvisioningReplicaIdentity.DefaultHeartbeatSeconds);
 
     public async Task<int> ProcessOnceAsync(int batchSize = 10, CancellationToken cancellationToken = default)
     {
@@ -81,11 +81,20 @@ public sealed class ProvisioningOperationWorker(
             using var registration = claimed.Command == ProvisioningCommand.Cancel
                 ? null
                 : _runs.Register(claimed, linked);
+            var lostFence = false;
 
             try
             {
-                var result = await RunWithHeartbeatAsync(claimed, request, linked, cancellationToken)
+                var result = await RunWithHeartbeatAsync(
+                        claimed,
+                        request,
+                        linked,
+                        cancellationToken,
+                        () => lostFence = true)
                     .ConfigureAwait(false);
+                if (lostFence)
+                    continue;
+
                 await events.AppendAsync(result.Events, cancellationToken).ConfigureAwait(false);
                 var terminal = TerminalState(claimed, result, linked, cancellationToken);
                 var holdLock = terminal != ProvisioningOperationState.Succeeded;
@@ -98,7 +107,8 @@ public sealed class ProvisioningOperationWorker(
                     _timeProvider.GetUtcNow(),
                     result.FailureCode,
                     cancellationToken,
-                    stateLockMayBeHeld: holdLock).ConfigureAwait(false);
+                    stateLockMayBeHeld: holdLock,
+                    fencingToken: claimed.FencingToken).ConfigureAwait(false);
                 if (completed is not null)
                 {
                     await events.AppendAsync(
@@ -124,6 +134,12 @@ public sealed class ProvisioningOperationWorker(
                         ],
                         cancellationToken).ConfigureAwait(false);
                 }
+            }
+            catch (OperationCanceledException) when (lostFence)
+            {
+                _logger.LogWarning(
+                    "Provisioning lease lost. OperationId={OperationId}",
+                    claimed.Id);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -179,7 +195,10 @@ public sealed class ProvisioningOperationWorker(
             if (request is not null)
                 await TryCancelProviderAsync(operation, request).ConfigureAwait(false);
 
-            await operations.MarkStateLockClearedAsync(operation.Id, CancellationToken.None)
+            await operations.MarkStateLockClearedAsync(
+                    operation.Id,
+                    CancellationToken.None,
+                    operation.FencingToken)
                 .ConfigureAwait(false);
 
             if (expired.Any(item => item.Id == operation.Id))
@@ -204,7 +223,8 @@ public sealed class ProvisioningOperationWorker(
         ProvisioningOperation operation,
         ProvisioningRequest request,
         CancellationTokenSource linked,
-        CancellationToken hostToken)
+        CancellationToken hostToken,
+        Action onLostFence)
     {
         var run = RunProviderAsync(operation, request, linked.Token);
         while (!run.IsCompleted)
@@ -217,8 +237,16 @@ public sealed class ProvisioningOperationWorker(
             if (hostToken.IsCancellationRequested)
                 break;
 
-            await operations.RenewLeaseAsync(operation.Id, _timeProvider.GetUtcNow(), CancellationToken.None)
+            var renewed = await operations
+                .RenewLeaseAsync(operation.Id, _timeProvider.GetUtcNow(), CancellationToken.None)
                 .ConfigureAwait(false);
+            if (!renewed)
+            {
+                onLostFence();
+                await linked.CancelAsync().ConfigureAwait(false);
+                break;
+            }
+
             if (await operations.IsCancelRequestedAsync(operation.Id, CancellationToken.None).ConfigureAwait(false))
                 await linked.CancelAsync().ConfigureAwait(false);
         }
@@ -269,6 +297,13 @@ public sealed class ProvisioningOperationWorker(
 
     private async Task TryCancelProviderAsync(ProvisioningOperation operation, ProvisioningRequest request)
     {
+        if (operation.Command != ProvisioningCommand.Cancel
+            && !await operations.HoldsFenceAsync(operation.Id, operation.FencingToken, CancellationToken.None)
+                .ConfigureAwait(false))
+        {
+            return;
+        }
+
         try
         {
             await provider.CancelAsync(operation, request, CancellationToken.None).ConfigureAwait(false);
@@ -295,7 +330,8 @@ public sealed class ProvisioningOperationWorker(
             _timeProvider.GetUtcNow(),
             failureCode,
             cancellationToken,
-            stateLockMayBeHeld).ConfigureAwait(false);
+            stateLockMayBeHeld,
+            operation.FencingToken).ConfigureAwait(false);
         await events.AppendAsync(
             [
                 new ProvisioningEvent(
@@ -324,7 +360,8 @@ public sealed class ProvisioningOperationWorker(
             _timeProvider.GetUtcNow(),
             failureCode,
             cancellationToken,
-            stateLockMayBeHeld: true).ConfigureAwait(false);
+            stateLockMayBeHeld: true,
+            operation.FencingToken).ConfigureAwait(false);
         await events.AppendAsync(
             [
                 new ProvisioningEvent(

@@ -25,7 +25,8 @@ public interface IProvisioningOperationStore
         DateTimeOffset now,
         string? failureCode,
         CancellationToken cancellationToken = default,
-        bool stateLockMayBeHeld = false);
+        bool stateLockMayBeHeld = false,
+        long? fencingToken = null);
 
     Task<ProvisioningRequest?> GetRequestAsync(Guid operationId, CancellationToken cancellationToken = default);
 
@@ -48,7 +49,15 @@ public interface IProvisioningOperationStore
     Task<IReadOnlyList<ProvisioningOperation>> ListStateLockPendingAsync(
         CancellationToken cancellationToken = default);
 
-    Task MarkStateLockClearedAsync(Guid operationId, CancellationToken cancellationToken = default);
+    Task<bool> HoldsFenceAsync(
+        Guid operationId,
+        long fencingToken,
+        CancellationToken cancellationToken = default);
+
+    Task<bool> MarkStateLockClearedAsync(
+        Guid operationId,
+        CancellationToken cancellationToken = default,
+        long? fencingToken = null);
 
     /// <summary>
     /// Reclaims operations whose lock lease has expired. Live replicas are left

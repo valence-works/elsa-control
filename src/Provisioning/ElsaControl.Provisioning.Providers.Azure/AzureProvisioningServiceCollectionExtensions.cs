@@ -21,10 +21,6 @@ public static class AzureProvisioningServiceCollectionExtensions
         var options = configuration.GetSection(ProvisioningOptions.ConfigurationSection).Get<ProvisioningOptions>()
                       ?? new ProvisioningOptions();
         var vault = configuration["Provisioning:SeedVaultUri"];
-        if (string.IsNullOrWhiteSpace(vault) && !options.AllowFakeProvider)
-        {
-            throw new InvalidOperationException("Provisioning seed vault is not configured.");
-        }
 
         services.AddSingleton(new AzurePulumiAutomationRunner(options.AllowFileBackend));
         services.AddSingleton<ICredentialResolver, AzureWorkloadIdentityCredentials>();

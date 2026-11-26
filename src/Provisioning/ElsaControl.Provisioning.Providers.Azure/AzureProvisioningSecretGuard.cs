@@ -17,7 +17,7 @@ public sealed class AzureProvisioningSecretGuard(
         var configured = options.Value;
         if (!configured.WorkerEnabled || configured.AllowFakeProvider)
             return;
-        if (!secrets.IsReady)
+        if (secrets is AzureKeyVaultProvisioningSecretResolver && !secrets.IsReady)
         {
             throw new InvalidOperationException("Provisioning seed vault is not configured.");
         }

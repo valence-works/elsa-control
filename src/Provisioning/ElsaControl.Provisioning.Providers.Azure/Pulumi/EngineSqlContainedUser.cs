@@ -8,19 +8,66 @@ internal sealed class EngineSqlContainedUserArgs
     public Input<string> FullyQualifiedDomainName { get; set; } = null!;
     public Input<string> ClientId { get; set; } = null!;
     public Input<string> DisplayName { get; set; } = null!;
+    public Input<string> DatabaseId { get; set; } = null!;
+}
+
+internal interface IEngineSqlContainedUserGrant
+{
+    void Apply(string fullyQualifiedDomainName, string clientId, string displayName, string databaseId);
+}
+
+/// <summary>
+/// Test-only seam. Production uses the Azure SQL grant. Never a public static
+/// mutable Action on the component.
+/// </summary>
+internal static class EngineSqlContainedUserSeam
+{
+    private static readonly AsyncLocal<IEngineSqlContainedUserGrant?> Current = new();
+    private static IEngineSqlContainedUserGrant? Fallback;
+
+    internal static IEngineSqlContainedUserGrant Active =>
+        Current.Value ?? Fallback ?? AzureSqlContainedUserGrant.Instance;
+
+    internal static IDisposable Use(IEngineSqlContainedUserGrant grant)
+    {
+        ArgumentNullException.ThrowIfNull(grant);
+        var previousLocal = Current.Value;
+        var previousFallback = Fallback;
+        Current.Value = grant;
+        Fallback = grant;
+        return new Reset(previousLocal, previousFallback);
+    }
+
+    private sealed class Reset(
+        IEngineSqlContainedUserGrant? previousLocal,
+        IEngineSqlContainedUserGrant? previousFallback) : IDisposable
+    {
+        public void Dispose()
+        {
+            Current.Value = previousLocal;
+            Fallback = previousFallback;
+        }
+    }
+}
+
+internal sealed class AzureSqlContainedUserGrant : IEngineSqlContainedUserGrant
+{
+    internal static AzureSqlContainedUserGrant Instance { get; } = new();
+
+    public void Apply(string fullyQualifiedDomainName, string clientId, string displayName, string databaseId) =>
+        EngineSqlContainedUser.Grant(fullyQualifiedDomainName, clientId, displayName, databaseId);
 }
 
 /// <summary>
 /// Tracked contained Azure SQL user matching Bicep's sql-bootstrap.sql.
 /// Depends on the database and the server's Entra admin. Skipped during
 /// Preview. The server Entra admin is the governed bootstrap principal,
-/// not this runtime identity.
+/// not this runtime identity. The grant Apply waits on the database output
+/// so it cannot run before the database exists.
 /// </summary>
 internal sealed class EngineSqlContainedUser : ComponentResource
 {
     public const string ResourceTypeName = "elsacontrol:sql:ContainedUser";
-
-    internal static Action<string, string, string>? GrantOverride { get; set; }
 
     public EngineSqlContainedUser(
         string name,
@@ -32,9 +79,11 @@ internal sealed class EngineSqlContainedUser : ComponentResource
         DisplayName = Output.Tuple(
             args.FullyQualifiedDomainName.Apply(value => value),
             args.ClientId.Apply(value => value),
-            args.DisplayName.Apply(value => value)).Apply(tuple =>
+            args.DisplayName.Apply(value => value),
+            args.DatabaseId.Apply(value => value)).Apply(tuple =>
         {
-            Grant(tuple.Item1, tuple.Item2, tuple.Item3);
+            if (!IsPreview())
+                EngineSqlContainedUserSeam.Active.Apply(tuple.Item1, tuple.Item2, tuple.Item3, tuple.Item4);
             return tuple.Item3;
         });
         RegisterOutputs(new Dictionary<string, object?> { ["displayName"] = DisplayName });
@@ -42,15 +91,14 @@ internal sealed class EngineSqlContainedUser : ComponentResource
 
     public Output<string> DisplayName { get; }
 
-    internal static void Grant(string fullyQualifiedDomainName, string clientId, string displayName)
+    internal static void Grant(
+        string fullyQualifiedDomainName,
+        string clientId,
+        string displayName,
+        string? databaseId = null)
     {
         if (IsPreview())
             return;
-        if (GrantOverride is not null)
-        {
-            GrantOverride(fullyQualifiedDomainName, clientId, displayName);
-            return;
-        }
 
         if (!fullyQualifiedDomainName.EndsWith(".database.windows.net", StringComparison.OrdinalIgnoreCase))
             return;
@@ -86,8 +134,12 @@ internal sealed class EngineSqlContainedUser : ComponentResource
                 ALTER ROLE db_ddladmin ADD MEMBER [{escaped}];
             """;
 
+        var databaseName = string.IsNullOrWhiteSpace(databaseId) ? "Elsa" : databaseId;
+        if (!IsSafeSqlName(databaseName))
+            throw new InvalidOperationException("Engine database name is invalid.");
+
         using var connection = new SqlConnection(
-            $"Server={fullyQualifiedDomainName};Database=Elsa;Encrypt=True;TrustServerCertificate=False;Authentication=Active Directory Default;");
+            $"Server={fullyQualifiedDomainName};Database={databaseName};Encrypt=True;TrustServerCertificate=False;Authentication=Active Directory Default;");
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = sql;

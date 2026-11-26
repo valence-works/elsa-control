@@ -48,6 +48,15 @@ public sealed class ProvisioningEventSanitizerTests
             "secret://vault/database-connection"));
 
     [Fact]
+    public void Admin_password_override_key_is_allowlisted()
+    {
+        Assert.True(ProvisioningEventSanitizer.IsAdmittedSecretConfigKey(
+            ProvisioningEventSanitizer.AdminPasswordOverrideKey));
+        Assert.True(ProvisioningEventSanitizer.ContainsSecretOrResourceIdentifier(
+            ProvisioningEventSanitizer.AdminPasswordOverrideKey));
+    }
+
+    [Fact]
     public void Capability_kind_secrets_is_not_treated_as_a_secret_value()
     {
         var sanitised = ProvisioningEventSanitizer.Sanitize(

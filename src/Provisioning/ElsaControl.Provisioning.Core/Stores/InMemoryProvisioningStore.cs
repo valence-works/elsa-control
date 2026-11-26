@@ -205,7 +205,8 @@ public sealed class InMemoryProvisioningStore :
         DateTimeOffset now,
         string? failureCode,
         CancellationToken cancellationToken = default,
-        bool stateLockMayBeHeld = false)
+        bool stateLockMayBeHeld = false,
+        long? fencingToken = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         lock (_gate)
@@ -213,16 +214,21 @@ public sealed class InMemoryProvisioningStore :
             if (!_operations.TryGetValue(operationId, out var operation))
                 return Task.FromResult<ProvisioningOperation?>(null);
 
+            var lockKey = ProvisioningStackLockKey.Format(operation.StackKind, operation.StackName);
+            if (operation.Command != ProvisioningCommand.Cancel
+                && !HoldsFence(lockKey, operationId, fencingToken ?? operation.FencingToken))
+            {
+                return Task.FromResult<ProvisioningOperation?>(null);
+            }
+
             var completed = ProvisioningOperationStateMachine.Transition(operation, state, now, failureCode) with
             {
                 StateLockMayBeHeld = stateLockMayBeHeld
             };
             _operations[operationId] = completed;
-            var lockKey = ProvisioningStackLockKey.Format(operation.StackKind, operation.StackName);
             if (ProvisioningOperationStateMachine.IsTerminal(completed.State)
                 && !stateLockMayBeHeld
-                && _locks.TryGetValue(lockKey, out var holder)
-                && holder.OperationId == operationId)
+                && HoldsFence(lockKey, operationId, fencingToken ?? operation.FencingToken))
             {
                 _locks.Remove(lockKey);
             }
@@ -274,21 +280,23 @@ public sealed class InMemoryProvisioningStore :
         }
     }
 
-    public Task ReleaseAsync(
+    public Task<bool> ReleaseAsync(
         ProvisioningStackKind kind,
         string stackName,
         Guid operationId,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        long? fencingToken = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var lockKey = ProvisioningStackLockKey.Format(kind, stackName);
         lock (_gate)
         {
-            if (_locks.TryGetValue(lockKey, out var holder) && holder.OperationId == operationId)
-                _locks.Remove(lockKey);
-        }
+            if (!HoldsFence(lockKey, operationId, fencingToken))
+                return Task.FromResult(false);
 
-        return Task.CompletedTask;
+            _locks.Remove(lockKey);
+            return Task.FromResult(true);
+        }
     }
 
     public Task<Guid?> GetHolderAsync(
@@ -362,21 +370,41 @@ public sealed class InMemoryProvisioningStore :
         }
     }
 
-    public Task MarkStateLockClearedAsync(Guid operationId, CancellationToken cancellationToken = default)
+    public Task<bool> HoldsFenceAsync(
+        Guid operationId,
+        long fencingToken,
+        CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         lock (_gate)
         {
             if (!_operations.TryGetValue(operationId, out var operation))
-                return Task.CompletedTask;
+                return Task.FromResult(false);
+
+            var lockKey = ProvisioningStackLockKey.Format(operation.StackKind, operation.StackName);
+            return Task.FromResult(HoldsFence(lockKey, operationId, fencingToken));
+        }
+    }
+
+    public Task<bool> MarkStateLockClearedAsync(
+        Guid operationId,
+        CancellationToken cancellationToken = default,
+        long? fencingToken = null)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            if (!_operations.TryGetValue(operationId, out var operation))
+                return Task.FromResult(false);
+
+            var lockKey = ProvisioningStackLockKey.Format(operation.StackKind, operation.StackName);
+            if (!HoldsFence(lockKey, operationId, fencingToken ?? operation.FencingToken))
+                return Task.FromResult(false);
 
             _operations[operationId] = operation with { StateLockMayBeHeld = false };
-            var lockKey = ProvisioningStackLockKey.Format(operation.StackKind, operation.StackName);
-            if (_locks.TryGetValue(lockKey, out var holder) && holder.OperationId == operationId)
-                _locks.Remove(lockKey);
+            _locks.Remove(lockKey);
+            return Task.FromResult(true);
         }
-
-        return Task.CompletedTask;
     }
 
     public Task<IReadOnlyList<ProvisioningOperation>> FailInterruptedAsync(
@@ -491,6 +519,17 @@ public sealed class InMemoryProvisioningStore :
             Replayed: false,
             LockConflict: false,
             operation.FailureCode);
+    }
+
+    private bool HoldsFence(string lockKey, Guid operationId, long? fencingToken)
+    {
+        if (!_locks.TryGetValue(lockKey, out var held) || held.OperationId != operationId)
+            return false;
+        if (!string.Equals(held.Owner, _replica.Id, StringComparison.Ordinal))
+            return false;
+        if (fencingToken is { } token && held.FencingToken != token)
+            return false;
+        return true;
     }
 
     private bool LockHeld(string lockKey) =>

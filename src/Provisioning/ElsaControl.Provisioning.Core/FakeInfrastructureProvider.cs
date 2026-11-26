@@ -33,6 +33,8 @@ public sealed class FakeInfrastructureProvider : IInfrastructureProvider, ICrede
 
     public TaskCompletionSource Started { get; } = new();
 
+    public int CancelCalls { get; private set; }
+
     public IReadOnlySet<string> Capabilities { get; } = new HashSet<string>(StringComparer.Ordinal)
     {
         ProvisioningCapability.ContainerRuntime,
@@ -93,7 +95,10 @@ public sealed class FakeInfrastructureProvider : IInfrastructureProvider, ICrede
         ArgumentNullException.ThrowIfNull(request);
         var now = _timeProvider.GetUtcNow();
         lock (_gate)
+        {
+            CancelCalls++;
             _cancelled.Add(operation.Id);
+        }
 
         // Cancel never destroys. Idle and post-success stacks both return
         // a value-free nothing-to-cancel result.

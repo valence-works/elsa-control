@@ -14,11 +14,12 @@ public interface IProvisioningStackLockStore
         DateTimeOffset now,
         CancellationToken cancellationToken = default);
 
-    Task ReleaseAsync(
+    Task<bool> ReleaseAsync(
         ProvisioningStackKind kind,
         string stackName,
         Guid operationId,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        long? fencingToken = null);
 
     Task<Guid?> GetHolderAsync(
         ProvisioningStackKind kind,

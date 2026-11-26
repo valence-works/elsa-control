@@ -364,14 +364,13 @@ public sealed class AzurePulumiAutomationRunnerTests
             new Dictionary<string, string>(StringComparer.Ordinal),
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
-                ["sqlConnectionSecretValue"] = "seeded-sql",
-                ["signingKeySecretValue"] = "seeded-signing",
-                ["adminPasswordSecretValue"] = "seeded-admin"
+                [ProvisioningEventSanitizer.AdminPasswordOverrideKey] = "override-admin"
             });
-        Assert.Equal("seeded-sql", workspace.SecretStackConfig!["sqlConnectionSecretValue"]);
+        Assert.Equal("override-admin", workspace.SecretStackConfig![ProvisioningEventSanitizer.AdminPasswordOverrideKey]);
         var options = workspace.ToLocalWorkspaceOptions(runner.CreateProgram(ProvisioningStackKind.Engine));
         var config = options.StackSettings![workspace.StackName].Config;
         Assert.NotNull(config);
+        Assert.False(config.ContainsKey(ProvisioningEventSanitizer.AdminPasswordOverrideKey));
         Assert.False(config.ContainsKey("sqlConnectionSecretValue"));
         Assert.False(config.ContainsKey("signingKeySecretValue"));
         Assert.False(config.ContainsKey("adminPasswordSecretValue"));
@@ -391,15 +390,10 @@ public sealed class AzurePulumiAutomationRunnerTests
     }
 
     [Fact]
-    public async Task Fresh_create_passes_seed_values_as_pulumi_secret_config()
+    public async Task Fresh_create_does_not_pass_shared_seed_values()
     {
         var automation = new FakePulumiAutomationClient();
-        var secrets = new StaticProvisioningSecretResolver(new Dictionary<string, string>(StringComparer.Ordinal)
-        {
-            ["sqlConnectionSecretValue"] = "seeded-sql",
-            ["signingKeySecretValue"] = "seeded-signing",
-            ["adminPasswordSecretValue"] = "seeded-admin"
-        });
+        var secrets = new EmptyProvisioningSecretResolver();
         var provider = new AzureInfrastructureProvider(
             new AzurePulumiAutomationRunner(),
             new AzureWorkloadIdentityCredentials(),
@@ -425,9 +419,9 @@ public sealed class AzurePulumiAutomationRunnerTests
             new Dictionary<string, string>(StringComparer.Ordinal) { ["engineName"] = "engine-one" });
         var result = await provider.ProvisionAsync(operation, request);
         Assert.True(result.Succeeded);
-        Assert.Equal("seeded-sql", automation.LastWorkspace!.SecretStackConfig!["sqlConnectionSecretValue"]);
-        Assert.Equal("seeded-signing", automation.LastWorkspace.SecretStackConfig["signingKeySecretValue"]);
-        Assert.Equal("seeded-admin", automation.LastWorkspace.SecretStackConfig["adminPasswordSecretValue"]);
+        Assert.False(automation.LastWorkspace!.SecretStackConfig?.ContainsKey("sqlConnectionSecretValue") ?? false);
+        Assert.False(automation.LastWorkspace.SecretStackConfig?.ContainsKey("signingKeySecretValue") ?? false);
+        Assert.False(automation.LastWorkspace.SecretStackConfig?.ContainsKey("adminPasswordSecretValue") ?? false);
         Assert.False(automation.LastWorkspace.StackConfig.ContainsKey("sqlConnectionSecretValue"));
         var options = automation.LastWorkspace.ToLocalWorkspaceOptions(
             new AzurePulumiAutomationRunner().CreateProgram(ProvisioningStackKind.Engine));
@@ -484,12 +478,7 @@ public sealed class AzurePulumiAutomationRunnerTests
     {
         var automation = new FakePulumiAutomationClient { Stall = TimeSpan.FromSeconds(30) };
         var probe = new RecordingResourceGroupAbsenceProbe { Result = ResourceGroupPresence.Absent };
-        var secrets = new StaticProvisioningSecretResolver(new Dictionary<string, string>(StringComparer.Ordinal)
-        {
-            ["sqlConnectionSecretValue"] = "seeded-sql",
-            ["signingKeySecretValue"] = "seeded-signing",
-            ["adminPasswordSecretValue"] = "seeded-admin"
-        });
+        var secrets = new EmptyProvisioningSecretResolver();
         var subscription = Guid.Parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").ToString("D");
         var azure = new AzureInfrastructureProvider(
             new AzurePulumiAutomationRunner(),

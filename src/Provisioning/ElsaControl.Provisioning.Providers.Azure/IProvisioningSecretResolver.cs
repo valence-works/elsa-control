@@ -1,3 +1,5 @@
+using ElsaControl.Provisioning.Core;
+
 namespace ElsaControl.Provisioning.Providers.Azure;
 
 /// <summary>
@@ -31,6 +33,9 @@ public sealed class EmptyProvisioningSecretResolver : IProvisioningSecretResolve
     {
         cancellationToken.ThrowIfCancellationRequested();
         ArgumentNullException.ThrowIfNull(stackConfig);
+        AzureEngineProgramPolicy.RejectSharedSeedValues(stackConfig);
+        if (stackConfig.Values.Any(ProvisioningEventSanitizer.IsSecretLocator))
+            throw new InvalidOperationException("Provisioning seed vault is not configured.");
         return Task.FromResult<IReadOnlyDictionary<string, string>>(
             new Dictionary<string, string>(StringComparer.Ordinal));
     }
@@ -56,6 +61,8 @@ public sealed class StaticProvisioningSecretResolver(IReadOnlyDictionary<string,
     {
         cancellationToken.ThrowIfCancellationRequested();
         ArgumentNullException.ThrowIfNull(stackConfig);
+        AzureEngineProgramPolicy.RejectSharedSeedValues(stackConfig);
+        AzureEngineProgramPolicy.RejectSharedSeedValues(_values);
         return Task.FromResult(_values);
     }
 }

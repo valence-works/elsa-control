@@ -8,6 +8,11 @@ public sealed class ProvisioningReplicaIdentity
 {
     public const int DefaultLeaseSeconds = 30;
 
+    /// <summary>
+    /// Heartbeats are 5s by default; the lease covers several missed beats.
+    /// </summary>
+    public const int DefaultHeartbeatSeconds = 5;
+
     public ProvisioningReplicaIdentity(string? id = null, TimeSpan? lease = null)
     {
         Id = string.IsNullOrWhiteSpace(id) ? Guid.NewGuid().ToString("N") : id.Trim();
