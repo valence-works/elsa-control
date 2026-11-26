@@ -1024,9 +1024,43 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
         await ParkRecoveryRequiredAsync(
             app, created.Operation.Id, "u", ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain);
 
-        await AssertDeleteDecisionMatchesRouteAsync(
-            client, workspaceId, created.Instance.InstanceId, created.Instance.ETag,
-            "overview-delete-uncertain", allowed: true, reasonCode: null);
+        using var overviewResponse = await client.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/overview");
+        var overviewJson = await overviewResponse.Content.ReadAsStringAsync();
+        var overview = JsonSerializer.Deserialize<ManagedElsaInstanceOverviewResponse>(
+            overviewJson, ControlApiTestApplication.JsonOptions);
+        Assert.Equal(HttpStatusCode.OK, overviewResponse.StatusCode);
+        Assert.True(overview!.AllowedActions.Delete.Allowed);
+        Assert.Null(overview.AllowedActions.Delete.ReasonCode);
+        AssertExactCustomerDtoShape(overviewJson, "overview");
+
+        using var confirmation = await client.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations",
+            content: null);
+        Assert.Equal(HttpStatusCode.OK, confirmation.StatusCode);
+        var confirmationBody = await confirmation.Content
+            .ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        using var deletion = await SendDeleteAsync(
+            client,
+            workspaceId,
+            created.Instance.InstanceId,
+            created.Instance.ETag,
+            "overview-delete-uncertain",
+            confirmationBody!.ConfirmationId);
+        var deletionText = await deletion.Content.ReadAsStringAsync();
+        Assert.True(deletion.StatusCode == HttpStatusCode.Accepted, deletionText);
+        var accepted = await deletion.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteAcceptedResponse>();
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, accepted!.State);
+
+        using var waitingResponse = await client.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/overview");
+        var waiting = JsonSerializer.Deserialize<ManagedElsaInstanceOverviewResponse>(
+            await waitingResponse.Content.ReadAsStringAsync(), ControlApiTestApplication.JsonOptions);
+        Assert.Equal(HttpStatusCode.OK, waitingResponse.StatusCode);
+        Assert.Equal(ElsaInstanceOperationAction.Delete, waiting!.ActiveOperation!.Action);
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, waiting.ActiveOperation.State);
+        Assert.False(waiting.AllowedActions.Delete.Allowed);
+        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.OperationActiveCode, waiting.AllowedActions.Delete.ReasonCode);
     }
 
     [Fact]
