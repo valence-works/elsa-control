@@ -27,6 +27,12 @@ param sqlDatabaseSkuCapacity int = 0
 @description('Azure SQL Catalog max size in bytes. Empty selects 250 GiB for S0 and omits the property for other SKUs. 0 omits the property. String avoids ARM 32-bit int overflow.')
 param sqlDatabaseMaxSizeBytes string = ''
 
+@description('When true, deploy the staging-only Pulumi provisioning state backend, secrets key, and provisioner data-plane roles. Production stays false.')
+param enablePulumiProvisioning bool = false
+
+@description('Principal ID of the existing provisioner user-assigned identity. Required when enablePulumiProvisioning is true. Role assignments use this object ID, not the client ID.')
+param pulumiProvisionerPrincipalId string = ''
+
 var resolvedSqlDatabaseSkuName = !empty(sqlDatabaseSkuName) ? sqlDatabaseSkuName : 'S0'
 var resolvedSqlDatabaseSkuTier = !empty(sqlDatabaseSkuTier) ? sqlDatabaseSkuTier : (startsWith(resolvedSqlDatabaseSkuName, 'GP_S_') ? 'GeneralPurpose' : 'Standard')
 var resolvedSqlDatabaseSkuFamily = !empty(sqlDatabaseSkuFamily) ? sqlDatabaseSkuFamily : (startsWith(resolvedSqlDatabaseSkuName, 'GP_S_') ? 'Gen5' : '')
@@ -79,6 +85,16 @@ module elsa_control_acr 'elsa-control-acr/elsa-control-acr.module.bicep' = {
   scope: rg
   params: {
     location: location
+  }
+}
+
+module control_pulumi_provisioning 'control-pulumi-provisioning/pulumi-provisioning.module.bicep' = if (enablePulumiProvisioning) {
+  name: 'control-pulumi-provisioning'
+  scope: rg
+  params: {
+    location: location
+    provisionerPrincipalId: pulumiProvisionerPrincipalId
+    tags: tags
   }
 }
 output API_IDENTITY_CLIENTID string = api_identity.outputs.clientId

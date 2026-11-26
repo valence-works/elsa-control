@@ -11,6 +11,12 @@
     "principalId": {
       "value": ""
     },
+    "enablePulumiProvisioning": {
+      "value": true
+    },
+    "pulumiProvisionerPrincipalId": {
+      "value": "2b9e04ce-ccf6-4931-9f34-862c374fcf78"
+    },
     "sqlDatabaseSkuName": {
       "value": "S0"
     },

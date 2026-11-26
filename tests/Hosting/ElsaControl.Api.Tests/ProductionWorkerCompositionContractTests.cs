@@ -33,6 +33,16 @@ public sealed class ProductionWorkerCompositionContractTests : IDisposable
     private readonly Dictionary<string, string?> _settings = Render("worker-settings.template.json");
 
     [Fact]
+    public void Provisioning_worker_stays_off_in_the_production_template()
+    {
+        Assert.Equal("false", _settings["Provisioning:WorkerEnabled"]);
+        Assert.Equal("production", _settings["Provisioning:EnvironmentName"]);
+        Assert.False(_settings.ContainsKey("Provisioning:StateBackendLocator"));
+        Assert.False(_settings.ContainsKey("Provisioning:SecretsProviderLocator"));
+        Assert.False(_settings.ContainsKey("Provisioning:SeedVaultUri"));
+    }
+
+    [Fact]
     public void Only_the_documented_decisions_are_pending()
     {
         var pending = ReadParameters().Where(pair => pair.Value is null).Select(pair => pair.Key).Order().ToArray();

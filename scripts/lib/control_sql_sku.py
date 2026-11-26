@@ -61,6 +61,8 @@ def staging_parameters_document() -> dict[str, object]:
             "environmentName": {"value": STAGING_ENVIRONMENT_NAME},
             "location": {"value": STAGING_LOCATION},
             "principalId": {"value": ""},
+            "enablePulumiProvisioning": {"value": True},
+            "pulumiProvisionerPrincipalId": {"value": "2b9e04ce-ccf6-4931-9f34-862c374fcf78"},
             **_parameter_values(STAGING_SKU),
         },
     }

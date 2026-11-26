@@ -35,5 +35,12 @@
   "Deployment__AzureProvider__Secrets__2__Name": "admin:password",
   "Deployment__AzureProvider__Secrets__2__Reference": "secret://azure-managed/admin-password",
   "RuntimeBuilder__InstancePlans__DefaultEgress": "unrestricted",
-  "ControlPlane__Origin": "${ControlPlaneOrigin}"
+  "ControlPlane__Origin": "${ControlPlaneOrigin}",
+  "Provisioning__WorkerEnabled": "false",
+  "Provisioning__EnvironmentName": "production",
+  "ARM_SUBSCRIPTION_ID": "${WorkloadSubscriptionId}",
+  "ARM_TENANT_ID": "${TenantId}",
+  "Provisioning__CredentialLocator": "${ProvisionerClientId}",
+  "Provisioning__SqlBootstrapObjectId": "${ProvisionerPrincipalId}",
+  "Provisioning__SqlBootstrapLogin": "${ProvisionerIdentityName}"
 }

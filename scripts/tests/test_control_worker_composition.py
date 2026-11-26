@@ -33,6 +33,16 @@ class CompositionFilesTests(unittest.TestCase):
         self.assertEqual("360", self.workers["Deployment__AzureProvider__Runner__CleanupObservationAttempts"])
         self.assertEqual("westeurope", self.workers["Deployment__AzureProvider__Runner__TargetScope__Location"])
         self.assertEqual("unrestricted", self.workers["RuntimeBuilder__InstancePlans__DefaultEgress"])
+        self.assertEqual("false", self.workers["Provisioning__WorkerEnabled"])
+        self.assertEqual("production", self.workers["Provisioning__EnvironmentName"])
+        self.assertEqual("${WorkloadSubscriptionId}", self.workers["ARM_SUBSCRIPTION_ID"])
+        self.assertEqual("${TenantId}", self.workers["ARM_TENANT_ID"])
+        self.assertEqual("${ProvisionerClientId}", self.workers["Provisioning__CredentialLocator"])
+        self.assertEqual("${ProvisionerPrincipalId}", self.workers["Provisioning__SqlBootstrapObjectId"])
+        self.assertEqual("${ProvisionerIdentityName}", self.workers["Provisioning__SqlBootstrapLogin"])
+        self.assertNotIn("Provisioning__StateBackendLocator", self.workers)
+        self.assertNotIn("Provisioning__SecretsProviderLocator", self.workers)
+        self.assertNotIn("Provisioning__SeedVaultUri", self.workers)
 
     def test_worker_template_uses_only_the_three_provider_owned_secret_instructions(self):
         secrets = {self.workers[f"Deployment__AzureProvider__Secrets__{i}__Name"]:
@@ -64,6 +74,15 @@ class CompositionFilesTests(unittest.TestCase):
         renderer.validate_staging_authority(staging, self.resolved)
         self.assertEqual("00:45:00", renderer.STAGING_WORKER_SETTINGS["Deployment__AzureProvider__Runner__CommandTimeout"])
         self.assertEqual("1", renderer.STAGING_WORKER_SETTINGS["Deployment__AzureProvider__BatchSize"])
+        self.assertEqual("true", renderer.STAGING_WORKER_SETTINGS["Provisioning__WorkerEnabled"])
+        self.assertEqual("staging", renderer.STAGING_WORKER_SETTINGS["Provisioning__EnvironmentName"])
+        self.assertEqual("stpulumitud53zotij43k/pulumi-state", renderer.STAGING_WORKER_SETTINGS["Provisioning__StateBackendLocator"])
+        self.assertEqual(
+            "azurekeyvault://ecapikvtud53zotij43k.vault.azure.net/keys/pulumi-secrets",
+            renderer.STAGING_WORKER_SETTINGS["Provisioning__SecretsProviderLocator"])
+        self.assertEqual(
+            "https://ecapikvtud53zotij43k.vault.azure.net/",
+            renderer.STAGING_WORKER_SETTINGS["Provisioning__SeedVaultUri"])
 
     def test_production_parameters_are_non_secret_identifiers(self):
         for name, value in self.resolved.items():
@@ -125,6 +144,12 @@ class RenderTests(unittest.TestCase):
     def test_production_render_succeeds_with_every_decision_made(self):
         rendered = renderer.render(self.workers, self.resolved, self.pending)
         self.assertEqual("9.160.165.252", rendered["Deployment__AzureProvider__Runner__SqlBootstrapIp"])
+        self.assertEqual("false", rendered["Provisioning__WorkerEnabled"])
+        self.assertEqual("production", rendered["Provisioning__EnvironmentName"])
+        self.assertEqual(self.resolved["WorkloadSubscriptionId"], rendered["ARM_SUBSCRIPTION_ID"])
+        self.assertEqual(self.resolved["TenantId"], rendered["ARM_TENANT_ID"])
+        self.assertEqual(self.resolved["ProvisionerClientId"], rendered["Provisioning__CredentialLocator"])
+        self.assertNotIn("Provisioning__StateBackendLocator", rendered)
         self.assertFalse(any(key.startswith("Staging__LateSuccessLever__") for key in rendered))
         self.assertFalse(any(key.startswith("Staging__LateSuccessLever__") for key in self.workers))
 
@@ -288,6 +313,20 @@ class RenderTests(unittest.TestCase):
             settings = {entry["name"]: entry["value"] for entry in json.loads(output.read_text())}
         self.assertEqual("1", settings["Deployment__AzureProvider__BatchSize"])
         self.assertEqual("00:45:00", settings["Deployment__AzureProvider__Runner__CommandTimeout"])
+        self.assertEqual("true", settings["Provisioning__WorkerEnabled"])
+        self.assertEqual("staging", settings["Provisioning__EnvironmentName"])
+        self.assertEqual("82a63610-2874-4b18-ad8f-7f57b9b8ca0f", settings["ARM_SUBSCRIPTION_ID"])
+        self.assertEqual("f35bcd45-7991-4e24-84f1-e964394501ad", settings["ARM_TENANT_ID"])
+        self.assertEqual("d57a6279-2806-4289-9442-d862b53451a1", settings["Provisioning__CredentialLocator"])
+        self.assertEqual("2b9e04ce-ccf6-4931-9f34-862c374fcf78", settings["Provisioning__SqlBootstrapObjectId"])
+        self.assertEqual("mi-elsa-cloud-provisioner-staging-weu", settings["Provisioning__SqlBootstrapLogin"])
+        self.assertEqual("stpulumitud53zotij43k/pulumi-state", settings["Provisioning__StateBackendLocator"])
+        self.assertEqual(
+            "azurekeyvault://ecapikvtud53zotij43k.vault.azure.net/keys/pulumi-secrets",
+            settings["Provisioning__SecretsProviderLocator"])
+        self.assertEqual("https://ecapikvtud53zotij43k.vault.azure.net/", settings["Provisioning__SeedVaultUri"])
+        self.assertNotRegex(settings["Provisioning__StateBackendLocator"], r"(?i)key|sas|sig=")
+        self.assertNotRegex(settings["Provisioning__SecretsProviderLocator"], r"(?i)sas|sig=")
 
     def test_cli_has_no_value_override_so_only_the_checked_in_parameters_reach_production(self):
         for argv in (["workers", "--output", "x.json", "--set", "SqlBootstrapIp=203.0.113.10"],

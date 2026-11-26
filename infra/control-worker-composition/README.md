@@ -78,6 +78,14 @@ python3 scripts/render-worker-settings.py release-verification --environment sta
 python3 scripts/render-worker-settings.py rollback --output ~/.elsa-control-ops/staging-workers-off.json
 ```
 
+The staging overlay also turns on the Pulumi provisioning proof (#1034):
+`Provisioning__WorkerEnabled=true`, `Provisioning__EnvironmentName=staging`, Blob/Key Vault
+locators for the staging-only state account and `pulumi-secrets` key, and `Provisioning__SeedVaultUri`
+for the existing Control API Key Vault. The template default for `Provisioning__WorkerEnabled` stays
+false, so production rendering keeps the worker off. Locators are overlay literals because production
+has no state account yet; staging and production parameter *names* still match. Rollback does not
+toggle the Pulumi worker; set `Provisioning__WorkerEnabled=false` separately if you need it off.
+
 The staging worker payload sets provider `BatchSize=1` to bound concurrent spend and a 45-minute
 command timeout for a cold Container Apps environment. Production retains its 15-minute setting;
 the staging bound stays below the runner's one-hour validation limit. A timed-out local command

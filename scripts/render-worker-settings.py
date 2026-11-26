@@ -44,6 +44,12 @@ STAGING_WORKER_SETTINGS = {
     # A cold Container Apps environment can exceed the production 15-minute command bound.
     # Keep staging's first-engine rehearsal bounded without timing out healthy Azure work.
     "Deployment__AzureProvider__Runner__CommandTimeout": "00:45:00",
+    # Pulumi provisioning proof (#1034). Production keeps the template default (worker off).
+    "Provisioning__WorkerEnabled": "true",
+    "Provisioning__EnvironmentName": "staging",
+    "Provisioning__StateBackendLocator": "stpulumitud53zotij43k/pulumi-state",
+    "Provisioning__SecretsProviderLocator": "azurekeyvault://ecapikvtud53zotij43k.vault.azure.net/keys/pulumi-secrets",
+    "Provisioning__SeedVaultUri": "https://ecapikvtud53zotij43k.vault.azure.net/",
 }
 
 PLACEHOLDER = re.compile(r"\$\{([A-Za-z][A-Za-z0-9_]*)\}")
@@ -55,6 +61,8 @@ ALLOWED_KEY_PREFIXES = (
     "ControlPlane__",
     "ReleaseCatalog__Verification__",
     "ReleaseCatalog__Admission__",
+    "Provisioning__",
+    "ARM_",
 )
 # The API image owns these; an app setting would silently retarget the runner's tools.
 IMAGE_OWNED_KEYS = frozenset({

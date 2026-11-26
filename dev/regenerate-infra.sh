@@ -23,6 +23,7 @@ preserved_infra_paths=(
     control-worker-composition
     control-egress
     api-key-vault
+    control-pulumi-provisioning
 )
 preservation_dir="$(mktemp -d)"
 restore_preserved_infra() {
@@ -71,6 +72,9 @@ echo "Re-applying Control Catalog SQL SKU parameters..."
 # preserve-then-restore of generated paths would collide. Aspire does not
 # emit them, so the patch is the durable recreate after `rm -rf infra`.
 python3 dev/patch-control-sql-sku.py
+
+echo "Re-applying the staging-only Pulumi provisioning module include..."
+python3 dev/patch-pulumi-provisioning.py
 
 if [ -d infra/api-roles-control-sql ]; then
     echo "Stripping the broken api-roles-control-sql module..."
