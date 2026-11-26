@@ -974,7 +974,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             return (null, ElsaInstanceOperationFailureClass.Terminal);
         if (inspection.TransientDiagnostic is not null)
             return (inspection.TransientDiagnostic, ElsaInstanceOperationFailureClass.Transient);
-        if (!inspectOperations)
+        if (inspection.NeedsOperator || !inspectOperations)
             return (null, inspection.FailureClass);
         var fromOperations = await TryClassifyFailedDeploymentOperationsAsync(
             command, deploymentName, subscription, group, cancellationToken);

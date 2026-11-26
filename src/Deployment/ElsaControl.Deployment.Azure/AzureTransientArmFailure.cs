@@ -223,9 +223,11 @@ public static class AzureTransientArmFailure
             firstTransient ??= ToSafeDiagnostic(normalized);
         }
 
-        if (!sawAny || sawUnknown || firstTransient is null)
+        if (!sawAny || sawUnknown)
             return AzureArmErrorInspection.Unclassified();
-        return new AzureArmErrorInspection(firstTransient, NeedsOperator: false, ElsaInstanceOperationFailureClass.Transient);
+        return firstTransient is null
+            ? AzureArmErrorInspection.WrapperOnly()
+            : new AzureArmErrorInspection(firstTransient, NeedsOperator: false, ElsaInstanceOperationFailureClass.Transient);
     }
 
     internal static bool IsSafeNestedDeploymentName(string? name) =>
@@ -431,6 +433,9 @@ internal readonly record struct AzureArmErrorInspection(
 {
     public static AzureArmErrorInspection Unclassified() =>
         new(null, NeedsOperator: true, ElsaInstanceOperationFailureClass.Unclassified);
+
+    public static AzureArmErrorInspection WrapperOnly() =>
+        new(null, NeedsOperator: false, ElsaInstanceOperationFailureClass.Unclassified);
 
     public static AzureArmErrorInspection Terminal() =>
         new(null, NeedsOperator: true, ElsaInstanceOperationFailureClass.Terminal);

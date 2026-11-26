@@ -88,6 +88,24 @@ public sealed class AzureTransientArmFailureTests
     }
 
     [Fact]
+    public void Wrapper_only_errors_do_not_block_an_operations_walk()
+    {
+        var wrapperOnly = AzureTransientArmFailure.Inspect([AzureTransientArmFailure.DeploymentFailed]);
+        Assert.False(wrapperOnly.NeedsOperator);
+        Assert.Equal(ElsaInstanceOperationFailureClass.Unclassified, wrapperOnly.FailureClass);
+        Assert.Null(wrapperOnly.TransientDiagnostic);
+
+        var unknown = AzureTransientArmFailure.Inspect(["UnknownProviderError"]);
+        Assert.True(unknown.NeedsOperator);
+        Assert.Equal(ElsaInstanceOperationFailureClass.Unclassified, unknown.FailureClass);
+
+        var unknownThenTransient = AzureTransientArmFailure.Inspect(
+            ["UnknownProviderError", AzureTransientArmFailure.TooManyRequests]);
+        Assert.True(unknownThenTransient.NeedsOperator);
+        Assert.Null(unknownThenTransient.TransientDiagnostic);
+    }
+
+    [Fact]
     public void Normalize_maps_429_and_rejects_unsafe_text()
     {
         Assert.Equal(AzureTransientArmFailure.TooManyRequests, AzureTransientArmFailure.Normalize("429"));
