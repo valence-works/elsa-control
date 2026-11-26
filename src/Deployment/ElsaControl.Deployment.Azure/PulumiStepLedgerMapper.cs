@@ -68,14 +68,16 @@ public static class PulumiStepLedgerMapper
 
         if (value.Kind == ProvisioningEventKind.OperationSucceeded)
         {
+            // TODO(#1033): Health verification and traffic promotion own Succeeded.
+            // This checkpoint is the Pulumi/infra step completing, not engine-ready.
             var phase = Max(currentPhase, AzureProviderOperationPhase.WorkloadReady);
             return new PulumiLedgerCheckpoint(
                 phase,
                 AzureProviderRunnerStep.Workload,
-                AzureProviderOperationStatus.Succeeded,
+                AzureProviderOperationStatus.Running,
                 RuntimeDeployedCode,
                 RuntimeDeployedMessage,
-                Finalize: true);
+                Finalize: false);
         }
 
         if (value.Kind == ProvisioningEventKind.OperationCancelled)

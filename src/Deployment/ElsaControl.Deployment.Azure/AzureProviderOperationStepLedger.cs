@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using ElsaControl.Provisioning.Abstractions;
+using ElsaControl.Provisioning.Core;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace ElsaControl.Deployment.Azure;
@@ -8,13 +9,15 @@ namespace ElsaControl.Deployment.Azure;
 /// Writes sanitised Pulumi events onto the existing Azure provider step ledger
 /// so Hub can poll live progress. Correlation comes from stack config. A lost
 /// Azure lease or a duplicate engine sequence does not write a new row.
-/// Sequence dedupe and Azure lease tokens are process-local; a second replica
-/// or a restart cannot reuse them. Durable uniqueness is a follow-up.
+/// The Azure lease token is derived from the module operation id so a replica
+/// or restart can reclaim a Running step. Sequence dedupe is process-local and
+/// evicted when the module operation reaches a terminal event.
 /// </summary>
 public sealed class AzureProviderOperationStepLedger : IProvisioningStepLedger
 {
     public const string WorkerId = "provisioning-ledger";
-    private static readonly TimeSpan LeaseDuration = TimeSpan.FromMinutes(15);
+    private static readonly TimeSpan LeaseDuration = TimeSpan.FromSeconds(
+        ProvisioningReplicaIdentity.DefaultLeaseSeconds);
 
     private readonly Func<StoreSession> _open;
     private readonly TimeProvider _timeProvider;
@@ -152,7 +155,7 @@ public sealed class AzureProviderOperationStepLedger : IProvisioningStepLedger
                     .ConfigureAwait(false);
                 if (finalized is null)
                     return ProvisioningStepLedgerResult.StaleFence;
-                _leases.TryRemove(operation.Id, out _);
+                Forget(operation.Id);
                 written = ProvisioningStepLedgerResult.Written;
                 continue;
             }
@@ -186,6 +189,12 @@ public sealed class AzureProviderOperationStepLedger : IProvisioningStepLedger
             if (saved is null)
                 return ProvisioningStepLedgerResult.StaleFence;
             written = ProvisioningStepLedgerResult.Written;
+            if (value.Kind is ProvisioningEventKind.OperationSucceeded
+                or ProvisioningEventKind.OperationFailed
+                or ProvisioningEventKind.OperationCancelled)
+            {
+                Forget(operation.Id);
+            }
         }
 
         return written;
@@ -229,12 +238,6 @@ public sealed class AzureProviderOperationStepLedger : IProvisioningStepLedger
             .ConfigureAwait(false);
         if (current is null)
             return null;
-        if (current.Status == AzureProviderOperationStatus.Running
-            && _leases.TryGetValue(provisioningOperationId, out _))
-        {
-            return current;
-        }
-
         if (current.Status is AzureProviderOperationStatus.Failed
             or AzureProviderOperationStatus.Cancelled
             or AzureProviderOperationStatus.Succeeded)
@@ -242,7 +245,17 @@ public sealed class AzureProviderOperationStepLedger : IProvisioningStepLedger
             return null;
         }
 
-        var token = Guid.NewGuid().ToString("N");
+        var token = LeaseTokenFor(provisioningOperationId);
+        var now = _timeProvider.GetUtcNow();
+        if (current.Status == AzureProviderOperationStatus.Running
+            && string.Equals(current.WorkerId, WorkerId, StringComparison.Ordinal)
+            && current.LeaseExpiresAt is { } expires
+            && expires > now)
+        {
+            _leases[provisioningOperationId] = new BoundLease(token);
+            return current;
+        }
+
         var claimed = current.Status == AzureProviderOperationStatus.RecoveryRequired
             ? await store.ClaimRecoveryAsync(
                     workspaceId,
@@ -250,7 +263,7 @@ public sealed class AzureProviderOperationStepLedger : IProvisioningStepLedger
                     WorkerId,
                     token,
                     LeaseDuration,
-                    _timeProvider.GetUtcNow(),
+                    now,
                     current.Version,
                     cancellationToken)
                 .ConfigureAwait(false)
@@ -260,7 +273,7 @@ public sealed class AzureProviderOperationStepLedger : IProvisioningStepLedger
                     WorkerId,
                     token,
                     LeaseDuration,
-                    _timeProvider.GetUtcNow(),
+                    now,
                     current.Version,
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -269,6 +282,19 @@ public sealed class AzureProviderOperationStepLedger : IProvisioningStepLedger
         _leases[provisioningOperationId] = new BoundLease(token);
         return claimed;
     }
+
+    private void Forget(Guid provisioningOperationId)
+    {
+        _leases.TryRemove(provisioningOperationId, out _);
+        foreach (var key in _seen.Keys)
+        {
+            if (key.OperationId == provisioningOperationId)
+                _seen.TryRemove(key, out _);
+        }
+    }
+
+    internal static string LeaseTokenFor(Guid provisioningOperationId) =>
+        provisioningOperationId.ToString("N");
 
     private BoundLease RequireLease(Guid provisioningOperationId) =>
         _leases.TryGetValue(provisioningOperationId, out var lease)

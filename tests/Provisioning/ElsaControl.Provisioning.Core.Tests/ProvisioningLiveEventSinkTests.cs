@@ -1,5 +1,6 @@
 using ElsaControl.Provisioning.Abstractions;
 using ElsaControl.Provisioning.Core.Stores;
+using Microsoft.Extensions.Logging;
 
 namespace ElsaControl.Provisioning.Core.Tests;
 
@@ -102,34 +103,28 @@ public sealed class ProvisioningLiveEventSinkTests
     }
 
     [Fact]
-    public async Task A_reclaimed_run_writes_a_terminal_ledger_entry()
+    public async Task A_ledger_error_does_not_fail_a_successful_run()
     {
-        var time = new MutableTimeProvider();
-        var store = new InMemoryProvisioningStore(new ProvisioningReplicaIdentity("dead", TimeSpan.FromSeconds(1)));
-        var ledger = new RecordingLedger();
-        var sink = new ProvisioningLiveEventSink(store, store, ledger);
+        var store = new InMemoryProvisioningStore();
+        var logger = new RecordingLogger();
+        var sink = new ProvisioningLiveEventSink(store, store, new ThrowingLedger(), logger);
         var worker = new ProvisioningOperationWorker(
             store,
             store,
-            new FakeInfrastructureProvider(time),
-            timeProvider: time,
+            new FakeInfrastructureProvider(),
             liveEvents: sink);
-        var request = ProvisioningFixtures.Request(
+        var service = new ProvisioningService(store, store);
+        var enqueued = await service.ProvisionAsync(ProvisioningFixtures.Request(
             ProvisioningCommand.Provision,
-            ProvisioningFixtures.PlatformTarget("reclaim-ledger"),
-            ProvisioningFixtures.PlatformSpec("reclaim-ledger"),
-            "reclaim-ledger");
-        var enqueued = await store.CreateOrGetAsync(request, ProvisioningRequestHash.Compute(request), time.GetUtcNow());
-        var claimed = await store.ClaimAsync(enqueued.OperationId, time.GetUtcNow());
-        Assert.NotNull(claimed);
+            ProvisioningFixtures.PlatformTarget(),
+            ProvisioningFixtures.PlatformSpec(),
+            "sink-ledger-throw"));
 
-        time.Advance(TimeSpan.FromSeconds(2));
-        await worker.ReconcileInterruptedAsync();
-
-        var published = ledger.Writes.SelectMany(item => item).ToArray();
-        Assert.Contains(published, item => item.Kind == ProvisioningEventKind.OperationFailed);
-        Assert.Equal("Operation interrupted.", Assert.Single(published, item => item.Kind == ProvisioningEventKind.OperationFailed).Message);
-        Assert.Equal(ProvisioningOperationState.Failed, (await store.GetAsync(claimed.Id))!.State);
+        Assert.Equal(1, await worker.ProcessOnceAsync());
+        Assert.Equal(ProvisioningOperationState.Succeeded, (await store.GetAsync(enqueued.OperationId))!.State);
+        Assert.Contains(logger.Entries, item => item.Contains("InvalidOperationException", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Entries, item => item.Contains("password", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(logger.Entries, item => item.Contains("hunter2", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -207,6 +202,41 @@ public sealed class ProvisioningLiveEventSinkTests
             FencingToken = 1
         };
 
+    private sealed class ThrowingLedger : IProvisioningStepLedger
+    {
+        public Task<ProvisioningStepLedgerResult> TryWriteAsync(
+            ProvisioningOperation operation,
+            ProvisioningRequest? request,
+            IReadOnlyList<ProvisioningEvent> events,
+            CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("password=hunter2");
+
+        public Task HeartbeatAsync(
+            ProvisioningOperation operation,
+            ProvisioningRequest? request,
+            CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
+    }
+
+    private sealed class RecordingLogger : ILogger
+    {
+        public List<string> Entries { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            Entries.Add(formatter(state, exception));
+        }
+    }
+
     private sealed class RecordingLedger : IProvisioningStepLedger
     {
         public ProvisioningStepLedgerResult Result { get; init; } = ProvisioningStepLedgerResult.Written;
@@ -254,15 +284,6 @@ public sealed class ProvisioningLiveEventSinkTests
 
         public Task<IReadOnlyList<ProvisioningEvent>> ListAsync(Guid operationId, CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<ProvisioningEvent>>(Items.Where(item => item.OperationId == operationId).ToArray());
-    }
-
-    private sealed class MutableTimeProvider : TimeProvider
-    {
-        private DateTimeOffset _utcNow = DateTimeOffset.UtcNow;
-
-        public override DateTimeOffset GetUtcNow() => _utcNow;
-
-        public void Advance(TimeSpan delta) => _utcNow += delta;
     }
 
     private sealed class FenceStore : IProvisioningOperationStore

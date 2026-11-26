@@ -993,6 +993,29 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
     }
 
     [Fact]
+    public async Task Same_worker_can_reclaim_its_expired_running_lease()
+    {
+        var now = DateTimeOffset.UtcNow;
+        using var db = CreateContext();
+        var store = new AzureProviderOperationStore(db);
+        var operation = await store.CreateOrGetAsync(Request(), now);
+        Assert.NotNull(await store.ClaimAsync(_workspaceId, operation.Id, "worker-1", "lease-1", TimeSpan.FromMinutes(1), now));
+        Assert.Null(await store.ClaimAsync(_workspaceId, operation.Id, "worker-2", "lease-2", TimeSpan.FromMinutes(1), now.AddMinutes(2)));
+        var reclaimed = await store.ClaimAsync(_workspaceId, operation.Id, "worker-1", "lease-3", TimeSpan.FromMinutes(1), now.AddMinutes(2));
+        Assert.NotNull(reclaimed);
+        Assert.Equal(AzureProviderOperationStatus.Running, reclaimed.Status);
+        Assert.Equal("worker-1", reclaimed.WorkerId);
+        Assert.NotNull(await store.FinalizeAsync(
+            _workspaceId,
+            operation.Id,
+            "lease-3",
+            AzureProviderOperationStatus.Failed,
+            "azure.deployment.failed",
+            now.AddMinutes(2),
+            reclaimed.Version));
+    }
+
+    [Fact]
     public async Task Expired_lease_requires_recovery_and_rejects_old_lease()
     {
         var now = DateTimeOffset.UtcNow;

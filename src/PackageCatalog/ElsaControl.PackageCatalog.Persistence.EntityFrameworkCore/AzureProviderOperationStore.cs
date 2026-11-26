@@ -1095,7 +1095,10 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
             var changed = await db.AzureProviderOperations.Where(x => x.WorkspaceId == workspaceId && x.Id == operationId &&
                      (allowRecovery
                          ? x.Status == AzureProviderOperationStatus.RecoveryRequired
-                         : x.Status == AzureProviderOperationStatus.Accepted || x.Status == AzureProviderOperationStatus.Queued || x.Status == AzureProviderOperationStatus.EntitlementHeld) &&
+                         : x.Status == AzureProviderOperationStatus.Accepted
+                           || x.Status == AzureProviderOperationStatus.Queued
+                           || x.Status == AzureProviderOperationStatus.EntitlementHeld
+                           || (x.Status == AzureProviderOperationStatus.Running && x.WorkerId == workerId)) &&
                      (x.LeaseExpiresAt == null || x.LeaseExpiresAt <= now) && (!expectedVersion.HasValue || x.Version == expectedVersion.Value) &&
                      !db.AzureProviderOperations.Any(other => other.Id != operationId && other.WorkspaceId == workspaceId &&
                          other.TargetKey == x.TargetKey &&

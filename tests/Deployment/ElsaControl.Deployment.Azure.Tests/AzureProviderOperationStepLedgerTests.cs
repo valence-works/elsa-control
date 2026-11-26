@@ -104,7 +104,7 @@ public sealed class AzureProviderOperationStepLedgerTests
     }
 
     [Fact]
-    public async Task Operation_succeeded_marks_the_step_succeeded()
+    public async Task Operation_succeeded_checkpoints_workload_ready_without_finalizing()
     {
         var providerOperation = Operation();
         var store = new LedgerStore(providerOperation);
@@ -122,9 +122,58 @@ public sealed class AzureProviderOperationStepLedgerTests
             ]);
 
         Assert.Equal(ProvisioningStepLedgerResult.Written, result);
-        Assert.Equal(AzureProviderOperationStatus.Succeeded, store.Operation.Status);
+        Assert.Equal(AzureProviderOperationStatus.Running, store.Operation.Status);
         Assert.Equal(AzureProviderOperationPhase.WorkloadReady, store.Operation.Phase);
         Assert.Contains(store.Transitions, item => item.Code == PulumiStepLedgerMapper.RuntimeDeployedCode);
+    }
+
+    [Fact]
+    public async Task A_second_process_can_finalize_a_running_step_after_reclaim()
+    {
+        var providerOperation = Operation();
+        var store = new LedgerStore(providerOperation);
+        var first = new AzureProviderOperationStepLedger(store);
+        var (operation, request) = Bound(providerOperation.WorkspaceId, providerOperation.Id);
+
+        Assert.Equal(
+            ProvisioningStepLedgerResult.Written,
+            await first.TryWriteAsync(
+                operation,
+                request,
+                [Event(operation.Id, 1, ProvisioningEventKind.ResourceStarted, "resource-group")]));
+        Assert.Equal(AzureProviderOperationStatus.Running, store.Operation.Status);
+        Assert.Equal(AzureProviderOperationStepLedger.WorkerId, store.Operation.WorkerId);
+
+        var second = new AzureProviderOperationStepLedger(store);
+        var result = await second.TryWriteAsync(
+            operation,
+            request,
+            [Event(operation.Id, 2, ProvisioningEventKind.OperationFailed, ProvisioningCapability.ContainerRuntime)]);
+
+        Assert.Equal(ProvisioningStepLedgerResult.Written, result);
+        Assert.Equal(AzureProviderOperationStatus.Failed, store.Operation.Status);
+        Assert.Contains(store.Transitions, item => item.Code == ManagedElsaReasonCodeCatalog.AzureDeploymentFailed);
+    }
+
+    [Fact]
+    public async Task Terminal_events_evict_in_memory_dedupe_so_a_reopened_step_can_write()
+    {
+        var providerOperation = Operation();
+        var store = new LedgerStore(providerOperation);
+        var ledger = new AzureProviderOperationStepLedger(store);
+        var (operation, request) = Bound(providerOperation.WorkspaceId, providerOperation.Id);
+        var started = Event(operation.Id, 1, ProvisioningEventKind.ResourceStarted, "resource-group");
+        var failed = Event(operation.Id, 2, ProvisioningEventKind.OperationFailed, ProvisioningCapability.ContainerRuntime);
+
+        Assert.Equal(ProvisioningStepLedgerResult.Written, await ledger.TryWriteAsync(operation, request, [started]));
+        Assert.Equal(ProvisioningStepLedgerResult.Duplicate, await ledger.TryWriteAsync(operation, request, [started]));
+        Assert.Equal(ProvisioningStepLedgerResult.Written, await ledger.TryWriteAsync(operation, request, [failed]));
+        Assert.Equal(AzureProviderOperationStatus.Failed, store.Operation.Status);
+
+        store.Reopen();
+        Assert.Equal(ProvisioningStepLedgerResult.Written, await ledger.TryWriteAsync(operation, request, [started]));
+        Assert.Equal(AzureProviderOperationPhase.FoundationSubmitted, store.Operation.Phase);
+        Assert.Equal(AzureProviderOperationStatus.Running, store.Operation.Status);
     }
 
     [Fact]
@@ -290,6 +339,18 @@ public sealed class AzureProviderOperationStepLedgerTests
         public List<AzureProviderOperationTransition> Transitions { get; } = [];
         public bool RejectClaim { get; init; }
 
+        public void Reopen()
+        {
+            _leaseToken = null;
+            Operation = Operation with
+            {
+                Status = AzureProviderOperationStatus.Accepted,
+                WorkerId = null,
+                LeaseExpiresAt = null,
+                CompletedAt = null
+            };
+        }
+
         public Task<AzureProviderOperationCreateResult> CreateOrGetWithResultAsync(
             AzureProviderOperationRequest request,
             DateTimeOffset now,
@@ -340,8 +401,13 @@ public sealed class AzureProviderOperationStepLedgerTests
             long? expectedVersion = null,
             CancellationToken cancellationToken = default)
         {
+            var ownExpiredRunning = Operation.Status == AzureProviderOperationStatus.Running
+                && string.Equals(Operation.WorkerId, workerId, StringComparison.Ordinal)
+                && Operation.LeaseExpiresAt is { } expires
+                && expires <= now;
             if (RejectClaim
-                || Operation.Status is not (AzureProviderOperationStatus.Accepted or AzureProviderOperationStatus.Queued)
+                || (!ownExpiredRunning
+                    && Operation.Status is not (AzureProviderOperationStatus.Accepted or AzureProviderOperationStatus.Queued))
                 || expectedVersion.HasValue && expectedVersion.Value != Operation.Version)
             {
                 return Task.FromResult<AzureProviderOperation?>(null);

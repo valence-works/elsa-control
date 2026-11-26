@@ -1,21 +1,26 @@
 using System.Collections.Concurrent;
 using ElsaControl.Provisioning.Abstractions;
 using ElsaControl.Provisioning.Core.Stores;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ElsaControl.Provisioning.Core;
 
 /// <summary>
 /// Appends sanitised events to the module store and, when the fence is still
 /// held, to Control's existing step ledger. Live appends are one conditional
-/// write on owner plus token. A stale run cannot write.
+/// write on owner plus token. A stale run cannot write. Ledger failures are
+/// logged by type name and never fail the module run.
 /// </summary>
 public sealed class ProvisioningLiveEventSink(
     IProvisioningOperationStore operations,
     IProvisioningEventStore eventStore,
-    IProvisioningStepLedger? ledger = null) : IProvisioningLiveEventSink
+    IProvisioningStepLedger? ledger = null,
+    ILogger? logger = null) : IProvisioningLiveEventSink
 {
     private readonly ConcurrentDictionary<Guid, BoundRun> _runs = new();
     private readonly IProvisioningStepLedger _ledger = ledger ?? new NoOpProvisioningStepLedger();
+    private readonly ILogger _logger = logger ?? NullLogger.Instance;
 
     public IDisposable Bind(ProvisioningOperation operation, ProvisioningRequest request)
     {
@@ -88,7 +93,17 @@ public sealed class ProvisioningLiveEventSink(
             return;
         }
 
-        await _ledger.HeartbeatAsync(bound.Operation, bound.Request, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await _ledger.HeartbeatAsync(bound.Operation, bound.Request, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(
+                "Provisioning step ledger heartbeat failed. OperationId={OperationId} ExceptionType={ExceptionType}",
+                operationId,
+                exception.GetType().FullName);
+        }
     }
 
     private async Task WriteLedgerAsync(
@@ -101,9 +116,19 @@ public sealed class ProvisioningLiveEventSink(
             .OrderBy(item => item.EngineSequence ?? int.MaxValue)
             .ThenBy(item => item.OccurredAt)
             .ToArray();
-        await _ledger
-            .TryWriteAsync(operation, request, ordered, cancellationToken)
-            .ConfigureAwait(false);
+        try
+        {
+            await _ledger
+                .TryWriteAsync(operation, request, ordered, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(
+                "Provisioning step ledger write failed. OperationId={OperationId} ExceptionType={ExceptionType}",
+                operation.Id,
+                exception.GetType().FullName);
+        }
     }
 
     private sealed record BoundRun(ProvisioningOperation Operation, ProvisioningRequest? Request)

@@ -128,14 +128,14 @@ public sealed class PulumiStepLedgerMapperTests
     }
 
     [Fact]
-    public void Operation_succeeded_finalizes_the_runtime_stage()
+    public void Operation_succeeded_checkpoints_the_runtime_stage_without_finalizing()
     {
         var mapped = PulumiStepLedgerMapper.TryMap(
             Event(ProvisioningEventKind.OperationSucceeded, ProvisioningCapability.ContainerRuntime, "Operation succeeded."),
             AzureProviderOperationPhase.WorkloadReady);
         Assert.NotNull(mapped);
-        Assert.True(mapped.Finalize);
-        Assert.Equal(AzureProviderOperationStatus.Succeeded, mapped.Status);
+        Assert.False(mapped.Finalize);
+        Assert.Equal(AzureProviderOperationStatus.Running, mapped.Status);
         Assert.Equal(AzureProviderOperationPhase.WorkloadReady, mapped.Phase);
         Assert.Equal(PulumiStepLedgerMapper.RuntimeDeployedCode, mapped.Code);
         Assert.Equal(PulumiStepLedgerMapper.RuntimeDeployedMessage, mapped.Message);
@@ -143,7 +143,7 @@ public sealed class PulumiStepLedgerMapperTests
     }
 
     [Fact]
-    public void A_successful_update_stream_ends_succeeded()
+    public void A_successful_update_stream_stops_at_workload_ready()
     {
         var phase = AzureProviderOperationPhase.Planned;
         PulumiLedgerCheckpoint? last = null;
@@ -162,8 +162,9 @@ public sealed class PulumiStepLedgerMapperTests
         }
 
         Assert.NotNull(last);
-        Assert.True(last.Finalize);
-        Assert.Equal(AzureProviderOperationStatus.Succeeded, last.Status);
+        Assert.False(last.Finalize);
+        Assert.Equal(AzureProviderOperationStatus.Running, last.Status);
+        Assert.Equal(AzureProviderOperationPhase.WorkloadReady, last.Phase);
         Assert.Equal(PulumiStepLedgerMapper.RuntimeDeployedCode, last.Code);
     }
 
