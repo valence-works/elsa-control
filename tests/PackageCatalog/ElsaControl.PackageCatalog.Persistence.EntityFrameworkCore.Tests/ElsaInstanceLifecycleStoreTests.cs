@@ -2609,6 +2609,72 @@ public sealed partial class ElsaInstanceLifecycleStoreTests : IClassFixture<Dele
     }
 
     [Fact]
+    public async Task Failed_at_health_delete_invokes_provider_cleanup_and_frees_the_engine_slot_after_absence()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Failed at health provider delete");
+        await CompleteManagedRunAsync(db, accepted.Operation.Id, accepted.Instance.Id);
+        db.ChangeTracker.Clear();
+        var entity = await db.ElsaInstances.SingleAsync(x => x.Id == accepted.Instance.Id);
+        Assert.Equal("deployment-safe", entity.CurrentDeploymentId);
+        Assert.Equal("placement-safe", entity.PlacementAssignmentId);
+        entity.ObservedLifecycle = ElsaObservedLifecycle.Failed;
+        entity.Health = ElsaInstanceHealth.Unreachable;
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+        Assert.Equal(1, await ElsaInstanceAllowanceAccounting.CountDedicatedAsync(db, workspace.OrganizationId));
+
+        var current = Assert.IsType<ElsaInstance>(await CreateStore(db)
+            .GetInstanceAsync(workspace.Id, accepted.Instance.Id));
+        Assert.Equal(ElsaObservedLifecycle.Failed, current.ObservedLifecycle);
+        Assert.Equal(ElsaInstanceHealth.Unreachable, current.Health);
+        Assert.NotNull(current.CurrentDeploymentReference);
+        Assert.NotNull(current.PlacementAssignmentReference);
+        var deletion = await new ElsaInstanceLifecycleService(
+                CreateStore(db), new FixedTimeProvider(Now.AddMinutes(2)))
+            .DeleteAsync(await CreateConfirmedDeleteRequestAsync(
+                db, workspace.Id, accepted.Instance.Id, current.Version,
+                "failed-health-provider-delete", Now.AddMinutes(2)));
+        var pending = new ElsaInstanceCleanupObservation(
+            ElsaInstanceCleanupObservationKind.InProgress, deletion.Operation.Id,
+            deletion.Operation.AttemptNumber, "deletion.provider-cleanup-pending");
+        var confirmed = new ElsaInstanceCleanupObservation(
+            ElsaInstanceCleanupObservationKind.ConfirmedAbsent, deletion.Operation.Id,
+            deletion.Operation.AttemptNumber, "deletion.provider-confirmed-absent");
+
+        var first = await new ElsaInstanceDeletionWorker(
+                new EfCoreElsaInstanceLifecycleStore(db, EmptyResolutionInputSource.Instance,
+                    new FixedTimeProvider(Now.AddMinutes(3))), new QueueCleanupPort(pending),
+                new FixedTimeProvider(Now.AddMinutes(3)))
+            .ProcessAvailableAsync("deletion-worker");
+
+        Assert.Empty(first.Results);
+        Assert.Equal(1, first.ProviderInvocations);
+        Assert.NotEqual(ElsaObservedLifecycle.Deleted,
+            (await db.ElsaInstances.AsNoTracking().SingleAsync(x => x.Id == accepted.Instance.Id)).ObservedLifecycle);
+        Assert.Equal(1, await ElsaInstanceAllowanceAccounting.CountDedicatedAsync(db, workspace.OrganizationId));
+
+        var second = await new ElsaInstanceDeletionWorker(
+                new EfCoreElsaInstanceLifecycleStore(db, EmptyResolutionInputSource.Instance,
+                    new FixedTimeProvider(Now.AddMinutes(4))), new QueueCleanupPort(confirmed),
+                new FixedTimeProvider(Now.AddMinutes(4)))
+            .ProcessAvailableAsync("deletion-worker");
+
+        Assert.Equal(1, second.ProviderInvocations);
+        Assert.Equal(ElsaInstanceLifecycleWorkerOutcome.Deleted, Assert.Single(second.Results).Outcome);
+        var storedInstance = await db.ElsaInstances.SingleAsync(x => x.Id == accepted.Instance.Id);
+        var storedOperation = await db.ElsaInstanceOperations.SingleAsync(x => x.Id == deletion.Operation.Id);
+        Assert.Equal(ElsaObservedLifecycle.Deleted, storedInstance.ObservedLifecycle);
+        Assert.Equal(Now.AddMinutes(4), storedInstance.DeletedAt);
+        Assert.Equal(ElsaInstanceOperationState.Succeeded, storedOperation.State);
+        Assert.Equal("deletion.provider-confirmed-absent", storedOperation.DeletionDiagnosticCode);
+        Assert.Equal(0, await ElsaInstanceAllowanceAccounting.CountDedicatedAsync(db, workspace.OrganizationId));
+    }
+
+    [Fact]
     public async Task Terminally_failed_delete_can_be_retried_and_then_frees_the_engine_slot()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
