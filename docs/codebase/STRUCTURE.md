@@ -5,6 +5,7 @@
 | Path | Purpose | Evidence |
 |------|---------|----------|
 | `src/Deployment/` | Desired-state, artifact, reconciliation, promotion, run, and runtime-command contracts/services | project files and `README.md` |
+| `src/Provisioning/` | Cloud-neutral engine provisioning module (Pulumi Automation API; Azure first; feature-flagged off) | ADR-0021; `ElsaControl.Provisioning.*` |
 | `src/PackageCatalog/` | Package metadata, compatibility, accounts/organizations/workspaces, and EF persistence | project files and ADR-0001 |
 | `src/RuntimeBuilder/` | Image metadata, package planning, saved configurations, bundles, and output templates | project files and `README.md` |
 | `src/Hosting/` | API, React console, Aspire AppHost, and shared service defaults | `src/Hosting/ElsaControl.Api/Program.cs` |
@@ -31,6 +32,7 @@
 | Package Catalog | Package/source governance, compatibility and customer control-plane persistence | Runtime apply behavior |
 | Runtime Builder | Resolve selections into plans, bundles and deployment outputs | Bypass deployment validation/history |
 | Hosting | Composition, transport, authentication and UI | Duplicate domain rules already owned by core services |
+| Provisioning | Cloud-neutral engine spec, operation state machine, pluggable providers, state backends, and credentials | Customer, billing, Hub, or Bicep-runner concerns; secret values |
 | Integrations | Elsa Studio submission and runtime-side application | General control-plane policy |
 
 ## 4) Naming and Organization Rules

@@ -2,7 +2,13 @@
 
 ## Status
 
-Accepted
+Accepted. **Amendment (2026-11-26):** [ADR-0021](0021-pulumi-provisioning-module.md)
+supersedes the "checked-in Bicep is the production resource-realization source
+of truth" decision below for **engine** workloads. This ADR remains in force
+for Control host infrastructure and for the initial Azure Container Apps,
+Azure SQL, Key Vault, and stamp-topology product shape. The Bicep runner
+stays the default production engine-realization path until the Pulumi module
+in ADR-0021 is cut over.
 
 ## Date
 
@@ -23,7 +29,7 @@ The [#108 conclusion](../spikes/108-azure-workload-provider-preflight.md) record
 - Use direct Container Apps HTTPS ingress for the provider slice. Persist its managed-TLS origin only; health paths and Azure resource identifiers remain provider-owned and are not part of the customer endpoint contract. Front Door, custom domains and managed edge routing remain a separate concern.
 - Use managed identity and Key Vault for provider/workload secrets; store only safe references in control-plane history.
 - Treat a deployment stamp as a provider-owned unit of region, capacity, failure containment and isolation.
-- Use checked-in Bicep/provider modules as the production resource-realization source of truth, with Elsa Control provider commands orchestrating idempotent plan/apply/checkpoint behavior. Aspire remains local orchestration/developer experience.
+- Use checked-in Bicep/provider modules as the production resource-realization source of truth **for Control host infrastructure**, with Elsa Control provider commands orchestrating idempotent plan/apply/checkpoint behavior. Aspire remains local orchestration/developer experience. Engine workloads move to the Pulumi Automation API module in [ADR-0021](0021-pulumi-provisioning-module.md); the Bicep runner remains the default production engine path until that module is cut over.
 - Defer AKS until a concrete requirement cannot be met safely/economically by Container Apps.
 
 ## Acceptance Evidence

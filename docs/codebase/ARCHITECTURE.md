@@ -28,6 +28,7 @@ Studio/console/API -> immutable artifact + desired-state revision -> validation/
 | Runtime Builder | Image/package selection planning and rendered outputs | Direct environment mutation | `src/RuntimeBuilder/` |
 | API/Console | Transport, auth/session, composition, operator UX | Reimplementation of domain policy | `src/Hosting/` |
 | Runtime Applier | Target-side command consumption and artifact application | Organization/billing policy | `src/Workflows/ElsaControl.Workflows.RuntimeApplier/` |
+| Provisioning | Cloud-neutral engine realization (Pulumi Automation API; Azure first; flag off) | Customer, billing, Hub, or Bicep runner concerns | ADR-0021; `src/Provisioning/` |
 
 ## 4) Reused Patterns
 
