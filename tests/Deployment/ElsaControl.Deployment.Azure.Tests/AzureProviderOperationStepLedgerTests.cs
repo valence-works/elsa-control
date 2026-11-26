@@ -161,12 +161,57 @@ public sealed class AzureProviderOperationStepLedgerTests
         var result = await ledger.TryWriteAsync(
             operation,
             request,
-            [Event(operation.Id, 1, ProvisioningEventKind.OperationSucceeded, ProvisioningCapability.ContainerRuntime)]);
+            [
+                Event(
+                    operation.Id,
+                    1,
+                    ProvisioningEventKind.ResourceSucceeded,
+                    "resource-group",
+                    PulumiStepLedgerMapper.ResourceGroupAbsentMessage),
+                Event(operation.Id, 2, ProvisioningEventKind.OperationSucceeded, ProvisioningCapability.ContainerRuntime)
+            ]);
 
         Assert.Equal(ProvisioningStepLedgerResult.Written, result);
         Assert.Equal(AzureProviderOperationStatus.Succeeded, store.Operation.Status);
         Assert.Equal(AzureProviderOperationPhase.CleanupVerified, store.Operation.Phase);
+        Assert.Equal(new AzureProviderResourceReferences(), store.Operation.Resources);
         Assert.Contains(store.Transitions, item => item.Code == PulumiStepLedgerMapper.CleanupSucceededCode);
+    }
+
+    [Fact]
+    public async Task Delete_does_not_finalize_without_the_resource_group_absent_receipt()
+    {
+        var providerOperation = Operation() with { Action = AzureProviderOperationAction.Delete };
+        var store = new LedgerStore(providerOperation);
+        var ledger = new AzureProviderOperationStepLedger(store);
+        var (operation, request) = Bound(providerOperation.WorkspaceId, providerOperation.Id);
+
+        var result = await ledger.TryWriteAsync(
+            operation,
+            request,
+            [Event(operation.Id, 1, ProvisioningEventKind.OperationSucceeded, ProvisioningCapability.ContainerRuntime)]);
+
+        Assert.Equal(ProvisioningStepLedgerResult.Ignored, result);
+        Assert.Equal(AzureProviderOperationStatus.Accepted, store.Operation.Status);
+        Assert.Empty(store.Transitions);
+    }
+
+    [Fact]
+    public async Task Operation_succeeded_does_not_finalize_when_a_readiness_checkpoint_is_rejected()
+    {
+        var providerOperation = Operation();
+        var store = new LedgerStore(providerOperation) { ThrowOnCheckpoint = true };
+        var ledger = new AzureProviderOperationStepLedger(store);
+        var (operation, request) = Bound(providerOperation.WorkspaceId, providerOperation.Id);
+
+        var result = await ledger.TryWriteAsync(
+            operation,
+            request,
+            [Event(operation.Id, 1, ProvisioningEventKind.OperationSucceeded, ProvisioningCapability.ContainerRuntime)]);
+
+        Assert.Equal(ProvisioningStepLedgerResult.StaleFence, result);
+        Assert.Equal(AzureProviderOperationStatus.Running, store.Operation.Status);
+        Assert.Null(store.Operation.CompletedAt);
     }
 
     [Fact]
@@ -369,12 +414,13 @@ public sealed class AzureProviderOperationStepLedgerTests
         Guid operationId,
         int sequence,
         ProvisioningEventKind kind,
-        string resourceKind) =>
+        string resourceKind,
+        string? message = null) =>
         new(
             operationId,
             kind,
             resourceKind,
-            kind switch
+            message ?? kind switch
             {
                 ProvisioningEventKind.ResourceFailed or ProvisioningEventKind.OperationFailed => "Resource failed.",
                 ProvisioningEventKind.ResourceSucceeded or ProvisioningEventKind.OperationSucceeded => "Resource succeeded.",
@@ -448,6 +494,7 @@ public sealed class AzureProviderOperationStepLedgerTests
         public bool RejectClaim { get; init; }
         public bool RejectFinalize { get; set; }
         public bool ThrowOnWrite { get; set; }
+        public bool ThrowOnCheckpoint { get; set; }
 
         public void Reopen()
         {
@@ -579,7 +626,7 @@ public sealed class AzureProviderOperationStepLedgerTests
             CancellationToken cancellationToken = default)
         {
             AzureProviderOperationValidation.ValidateCheckpoint(checkpoint);
-            if (ThrowOnWrite)
+            if (ThrowOnWrite || ThrowOnCheckpoint)
                 throw new InvalidOperationException("The Azure provider operation store failed.");
             if (_leaseToken != leaseToken
                 || Operation.Status != AzureProviderOperationStatus.Running
@@ -602,6 +649,7 @@ public sealed class AzureProviderOperationStepLedgerTests
                 AttemptedStep = checkpoint.AttemptedStep,
                 Health = checkpoint.Health == AzureProviderHealth.Unknown ? Operation.Health : checkpoint.Health,
                 Endpoint = checkpoint.Endpoint ?? Operation.Endpoint,
+                Resources = checkpoint.ReplaceResources ? checkpoint.Resources : Operation.Resources,
                 CheckpointSequence = Operation.CheckpointSequence + 1,
                 Version = Operation.Version + 1,
                 UpdatedAt = now

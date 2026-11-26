@@ -287,6 +287,43 @@ public sealed class AzureProviderOperationWorkerTests
     }
 
     [Fact]
+    public async Task Pulumi_owned_reconcile_holds_entitlement_without_dispatching()
+    {
+        var operation = RunnableOperation();
+        var store = new WorkerStore(operation, execute: true);
+        var runner = new CompletingRunner();
+        var executor = new AzureProviderExecutor(store, runner, assignmentStore: new OperationAssignmentStore(operation));
+        var dispatcher = new RecordingDispatcher();
+        var worker = new AzureProviderOperationWorker(
+            store, executor, new PersistedAzureProviderPlanSource(), new FixedTimeProvider(),
+            dispatcher, new StaticBackendStore(ElsaInstanceProvisioningBackend.Pulumi), new DenyingGate());
+
+        Assert.Equal(1, await worker.ProcessOnceAsync());
+        Assert.Empty(dispatcher.Operations);
+        Assert.Empty(runner.Steps);
+        Assert.Equal(AzureProviderOperationStatus.EntitlementHeld, store.Operation.Status);
+        Assert.Contains(store.Transitions, transition => transition.Code == ElsaInstanceCommercialOperation.EntitlementRequired);
+    }
+
+    [Fact]
+    public async Task Pulumi_owned_delete_skips_the_commercial_gate()
+    {
+        var operation = WithComputedMetadata(RunnableOperation() with { Action = AzureProviderOperationAction.Delete });
+        var store = new WorkerStore(operation, execute: true);
+        var runner = new CompletingRunner();
+        var executor = new AzureProviderExecutor(store, runner, assignmentStore: new OperationAssignmentStore(operation));
+        var dispatcher = new RecordingDispatcher();
+        var worker = new AzureProviderOperationWorker(
+            store, executor, new PersistedAzureProviderPlanSource(), new FixedTimeProvider(),
+            dispatcher, new StaticBackendStore(ElsaInstanceProvisioningBackend.Pulumi), new DenyingGate());
+
+        Assert.Equal(1, await worker.ProcessOnceAsync());
+        Assert.Equal(AzureProviderOperationAction.Delete, Assert.Single(dispatcher.Operations).Action);
+        Assert.Empty(runner.Steps);
+        Assert.Equal(AzureProviderOperationStatus.Running, store.Operation.Status);
+    }
+
+    [Fact]
     public async Task Missing_dispatcher_on_pulumi_instance_fails_closed_without_bicep()
     {
         var operation = RunnableOperation();
@@ -787,6 +824,19 @@ public sealed class AzureProviderOperationWorkerTests
             Operations.Add(operation);
             return Task.FromResult(new AzurePulumiDispatchResult(true, Guid.NewGuid()));
         }
+    }
+
+    private sealed class DenyingGate : IElsaInstanceCommercialGate
+    {
+        public Task<ElsaInstanceCommercialGateDecision> EvaluateAsync(
+            Guid organizationId,
+            ElsaInstanceOperationAction action,
+            int? activeInstanceCount = null,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(new ElsaInstanceCommercialGateDecision(
+                false,
+                ElsaInstanceCommercialOperation.EntitlementRequired,
+                "Managed hosting is not enabled for this organization."));
     }
 
     private sealed class FailingDispatcher : IAzurePulumiProvisioningDispatcher

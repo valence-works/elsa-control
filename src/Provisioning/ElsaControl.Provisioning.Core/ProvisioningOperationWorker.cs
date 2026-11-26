@@ -108,6 +108,7 @@ public sealed class ProvisioningOperationWorker(
                 if (lostFence)
                     continue;
 
+                liveEvents?.SetFailureCode(claimed.Id, result.FailureCode);
                 await PublishAsync(claimed.Id, result.Events, cancellationToken).ConfigureAwait(false);
                 var terminal = TerminalState(claimed, result, linked, cancellationToken);
                 var needsCancel = terminal != ProvisioningOperationState.Succeeded;

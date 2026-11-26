@@ -76,10 +76,7 @@ public sealed class AzureProviderOperationStepLedger : IProvisioningStepLedger
                 if (current is null)
                     return Stale();
 
-                var checkpoint = current.Action == AzureProviderOperationAction.Delete
-                    && value.Kind == ProvisioningEventKind.OperationSucceeded
-                    ? PulumiStepLedgerMapper.DeleteSucceeded()
-                    : PulumiStepLedgerMapper.TryMap(value, current.Phase);
+                var checkpoint = MapCheckpoint(current, value);
                 if (checkpoint is null || !PulumiStepLedgerMapper.IsCustomerSafe(checkpoint))
                     continue;
 
@@ -306,6 +303,9 @@ public sealed class AzureProviderOperationStepLedger : IProvisioningStepLedger
     {
         try
         {
+            var resources = checkpoint.ReplaceResources
+                ? checkpoint.Resources ?? new AzureProviderResourceReferences()
+                : current.Resources;
             return await store.CheckpointAsync(
                     workspaceId,
                     providerOperationId,
@@ -314,10 +314,11 @@ public sealed class AzureProviderOperationStepLedger : IProvisioningStepLedger
                         checkpoint.Phase,
                         checkpoint.Code,
                         checkpoint.Message,
-                        current.Resources,
+                        resources,
                         checkpoint.Endpoint ?? current.Endpoint,
                         checkpoint.Health == AzureProviderHealth.Unknown ? current.Health : checkpoint.Health,
                         [],
+                        ReplaceResources: checkpoint.ReplaceResources,
                         AttemptedStep: checkpoint.AttemptedStep),
                     now,
                     current.Version,
@@ -326,8 +327,35 @@ public sealed class AzureProviderOperationStepLedger : IProvisioningStepLedger
         }
         catch (InvalidOperationException)
         {
-            return current;
+            return null;
         }
+    }
+
+    private static PulumiLedgerCheckpoint? MapCheckpoint(
+        AzureProviderOperation current,
+        ProvisioningEvent value)
+    {
+        if (current.Action != AzureProviderOperationAction.Delete)
+            return PulumiStepLedgerMapper.TryMap(value, current.Phase);
+
+        if (PulumiStepLedgerMapper.IsResourceGroupAbsentReceipt(value))
+            return PulumiStepLedgerMapper.ResourceGroupAbsent();
+
+        if (value.Kind == ProvisioningEventKind.OperationSucceeded)
+        {
+            return current.Phase == AzureProviderOperationPhase.CleanupVerified
+                ? PulumiStepLedgerMapper.DeleteSucceeded()
+                : null;
+        }
+
+        if (value.Kind is ProvisioningEventKind.ResourceFailed
+            or ProvisioningEventKind.OperationFailed
+            or ProvisioningEventKind.OperationCancelled)
+        {
+            return PulumiStepLedgerMapper.TryMap(value, current.Phase);
+        }
+
+        return null;
     }
 
     private async Task<AzureProviderOperation?> EnsureClaimedAsync(

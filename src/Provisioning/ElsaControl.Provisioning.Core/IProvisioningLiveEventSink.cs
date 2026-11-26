@@ -29,4 +29,12 @@ public interface IProvisioningLiveEventSink
         CancellationToken cancellationToken = default);
 
     Task HeartbeatAsync(Guid operationId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Overlays the provider failure code onto the bound run so the next
+    /// ledger write can classify it. No-op when the run is not bound.
+    /// </summary>
+    void SetFailureCode(Guid operationId, string? failureCode)
+    {
+    }
 }

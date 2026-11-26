@@ -197,6 +197,23 @@ public sealed class PulumiStepLedgerMapperTests
     }
 
     [Fact]
+    public void Resource_group_absent_receipt_is_recognized()
+    {
+        Assert.True(PulumiStepLedgerMapper.IsResourceGroupAbsentReceipt(
+            Event(
+                ProvisioningEventKind.ResourceSucceeded,
+                "resource-group",
+                PulumiStepLedgerMapper.ResourceGroupAbsentMessage)));
+        Assert.False(PulumiStepLedgerMapper.IsResourceGroupAbsentReceipt(
+            Event(ProvisioningEventKind.ResourceSucceeded, "resource-group", "Resource succeeded.")));
+        var checkpoint = PulumiStepLedgerMapper.ResourceGroupAbsent();
+        Assert.True(checkpoint.ReplaceResources);
+        Assert.Equal(new AzureProviderResourceReferences(), checkpoint.Resources);
+        Assert.False(checkpoint.Finalize);
+        Assert.True(PulumiStepLedgerMapper.IsCustomerSafe(checkpoint));
+    }
+
+    [Fact]
     public void Phase_regression_is_ignored()
     {
         var mapped = PulumiStepLedgerMapper.TryMap(

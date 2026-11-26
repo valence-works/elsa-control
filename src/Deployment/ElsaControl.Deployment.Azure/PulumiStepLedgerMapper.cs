@@ -27,6 +27,7 @@ public static class PulumiStepLedgerMapper
     public const string TrafficRoutedCode = "traffic.routed";
     public const string OperationSucceededCode = "azure.operation.succeeded";
     public const string CleanupSucceededCode = "azure.cleanup.succeeded";
+    public const string ResourceGroupAbsentMessage = "Owned resource group is absent.";
 
     public const string FoundationPreparingMessage = "Foundation is preparing.";
     public const string FoundationReadyMessage = "Foundation is ready.";
@@ -122,6 +123,25 @@ public static class PulumiStepLedgerMapper
         return null;
     }
 
+    public static bool IsResourceGroupAbsentReceipt(ProvisioningEvent value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        return value.Kind == ProvisioningEventKind.ResourceSucceeded
+               && value.ResourceKind == "resource-group"
+               && string.Equals(value.Message, ResourceGroupAbsentMessage, StringComparison.Ordinal);
+    }
+
+    public static PulumiLedgerCheckpoint ResourceGroupAbsent() =>
+        new(
+            AzureProviderOperationPhase.CleanupVerified,
+            AzureProviderRunnerStep.Cleanup,
+            AzureProviderOperationStatus.Running,
+            CleanupSucceededCode,
+            CleanupSucceededMessage,
+            Finalize: false,
+            ReplaceResources: true,
+            Resources: new AzureProviderResourceReferences());
+
     public static PulumiLedgerCheckpoint DeleteSucceeded() =>
         new(
             AzureProviderOperationPhase.CleanupVerified,
@@ -129,7 +149,9 @@ public static class PulumiStepLedgerMapper
             AzureProviderOperationStatus.Succeeded,
             CleanupSucceededCode,
             CleanupSucceededMessage,
-            Finalize: true);
+            Finalize: true,
+            ReplaceResources: true,
+            Resources: new AzureProviderResourceReferences());
 
     public static PulumiLedgerCheckpoint HealthVerified() =>
         new(
@@ -338,4 +360,6 @@ public sealed record PulumiLedgerCheckpoint(
     string Message,
     bool Finalize,
     AzureProviderHealth Health = AzureProviderHealth.Unknown,
-    string? Endpoint = null);
+    string? Endpoint = null,
+    bool ReplaceResources = false,
+    AzureProviderResourceReferences? Resources = null);

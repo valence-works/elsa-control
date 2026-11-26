@@ -16,7 +16,8 @@ public sealed class AzureProviderOperationWorker(
     IAzureProviderPlanSource planSource,
     TimeProvider? timeProvider = null,
     IAzurePulumiProvisioningDispatcher? pulumi = null,
-    IElsaInstanceProvisioningBackendStore? backends = null)
+    IElsaInstanceProvisioningBackendStore? backends = null,
+    IElsaInstanceCommercialGate? commercialGate = null)
 {
     public const string DispatchWorkerId = "pulumi-dispatch";
 
@@ -129,6 +130,42 @@ public sealed class AzureProviderOperationWorker(
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
+        if (operation.Action != AzureProviderOperationAction.Delete)
+        {
+            if (IsIdentityBindingMissing(operation))
+            {
+                await ParkAsync(
+                        operation,
+                        now,
+                        AzureProviderOperationStatus.RecoveryRequired,
+                        ManagedElsaReasonCodeCatalog.ProviderIdentityBindingMissing,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (commercialGate is not null)
+            {
+                var decision = await commercialGate
+                    .EvaluateAsync(
+                        operation.OrganizationId!.Value,
+                        operation.LifecycleAction!.Value,
+                        cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+                if (!decision.Allowed)
+                {
+                    await ParkAsync(
+                            operation,
+                            now,
+                            AzureProviderOperationStatus.EntitlementHeld,
+                            decision.Code,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    return;
+                }
+            }
+        }
+
         AzurePulumiDispatchResult? dispatched = null;
         if (pulumi is not null)
             dispatched = await pulumi.DispatchAsync(operation, plan, cancellationToken).ConfigureAwait(false);
@@ -157,10 +194,25 @@ public sealed class AzureProviderOperationWorker(
         await FailClosedAsync(operation, now, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task FailClosedAsync(
+    private Task FailClosedAsync(
         AzureProviderOperation operation,
         DateTimeOffset now,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken) =>
+        ParkAsync(
+            operation,
+            now,
+            AzureProviderOperationStatus.Failed,
+            ManagedElsaReasonCodeCatalog.ProviderDispatchFailed,
+            cancellationToken,
+            stampFromPulumi: true);
+
+    private async Task ParkAsync(
+        AzureProviderOperation operation,
+        DateTimeOffset now,
+        AzureProviderOperationStatus status,
+        string code,
+        CancellationToken cancellationToken,
+        bool stampFromPulumi = false)
     {
         var leaseToken = Guid.NewGuid().ToString("N");
         var claimed = await store.ClaimAsync(
@@ -180,8 +232,8 @@ public sealed class AzureProviderOperationWorker(
                 operation.WorkspaceId,
                 operation.Id,
                 leaseToken,
-                AzureProviderOperationStatus.Failed,
-                ManagedElsaReasonCodeCatalog.ProviderDispatchFailed,
+                status,
+                code,
                 _timeProvider.GetUtcNow(),
                 claimed.Version,
                 cancellationToken)
@@ -189,14 +241,22 @@ public sealed class AzureProviderOperationWorker(
         if (finalized is null)
             return;
 
+        if (!stampFromPulumi)
+            return;
+
         await store.RecordArmObservationClockAsync(
                 operation.WorkspaceId,
                 operation.Id,
                 _timeProvider.GetUtcNow(),
                 0,
-                ManagedElsaReasonCodeCatalog.ProviderDispatchFailed,
+                code,
                 AzureTransientArmFailure.FromPulumi(null),
                 cancellationToken)
             .ConfigureAwait(false);
     }
+
+    private static bool IsIdentityBindingMissing(AzureProviderOperation operation) =>
+        operation.OrganizationId is not { } organizationId || organizationId == Guid.Empty ||
+        operation.InstanceId is not { } instanceId || instanceId == Guid.Empty ||
+        operation.LifecycleAction is not { };
 }
