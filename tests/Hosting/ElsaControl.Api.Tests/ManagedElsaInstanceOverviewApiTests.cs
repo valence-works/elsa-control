@@ -1751,6 +1751,17 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
             ManagedElsaInstanceOverviewEndpoints.RetryPermissionRequiredCode,
             await retry.Content.ReadAsStringAsync(),
             StringComparison.Ordinal);
+
+        using var ownerRetry = await SendRetryAsync(
+            owner, workspaceId, created.Instance.InstanceId, created.Instance.ETag, "overview-retry-reader-owner");
+        Assert.Equal(HttpStatusCode.Accepted, ownerRetry.StatusCode);
+        using var replay = await SendRetryAsync(
+            reader, workspaceId, created.Instance.InstanceId, created.Instance.ETag, "overview-retry-reader-owner");
+        Assert.Equal(HttpStatusCode.Forbidden, replay.StatusCode);
+        Assert.Contains(
+            ManagedElsaInstanceOverviewEndpoints.RetryPermissionRequiredCode,
+            await replay.Content.ReadAsStringAsync(),
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2414,7 +2425,20 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
             return;
         }
 
-        var expectedStatus = (HttpStatusCode)ManagedElsaInstanceOverviewEndpoints.RetryDenialStatusCode(reasonCode!);
+        var expectedStatus = reasonCode switch
+        {
+            ManagedElsaInstanceOverviewEndpoints.RetryPermissionRequiredCode => HttpStatusCode.Forbidden,
+            ElsaInstanceCommercialOperation.EntitlementRequired
+                or ElsaInstanceCommercialOperation.EntitlementExpired
+                or ElsaInstanceCommercialOperation.SubscriptionStateRequired
+                or ElsaInstanceCommercialOperation.LifecycleConstrained
+                or ElsaInstanceCommercialOperation.InstanceLimitReached
+                or ElsaInstanceCommercialOperation.BindingRequired
+                or ElsaInstanceCommercialOperation.EntitlementSafeExitSuperseded
+                or ElsaInstanceCommercialOperation.SharedAllowanceExceeded
+                or ElsaInstanceCommercialOperation.ShardCapacity => HttpStatusCode.UnprocessableEntity,
+            _ => HttpStatusCode.Conflict
+        };
         Assert.Equal(expectedStatus, retry.StatusCode);
         Assert.Contains(reasonCode!, retryText, StringComparison.Ordinal);
     }

@@ -1060,9 +1060,11 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
                     pending.Enqueue((nested, depth + 1));
                 }
 
-                // An early transient must not hide an unsafe later page or sibling module.
+                // Wrapper-only and unknown pages must not hide a nested terminal
+                // code. Stop early only once Terminal is confirmed. An early
+                // transient still continues so a later sibling cannot be skipped.
                 var inspection = AzureTransientArmFailure.Inspect(codes);
-                if (inspection.NeedsOperator)
+                if (inspection.FailureClass == ElsaInstanceOperationFailureClass.Terminal)
                     return inspection;
                 if (page.NextLink is not null && !AzureDeploymentOperationsPage.IsSafeContinuation(page.NextLink, firstUrl))
                     return AzureArmErrorInspection.Unclassified();

@@ -71,6 +71,23 @@ public sealed class AzureTransientArmFailureTests
     }
 
     [Fact]
+    public void Unknown_codes_do_not_hide_a_later_terminal_code()
+    {
+        Assert.Equal(
+            ElsaInstanceOperationFailureClass.Terminal,
+            AzureTransientArmFailure.ClassifyFailureClass(["UnknownProviderError", AzureTransientArmFailure.QuotaExceeded]));
+        Assert.Equal(
+            ElsaInstanceOperationFailureClass.Terminal,
+            AzureTransientArmFailure.ClassifyFailureClass([AzureTransientArmFailure.QuotaExceeded, "UnknownProviderError"]));
+        Assert.Null(AzureTransientArmFailure.Classify(["UnknownProviderError", AzureTransientArmFailure.QuotaExceeded]));
+        Assert.Equal(
+            ElsaInstanceOperationFailureClass.Unclassified,
+            AzureTransientArmFailure.ClassifyFailureClass(
+                ["UnknownProviderError", AzureTransientArmFailure.TooManyRequests]));
+        Assert.Null(AzureTransientArmFailure.Classify(["UnknownProviderError", AzureTransientArmFailure.TooManyRequests]));
+    }
+
+    [Fact]
     public void Normalize_maps_429_and_rejects_unsafe_text()
     {
         Assert.Equal(AzureTransientArmFailure.TooManyRequests, AzureTransientArmFailure.Normalize("429"));

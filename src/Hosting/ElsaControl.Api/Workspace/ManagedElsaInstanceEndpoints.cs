@@ -555,12 +555,18 @@ public static class ManagedElsaInstanceEndpoints
             if (request.ExpectedVersion is { } bodyVersion && expectedVersion.Value != bodyVersion)
                 return Problem("instance.version-conflict", "If-Match and expectedVersion do not agree.", StatusCodes.Status412PreconditionFailed);
             var access = context.GetWorkspaceAccess();
-            if (request.Action != ElsaInstanceOperationAction.Retry &&
-                !WorkspaceRolePolicy.Allows(access.Role, WorkspaceOperation.MutateWorkspaceResource))
-                return Problem(
-                    "instance.permission-required",
-                    "The caller cannot mutate this workspace resource.",
-                    StatusCodes.Status403Forbidden);
+            if (!WorkspaceRolePolicy.Allows(access.Role, WorkspaceOperation.MutateWorkspaceResource))
+            {
+                return request.Action == ElsaInstanceOperationAction.Retry
+                    ? Problem(
+                        ManagedElsaInstanceOverviewEndpoints.RetryPermissionRequiredCode,
+                        "Retry permission is required.",
+                        StatusCodes.Status403Forbidden)
+                    : Problem(
+                        "instance.permission-required",
+                        "The caller cannot mutate this workspace resource.",
+                        StatusCodes.Status403Forbidden);
+            }
 
             if (request.Action == ElsaInstanceOperationAction.Delete)
             {

@@ -188,7 +188,12 @@ public static class AzureTransientArmFailure
         var codes = new List<string>();
         var incomplete = false;
         CollectCodes(error, codes, depth: 0, nodes: 0, ref incomplete);
-        return incomplete || codes.Count == 0 ? new AzureArmErrorInspection(null, NeedsOperator: true) : Inspect(codes);
+        if (codes.Count == 0)
+            return AzureArmErrorInspection.Unclassified();
+        var inspected = Inspect(codes);
+        return incomplete && inspected.FailureClass != ElsaInstanceOperationFailureClass.Terminal
+            ? AzureArmErrorInspection.Unclassified()
+            : inspected;
     }
 
     internal static AzureArmErrorInspection Inspect(IEnumerable<string?> codes)
@@ -196,26 +201,31 @@ public static class AzureTransientArmFailure
         ArgumentNullException.ThrowIfNull(codes);
         string? firstTransient = null;
         var sawAny = false;
+        var sawUnknown = false;
         foreach (var code in codes)
         {
             sawAny = true;
             var normalized = Normalize(code);
             if (normalized is null)
-                return AzureArmErrorInspection.Unclassified();
+            {
+                sawUnknown = true;
+                continue;
+            }
             if (IsTerminal(normalized))
                 return AzureArmErrorInspection.Terminal();
             if (WrapperArmCodes.Contains(normalized))
                 continue;
             if (!IsTransient(normalized))
-                return AzureArmErrorInspection.Unclassified();
+            {
+                sawUnknown = true;
+                continue;
+            }
             firstTransient ??= ToSafeDiagnostic(normalized);
         }
 
-        if (!sawAny)
+        if (!sawAny || sawUnknown || firstTransient is null)
             return AzureArmErrorInspection.Unclassified();
-        return firstTransient is null
-            ? AzureArmErrorInspection.Unclassified()
-            : new AzureArmErrorInspection(firstTransient, NeedsOperator: false, ElsaInstanceOperationFailureClass.Transient);
+        return new AzureArmErrorInspection(firstTransient, NeedsOperator: false, ElsaInstanceOperationFailureClass.Transient);
     }
 
     internal static bool IsSafeNestedDeploymentName(string? name) =>

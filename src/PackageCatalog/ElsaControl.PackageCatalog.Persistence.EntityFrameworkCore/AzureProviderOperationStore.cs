@@ -1379,14 +1379,10 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
         entity.ArmObservationBackoffSeconds = backoffSeconds;
         if (AzureProviderOperationValidation.IsSafeCode(reasonCode))
             entity.LastObservationReasonCode = reasonCode;
-        if (failureClass is { } classified &&
-            AzureProviderOperationValidation.TryParseLifecycleOperationId(entity.IdempotencyKey, out var lifecycleId))
-        {
-            var lifecycle = await db.ElsaInstanceOperations.SingleOrDefaultAsync(
-                x => x.WorkspaceId == workspaceId && x.Id == lifecycleId, cancellationToken);
-            if (lifecycle is not null)
-                lifecycle.FailureClass = MergeFailureClass(lifecycle.FailureClass, classified);
-        }
+        Guid? lifecycleId = AzureProviderOperationValidation.TryParseLifecycleOperationId(
+            entity.IdempotencyKey, out var parsedLifecycleId)
+            ? parsedLifecycleId
+            : null;
         try
         {
             await db.SaveChangesAsync(cancellationToken);
@@ -1395,19 +1391,30 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
         {
             db.ChangeTracker.Clear();
         }
+
+        if (failureClass is { } classified && lifecycleId is { } lifecycleOperationId)
+            await StampLifecycleFailureClassAsync(workspaceId, lifecycleOperationId, classified, cancellationToken);
     }
 
-    private static ElsaInstanceOperationFailureClass MergeFailureClass(
-        ElsaInstanceOperationFailureClass? existing,
-        ElsaInstanceOperationFailureClass incoming)
+    private async Task StampLifecycleFailureClassAsync(
+        Guid workspaceId,
+        Guid lifecycleOperationId,
+        ElsaInstanceOperationFailureClass incoming,
+        CancellationToken cancellationToken)
     {
-        if (existing == ElsaInstanceOperationFailureClass.Terminal ||
-            incoming == ElsaInstanceOperationFailureClass.Terminal)
-            return ElsaInstanceOperationFailureClass.Terminal;
-        if (existing == ElsaInstanceOperationFailureClass.Transient ||
-            incoming == ElsaInstanceOperationFailureClass.Transient)
-            return ElsaInstanceOperationFailureClass.Transient;
-        return ElsaInstanceOperationFailureClass.Unclassified;
+        var incomingName = incoming.ToString();
+        var terminal = nameof(ElsaInstanceOperationFailureClass.Terminal);
+        var transient = nameof(ElsaInstanceOperationFailureClass.Transient);
+        var unclassified = nameof(ElsaInstanceOperationFailureClass.Unclassified);
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE ElsaInstanceOperations
+            SET FailureClass = CASE
+                WHEN FailureClass = {terminal} OR {incomingName} = {terminal} THEN {terminal}
+                WHEN FailureClass = {transient} OR {incomingName} = {transient} THEN {transient}
+                ELSE {unclassified}
+            END
+            WHERE WorkspaceId = {workspaceId} AND Id = {lifecycleOperationId}
+            """, cancellationToken);
     }
 
     public async Task<AzureProviderOperation?> IncrementAutoResumeCountAsync(
