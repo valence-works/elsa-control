@@ -1351,7 +1351,16 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
         DateTimeOffset observedAt,
         int backoffSeconds,
         CancellationToken cancellationToken = default) =>
-        RecordArmObservationClockAsync(workspaceId, operationId, observedAt, backoffSeconds, null, cancellationToken);
+        RecordArmObservationClockAsync(workspaceId, operationId, observedAt, backoffSeconds, null, null, cancellationToken);
+
+    public Task RecordArmObservationClockAsync(
+        Guid workspaceId,
+        Guid operationId,
+        DateTimeOffset observedAt,
+        int backoffSeconds,
+        string? reasonCode,
+        CancellationToken cancellationToken = default) =>
+        RecordArmObservationClockAsync(workspaceId, operationId, observedAt, backoffSeconds, reasonCode, null, cancellationToken);
 
     public async Task RecordArmObservationClockAsync(
         Guid workspaceId,
@@ -1359,6 +1368,7 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
         DateTimeOffset observedAt,
         int backoffSeconds,
         string? reasonCode,
+        ElsaInstanceOperationFailureClass? failureClass,
         CancellationToken cancellationToken = default)
     {
         var entity = await db.AzureProviderOperations.SingleOrDefaultAsync(
@@ -1369,6 +1379,14 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
         entity.ArmObservationBackoffSeconds = backoffSeconds;
         if (AzureProviderOperationValidation.IsSafeCode(reasonCode))
             entity.LastObservationReasonCode = reasonCode;
+        if (failureClass is { } classified &&
+            AzureProviderOperationValidation.TryParseLifecycleOperationId(entity.IdempotencyKey, out var lifecycleId))
+        {
+            var lifecycle = await db.ElsaInstanceOperations.SingleOrDefaultAsync(
+                x => x.WorkspaceId == workspaceId && x.Id == lifecycleId, cancellationToken);
+            if (lifecycle is not null)
+                lifecycle.FailureClass = MergeFailureClass(lifecycle.FailureClass, classified);
+        }
         try
         {
             await db.SaveChangesAsync(cancellationToken);
@@ -1377,6 +1395,19 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
         {
             db.ChangeTracker.Clear();
         }
+    }
+
+    private static ElsaInstanceOperationFailureClass MergeFailureClass(
+        ElsaInstanceOperationFailureClass? existing,
+        ElsaInstanceOperationFailureClass incoming)
+    {
+        if (existing == ElsaInstanceOperationFailureClass.Terminal ||
+            incoming == ElsaInstanceOperationFailureClass.Terminal)
+            return ElsaInstanceOperationFailureClass.Terminal;
+        if (existing == ElsaInstanceOperationFailureClass.Transient ||
+            incoming == ElsaInstanceOperationFailureClass.Transient)
+            return ElsaInstanceOperationFailureClass.Transient;
+        return ElsaInstanceOperationFailureClass.Unclassified;
     }
 
     public async Task<AzureProviderOperation?> IncrementAutoResumeCountAsync(

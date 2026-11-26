@@ -1,4 +1,5 @@
 using System.Text.Json;
+using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Instances;
 using Xunit;
 
@@ -35,6 +36,39 @@ public sealed class AzureTransientArmFailureTests
     [InlineData("ResourceGroupNotFound")]
     public void Terminal_arm_codes_are_classified_as_terminal(string code) =>
         Assert.True(AzureTransientArmFailure.IsTerminal(code));
+
+    [Theory]
+    [InlineData(AzureTransientArmFailure.QuotaExceeded, ElsaInstanceOperationFailureClass.Terminal)]
+    [InlineData(AzureTransientArmFailure.RequestDisallowedByPolicy, ElsaInstanceOperationFailureClass.Terminal)]
+    [InlineData("InvalidTemplate", ElsaInstanceOperationFailureClass.Terminal)]
+    [InlineData("ResourceGroupNotFound", ElsaInstanceOperationFailureClass.Terminal)]
+    [InlineData(AzureTransientArmFailure.TooManyRequests, ElsaInstanceOperationFailureClass.Transient)]
+    [InlineData("429", ElsaInstanceOperationFailureClass.Transient)]
+    [InlineData(AzureTransientArmFailure.AllocationFailed, ElsaInstanceOperationFailureClass.Transient)]
+    [InlineData(AzureTransientArmFailure.ServerTimeout, ElsaInstanceOperationFailureClass.Transient)]
+    [InlineData(AzureTransientArmFailure.InternalServerError, ElsaInstanceOperationFailureClass.Transient)]
+    [InlineData(AzureTransientArmFailure.ManagedEnvironmentProvisioningError, ElsaInstanceOperationFailureClass.Transient)]
+    [InlineData("DeploymentFailed", ElsaInstanceOperationFailureClass.Unclassified)]
+    [InlineData("provider.failed", ElsaInstanceOperationFailureClass.Unclassified)]
+    [InlineData(null, ElsaInstanceOperationFailureClass.Unclassified)]
+    public void Pulumi_and_arm_codes_map_into_the_shared_failure_class(
+        string? code,
+        ElsaInstanceOperationFailureClass expected)
+    {
+        Assert.Equal(expected, AzureTransientArmFailure.FromPulumi(code));
+        if (code is not null and not "429" and not "provider.failed")
+            Assert.Equal(expected, AzureTransientArmFailure.ClassifyFailureClass([code]));
+    }
+
+    [Fact]
+    public void Nested_quota_exceeded_tree_is_terminal_without_a_transient_diagnostic()
+    {
+        using var document = JsonDocument.Parse("""{"code":"DeploymentFailed","details":[{"code":"QuotaExceeded"}]}""");
+        Assert.Equal(
+            ElsaInstanceOperationFailureClass.Terminal,
+            AzureTransientArmFailure.ClassifyFailureClass(document.RootElement));
+        Assert.Null(AzureTransientArmFailure.Classify(document.RootElement));
+    }
 
     [Fact]
     public void Normalize_maps_429_and_rejects_unsafe_text()

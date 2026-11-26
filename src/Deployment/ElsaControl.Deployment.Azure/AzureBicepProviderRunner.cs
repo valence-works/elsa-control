@@ -935,7 +935,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         string? resourceGroupName = null)
     {
         var code = outcomeCode ?? AzureLateSuccessCodes.DeploymentFailed;
-        var inner = await TryReadDeploymentErrorCodeAsync(
+        var classified = await TryClassifyDeploymentErrorAsync(
             command, deploymentName, cancellationToken, subscriptionId, resourceGroupName,
             inspectOperations: string.Equals(code, AzureLateSuccessCodes.DeploymentFailed, StringComparison.Ordinal));
         return new(
@@ -946,10 +946,11 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             null,
             code,
             "Azure reported the deployment as failed or canceled.",
-            inner);
+            classified.InnerErrorCode,
+            classified.FailureClass);
     }
 
-    private async Task<string?> TryReadDeploymentErrorCodeAsync(
+    private async Task<(string? InnerErrorCode, ElsaInstanceOperationFailureClass FailureClass)> TryClassifyDeploymentErrorAsync(
         AzureProviderRunnerCommand command,
         string deploymentName,
         CancellationToken cancellationToken,
@@ -967,16 +968,21 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             ParseDeploymentErrorAsync,
             cancellationToken);
         if (!error.Succeeded || error.Value is null)
-            return null;
+            return (null, ElsaInstanceOperationFailureClass.Unclassified);
         var inspection = AzureTransientArmFailure.InspectError(error.Value.Value);
-        if (inspection.NeedsOperator)
-            return null;
+        if (inspection.FailureClass == ElsaInstanceOperationFailureClass.Terminal)
+            return (null, ElsaInstanceOperationFailureClass.Terminal);
         if (inspection.TransientDiagnostic is not null)
-            return inspection.TransientDiagnostic;
+            return (inspection.TransientDiagnostic, ElsaInstanceOperationFailureClass.Transient);
         if (!inspectOperations)
-            return null;
-        return await TryClassifyFailedDeploymentOperationsAsync(
+            return (null, inspection.FailureClass);
+        var fromOperations = await TryClassifyFailedDeploymentOperationsAsync(
             command, deploymentName, subscription, group, cancellationToken);
+        if (fromOperations.FailureClass == ElsaInstanceOperationFailureClass.Terminal)
+            return (null, ElsaInstanceOperationFailureClass.Terminal);
+        if (fromOperations.TransientDiagnostic is not null)
+            return (fromOperations.TransientDiagnostic, ElsaInstanceOperationFailureClass.Transient);
+        return (null, fromOperations.FailureClass);
     }
 
     /// <summary>
@@ -985,7 +991,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
     /// and four explicit ARM-page limits across all nested modules. A failed or truncated page stays
     /// operator-recoverable.
     /// </summary>
-    private async Task<string?> TryClassifyFailedDeploymentOperationsAsync(
+    private async Task<AzureArmErrorInspection> TryClassifyFailedDeploymentOperationsAsync(
         AzureProviderRunnerCommand command,
         string deploymentName,
         string subscriptionId,
@@ -1028,43 +1034,45 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             while (url is not null)
             {
                 if (pages >= AzureTransientArmFailure.MaximumErrorWalkPages || !visitedPages.Add(url))
-                    return null;
+                    return AzureArmErrorInspection.Unclassified();
                 pages++;
                 var result = await ExecuteAzAsync(command,
                     ["rest", "--method", "get", "--url", url,
                         "--subscription", subscriptionId, "--output", "json", "--only-show-errors"],
                     AzureDeploymentOperationsPage.Parse, cancellationToken);
                 if (!result.Succeeded || result.Value is null)
-                    return null;
+                    return AzureArmErrorInspection.Unclassified();
                 var page = result.Value;
                 failedCount += page.FailedOperations.GetArrayLength();
                 if (failedCount > AzureTransientArmFailure.MaximumErrorWalkFanout)
-                    return null;
+                    return AzureArmErrorInspection.Unclassified();
                 nodes = AzureTransientArmFailure.CollectOperationCodes(
                     page.FailedOperations, codes, depth, nodes, out var incomplete);
                 if (incomplete)
-                    return null;
+                    return AzureArmErrorInspection.Unclassified();
                 var nestedNames = AzureTransientArmFailure.FailedNestedDeploymentNames(page.FailedOperations, out var incompleteTargets);
                 if (incompleteTargets)
-                    return null;
+                    return AzureArmErrorInspection.Unclassified();
                 foreach (var nested in nestedNames)
                 {
                     if (pending.Count + seen.Count >= AzureTransientArmFailure.MaximumErrorWalkFanout)
-                        return null;
+                        return AzureArmErrorInspection.Unclassified();
                     pending.Enqueue((nested, depth + 1));
                 }
 
                 // An early transient must not hide an unsafe later page or sibling module.
-                if (AzureTransientArmFailure.Inspect(codes).NeedsOperator ||
-                    (page.NextLink is not null && !AzureDeploymentOperationsPage.IsSafeContinuation(page.NextLink, firstUrl)))
-                    return null;
+                var inspection = AzureTransientArmFailure.Inspect(codes);
+                if (inspection.NeedsOperator)
+                    return inspection;
+                if (page.NextLink is not null && !AzureDeploymentOperationsPage.IsSafeContinuation(page.NextLink, firstUrl))
+                    return AzureArmErrorInspection.Unclassified();
                 url = page.NextLink;
             }
         }
 
         if (truncated || pending.Count > 0)
-            return null;
-        return AzureTransientArmFailure.Classify(codes);
+            return AzureArmErrorInspection.Unclassified();
+        return AzureTransientArmFailure.Inspect(codes);
     }
 
     private static AzureProviderRunnerStep? GetSqlRecoveryStep(AzureProviderOperation operation) =>

@@ -110,7 +110,8 @@ public sealed record ElsaInstanceOperationSummary(
     DateTimeOffset? UpdatedAt = null,
     [property: System.Text.Json.Serialization.JsonIgnore] DateTimeOffset? ReasonEnteredAt = null,
     [property: System.Text.Json.Serialization.JsonIgnore] DateTimeOffset? RequiresHumanAt = null,
-    [property: System.Text.Json.Serialization.JsonIgnore] string? DeletionDiagnosticCode = null);
+    [property: System.Text.Json.Serialization.JsonIgnore] string? DeletionDiagnosticCode = null,
+    [property: System.Text.Json.Serialization.JsonIgnore] ElsaInstanceOperationFailureClass? FailureClass = null);
 
 /// <summary>
 /// Safe operator projection of one instance's unfinished lifecycle topology.

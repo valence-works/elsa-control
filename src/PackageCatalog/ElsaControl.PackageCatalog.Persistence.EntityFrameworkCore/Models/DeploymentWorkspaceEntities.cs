@@ -319,6 +319,7 @@ internal sealed class ElsaInstanceOperationEntity
     public string? ResolvedPlanId { get; set; }
     public Guid? DeploymentRunId { get; set; }
     public string? FailureCode { get; set; }
+    public ElsaInstanceOperationFailureClass? FailureClass { get; set; }
     public string? FailureSummary { get; set; }
     public int ReconciliationVersion { get; set; }
     public string? ReconciliationEvidenceFingerprint { get; set; }

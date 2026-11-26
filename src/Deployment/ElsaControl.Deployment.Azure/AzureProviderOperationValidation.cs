@@ -13,6 +13,17 @@ public static class AzureProviderOperationValidation
     public static string LifecycleIdempotencyKey(Guid operationId) =>
         $"elsa-instance-operation:{operationId:D}";
 
+    public static bool TryParseLifecycleOperationId(string? key, out Guid operationId)
+    {
+        const string prefix = "elsa-instance-operation:";
+        operationId = Guid.Empty;
+        if (string.IsNullOrWhiteSpace(key) ||
+            !key.StartsWith(prefix, StringComparison.Ordinal) ||
+            key.Length != prefix.Length + 36)
+            return false;
+        return Guid.TryParse(key.AsSpan(prefix.Length), out operationId) && operationId != Guid.Empty;
+    }
+
     /// <summary>
     /// Binds a delete's canonical key (including bounded retry lineage) to its lifecycle
     /// operation. Unattributable long-chain hashed keys require explicit recovery.

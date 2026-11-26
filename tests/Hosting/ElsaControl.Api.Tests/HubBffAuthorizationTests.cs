@@ -7,6 +7,7 @@ using ElsaControl.Api.Authentication;
 using ElsaControl.Api.Cloud;
 using ElsaControl.Api.Workspace;
 using ElsaControl.Deployment.Abstractions.Instances;
+using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.Deployment.Core.Provisioning;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
@@ -244,6 +245,82 @@ public sealed class HubBffAuthorizationTests
             $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}/operations/{accepted.OperationId:D}/cleanup-observation");
         Assert.DoesNotContain("hub-bff.denied", await receipt.Content.ReadAsStringAsync(), StringComparison.Ordinal);
         Assert.DoesNotContain("hub-bff.denied", await observation.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Hub_operations_route_refuses_non_retry_actions_after_a_failed_create()
+    {
+        var catalog = CreateCatalogStore(CatalogEntry("3.8.4", 'a'), CatalogEntry("3.8.5", 'b'));
+        await using var app = CreateLifecycleHubApplication(catalog);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var client = CreateHubClient(app, HubSubject);
+        var workspaceId = await BootstrapWorkspaceAsync(client);
+        await EnableManagedHostingAsync(app, workspaceId, maxInstances: int.MaxValue);
+
+        using var create = await SendCreateAsync(client, workspaceId, "Hub retry", "hub-retry-refuse", "hub-retry-refuse-create");
+        var created = await create.Content.ReadControlJsonAsync<ManagedElsaInstanceAcceptedResponse>();
+        Assert.Equal(HttpStatusCode.Accepted, create.StatusCode);
+        Assert.NotNull(created);
+        await FailCreateAsync(app, created);
+
+        using var restartOnOperations = await client.SendAsync(Mutation(
+            HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/operations",
+            created.Instance.ETag,
+            "hub-retry-refuse-restart",
+            new ManagedElsaInstanceOperationRequest(ElsaInstanceOperationAction.Restart)));
+        await AssertHubBffDeniedAsync(restartOnOperations);
+
+        using var restart = await client.SendAsync(Mutation(
+            HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/restart",
+            created.Instance.ETag,
+            "hub-retry-refuse-restart-dedicated"));
+        Assert.Equal(HttpStatusCode.Conflict, restart.StatusCode);
+        Assert.Contains("instance.failed", await restart.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        using var apply = await client.SendAsync(Mutation(
+            HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/apply-release",
+            created.Instance.ETag,
+            "hub-retry-refuse-apply",
+            new ManagedElsaInstanceApplyReleaseRequest("3.8.5")));
+        Assert.Equal(HttpStatusCode.Conflict, apply.StatusCode);
+        Assert.Contains("instance.failed", await apply.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Hub_can_retry_a_failed_create()
+    {
+        var catalog = CreateCatalogStore(CatalogEntry("3.8.4", 'a'));
+        await using var app = CreateLifecycleHubApplication(catalog);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var client = CreateHubClient(app, HubSubject);
+        var workspaceId = await BootstrapWorkspaceAsync(client);
+        await EnableManagedHostingAsync(app, workspaceId, maxInstances: int.MaxValue);
+
+        using var create = await SendCreateAsync(client, workspaceId, "Hub retry", "hub-retry-happy", "hub-retry-happy-create");
+        var created = await create.Content.ReadControlJsonAsync<ManagedElsaInstanceAcceptedResponse>();
+        Assert.Equal(HttpStatusCode.Accepted, create.StatusCode);
+        Assert.NotNull(created);
+        await FailCreateAsync(app, created);
+
+        using var overview = await client.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/overview");
+        var overviewBody = await overview.Content.ReadControlJsonAsync<ManagedElsaInstanceOverviewResponse>();
+        Assert.True(overviewBody!.AllowedActions.Retry.Allowed);
+        Assert.Null(overviewBody.AllowedActions.Retry.ReasonCode);
+
+        using var retry = await client.SendAsync(Mutation(
+            HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/operations",
+            created.Instance.ETag,
+            "hub-retry-happy",
+            new ManagedElsaInstanceOperationRequest(ElsaInstanceOperationAction.Retry)));
+        var retryBody = await retry.Content.ReadControlJsonAsync<ManagedElsaInstanceAcceptedResponse>();
+        Assert.Equal(HttpStatusCode.Accepted, retry.StatusCode);
+        Assert.Equal(ElsaInstanceOperationAction.Retry, retryBody!.Operation.Action);
+        Assert.Equal(created.Instance.InstanceId, retryBody.Operation.InstanceId);
     }
 
     [Fact]
@@ -878,6 +955,24 @@ public sealed class HubBffAuthorizationTests
         await using var scope = app.Services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
         return await db.Workspaces.Where(x => x.Id == workspaceId).Select(x => x.OrganizationId).SingleAsync();
+    }
+
+    private static async Task FailCreateAsync(
+        ControlApiTestApplication app,
+        ManagedElsaInstanceAcceptedResponse created)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        var completedAtTicks = DateTimeOffset.UtcNow.UtcTicks;
+        var failed = ElsaInstanceOperationState.Failed.ToString();
+        var observed = ElsaObservedLifecycle.Failed.ToString();
+        var desired = ElsaDesiredLifecycle.Running.ToString();
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"UPDATE ElsaInstanceOperations SET State = {failed}, CompletedAt = {completedAtTicks}, FailureCode = {ManagedElsaReasonCodeCatalog.StagingLeverFailedCreate} WHERE Id = {created.Operation.Id}");
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"UPDATE ElsaInstanceLifecycleOutbox SET QuarantinedAt = {completedAtTicks}, QuarantineCode = {"outbox.invalid"} WHERE OperationId = {created.Operation.Id} AND QuarantinedAt IS NULL");
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"UPDATE ElsaInstances SET DesiredLifecycle = {desired}, ObservedLifecycle = {observed} WHERE Id = {created.Instance.InstanceId}");
     }
 
     private static async Task MarkOperationSucceededAsync(ControlApiTestApplication app, Guid operationId)

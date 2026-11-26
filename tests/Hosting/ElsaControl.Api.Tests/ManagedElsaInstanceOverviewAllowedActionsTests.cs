@@ -126,6 +126,65 @@ public sealed class ManagedElsaInstanceOverviewAllowedActionsTests
     }
 
     [Fact]
+    public void Terminal_provider_rejection_denies_retry_and_keeps_delete()
+    {
+        var instance = Instance(ElsaObservedLifecycle.Failed, ElsaInstanceHealth.Unreachable);
+        var last = Operation(
+            instance.Id,
+            ElsaInstanceOperationAction.Create,
+            ElsaInstanceOperationState.Failed,
+            ElsaInstanceOperationFailureClass.Terminal);
+        var overview = Overview(instance, lastOperation: last);
+
+        Assert.False(overview.AllowedActions.Retry.Allowed);
+        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.RetryProviderRejectedCode, overview.AllowedActions.Retry.ReasonCode);
+        Assert.True(overview.AllowedActions.Delete.Allowed);
+        Assert.Null(overview.AllowedActions.Delete.ReasonCode);
+    }
+
+    [Theory]
+    [InlineData(ElsaInstanceOperationFailureClass.Transient)]
+    [InlineData(ElsaInstanceOperationFailureClass.Unclassified)]
+    [InlineData(null)]
+    public void Transient_or_unclassified_failed_create_stays_retryable(ElsaInstanceOperationFailureClass? failureClass)
+    {
+        var instance = Instance(ElsaObservedLifecycle.Failed, ElsaInstanceHealth.Unreachable);
+        var last = Operation(
+            instance.Id,
+            ElsaInstanceOperationAction.Create,
+            ElsaInstanceOperationState.Failed,
+            failureClass);
+        var decision = Overview(instance, lastOperation: last).AllowedActions.Retry;
+
+        Assert.True(decision.Allowed);
+        Assert.Null(decision.ReasonCode);
+    }
+
+    [Fact]
+    public void Failed_retry_after_failed_create_is_offered_again_unless_terminal()
+    {
+        var instance = Instance(ElsaObservedLifecycle.Failed, ElsaInstanceHealth.Unreachable);
+        var retry = Operation(
+            instance.Id,
+            ElsaInstanceOperationAction.Retry,
+            ElsaInstanceOperationState.Failed,
+            ElsaInstanceOperationFailureClass.Transient);
+        var overview = Overview(instance, lastOperation: retry);
+
+        Assert.True(overview.AllowedActions.Retry.Allowed);
+        Assert.Null(overview.AllowedActions.Retry.ReasonCode);
+
+        var rejected = Operation(
+            instance.Id,
+            ElsaInstanceOperationAction.Retry,
+            ElsaInstanceOperationState.Failed,
+            ElsaInstanceOperationFailureClass.Terminal);
+        var denied = Overview(instance, lastOperation: rejected).AllowedActions.Retry;
+        Assert.False(denied.Allowed);
+        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.RetryProviderRejectedCode, denied.ReasonCode);
+    }
+
+    [Fact]
     public void Source_admin_may_retry_a_terminal_failed_create()
     {
         var instance = Instance(ElsaObservedLifecycle.Failed, ElsaInstanceHealth.Unreachable);
@@ -434,7 +493,8 @@ public sealed class ManagedElsaInstanceOverviewAllowedActionsTests
     private static ElsaInstanceOperationSummary Operation(
         Guid instanceId,
         ElsaInstanceOperationAction action,
-        ElsaInstanceOperationState state) =>
+        ElsaInstanceOperationState state,
+        ElsaInstanceOperationFailureClass? failureClass = null) =>
         new(
             Guid.Parse("40000000-0000-0000-0000-000000000001"),
             instanceId,
@@ -450,5 +510,6 @@ public sealed class ManagedElsaInstanceOverviewAllowedActionsTests
             null,
             null,
             null,
-            null);
+            null,
+            FailureClass: failureClass);
 }

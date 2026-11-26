@@ -326,7 +326,7 @@ public sealed class AzureElsaInstanceProvider(
                 (autoResumeBlocked || (wouldAutoResume && !resumable));
             var reasonCode = ResolveObservationReason(observed, eligibleAutoResume, operation.AutoResumeCount, needsOperator);
             await RecordArmObservationClockAsync(
-                operation, eligibleAutoResume, isFailedStepRetry, reasonCode, cancellationToken);
+                operation, eligibleAutoResume, isFailedStepRetry, reasonCode, observed.FailureClass, cancellationToken);
             if ((observed.Kind != AzureProviderRecoveryObservationKind.Confirmed && !isFailedStepRetry) ||
                 observed.CompletedStep is null)
                 return new RecoveryObservationResult(null, reasonCode);
@@ -573,6 +573,7 @@ public sealed class AzureElsaInstanceProvider(
         bool eligibleAutoResume,
         bool isFailedStepRetry,
         string? reasonCode,
+        ElsaInstanceOperationFailureClass failureClass,
         CancellationToken cancellationToken)
     {
         var backoff = eligibleAutoResume || isFailedStepRetry
@@ -584,6 +585,7 @@ public sealed class AzureElsaInstanceProvider(
             _timeProvider.GetUtcNow(),
             backoff,
             reasonCode,
+            isFailedStepRetry ? failureClass : null,
             cancellationToken);
     }
 

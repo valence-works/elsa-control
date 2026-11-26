@@ -3725,6 +3725,10 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.Property<int>("ExpectedVersion")
                         .HasColumnType("int");
 
+                    b.Property<string>("FailureClass")
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
                     b.Property<string>("FailureCode")
                         .HasMaxLength(128)
                         .HasColumnType("nvarchar(128)");

@@ -3700,6 +3700,10 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.Property<int>("ExpectedVersion")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("FailureClass")
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("FailureCode")
                         .HasMaxLength(128)
                         .HasColumnType("TEXT");

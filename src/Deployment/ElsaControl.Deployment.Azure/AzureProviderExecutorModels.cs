@@ -1,3 +1,5 @@
+using ElsaControl.Deployment.Abstractions.Instances;
+
 namespace ElsaControl.Deployment.Azure;
 
 /// <summary>
@@ -143,11 +145,12 @@ public sealed record AzureProviderRecoveryObservation(
     string? Endpoint,
     string Code,
     string Message,
-    string? InnerErrorCode = null)
+    string? InnerErrorCode = null,
+    ElsaInstanceOperationFailureClass FailureClass = ElsaInstanceOperationFailureClass.Unclassified)
 {
     public void Validate()
     {
-        if (!Enum.IsDefined(Kind) || !Enum.IsDefined(Health) || Resources is null)
+        if (!Enum.IsDefined(Kind) || !Enum.IsDefined(Health) || !Enum.IsDefined(FailureClass) || Resources is null)
             throw new ArgumentException("The Azure recovery observation is invalid.");
         AzureProviderOperationValidation.ValidateCode(Code);
         AzureProviderOperationValidation.ValidateMessage(Message);
