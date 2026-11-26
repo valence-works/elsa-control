@@ -16,6 +16,8 @@ public sealed class ProvisioningCompositionTests
         using var provider = services.BuildServiceProvider();
         Assert.IsType<UnconfiguredInfrastructureProvider>(provider.GetRequiredService<IInfrastructureProvider>());
         Assert.NotNull(provider.GetRequiredService<IProvisioningService>());
+        Assert.IsType<NoOpProvisioningStepLedger>(provider.GetRequiredService<IProvisioningStepLedger>());
+        Assert.IsType<ProvisioningLiveEventSink>(provider.GetRequiredService<IProvisioningLiveEventSink>());
     }
 
     [Fact]

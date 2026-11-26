@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using ElsaControl.Provisioning.Abstractions;
+using ElsaControl.Provisioning.Core;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Pulumi.Automation;
@@ -10,7 +11,9 @@ namespace ElsaControl.Provisioning.Providers.Azure;
 /// Automation API client. Uses the pinned CLI in the host image. Tests that
 /// must not require the CLI inject a different <see cref="IPulumiAutomationClient"/>.
 /// </summary>
-public sealed class LocalPulumiAutomationClient(ILogger<LocalPulumiAutomationClient>? logger = null)
+public sealed class LocalPulumiAutomationClient(
+    ILogger<LocalPulumiAutomationClient>? logger = null,
+    IProvisioningLiveEventSink? liveEvents = null)
     : IPulumiAutomationClient
 {
     private readonly ILogger<LocalPulumiAutomationClient> _logger =
@@ -58,7 +61,16 @@ public sealed class LocalPulumiAutomationClient(ILogger<LocalPulumiAutomationCli
             var events = new List<ProvisioningEvent>();
             void OnEvent(Pulumi.Automation.Events.EngineEvent engineEvent)
             {
-                events.AddRange(PulumiEngineEventMapper.Map(operation.Id, engineEvent, DateTimeOffset.UtcNow));
+                var mapped = PulumiEngineEventMapper.Map(operation.Id, engineEvent, DateTimeOffset.UtcNow).ToList();
+                if (mapped.Count == 0)
+                    return;
+                if (liveEvents is null)
+                {
+                    events.AddRange(mapped);
+                    return;
+                }
+
+                liveEvents.PublishAsync(operation.Id, mapped, cancellationToken).GetAwaiter().GetResult();
             }
 
             Dictionary<string, string>? outputs = null;

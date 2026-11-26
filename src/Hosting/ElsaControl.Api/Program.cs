@@ -11,9 +11,11 @@ using ElsaControl.Deployment.Core.ExternalConnections;
 using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.Deployment.Core.Telemetry;
 using ElsaControl.Deployment.Core.Provisioning;
+using ElsaControl.Provisioning.Abstractions;
 using ElsaControl.Provisioning.Core;
 using ElsaControl.Provisioning.Persistence.EntityFrameworkCore;
 using ElsaControl.Provisioning.Providers.Azure;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using ElsaControl.Deployment.Core.Workspace;
 using ElsaControl.Deployment.Azure;
 using ElsaControl.PackageCatalog.Abstractions.Catalog;
@@ -718,6 +720,10 @@ if (provisioningWorkerEnabled && !provisioningTesting)
 
     builder.Services.AddProvisioningPersistence(builder.Configuration, requireSqlServer);
     builder.Services.AddAzureProvisioning(builder.Configuration);
+    builder.Services.Replace(ServiceDescriptor.Singleton<IProvisioningStepLedger, AzureProviderOperationStepLedger>());
+    builder.Services.Configure<AzurePulumiDispatchOptions>(
+        builder.Configuration.GetSection(AzurePulumiDispatchOptions.ConfigurationSection));
+    builder.Services.AddSingleton<IAzurePulumiProvisioningDispatcher, AzurePulumiProvisioningDispatcher>();
 }
 var webhookDispatchEnabled = builder.Configuration.GetValue("Deployment:WebhookDispatch:Enabled", false);
 if (webhookDispatchEnabled && !builder.Environment.IsEnvironment("Testing"))

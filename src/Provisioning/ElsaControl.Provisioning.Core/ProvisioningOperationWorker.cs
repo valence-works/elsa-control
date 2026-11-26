@@ -18,7 +18,8 @@ public sealed class ProvisioningOperationWorker(
     ProvisioningRunRegistry? runs = null,
     TimeProvider? timeProvider = null,
     ILogger<ProvisioningOperationWorker>? logger = null,
-    TimeSpan? heartbeat = null)
+    TimeSpan? heartbeat = null,
+    IProvisioningLiveEventSink? liveEvents = null)
 {
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
     private readonly ProvisioningRunRegistry _runs = runs ?? new ProvisioningRunRegistry();
@@ -61,19 +62,6 @@ public sealed class ProvisioningOperationWorker(
             }
 
             processed++;
-            await events.AppendAsync(
-                [
-                    new ProvisioningEvent(
-                        claimed.Id,
-                        ProvisioningEventKind.OperationStarted,
-                        claimed.StackKind == ProvisioningStackKind.Platform
-                            ? ProvisioningCapability.SharedEnvironment
-                            : ProvisioningCapability.ContainerRuntime,
-                        "Operation started.",
-                        _timeProvider.GetUtcNow())
-                ],
-                cancellationToken).ConfigureAwait(false);
-
             var request = await operations.GetRequestAsync(claimed.Id, cancellationToken).ConfigureAwait(false);
             if (request is null)
             {
@@ -90,10 +78,26 @@ public sealed class ProvisioningOperationWorker(
             using var registration = claimed.Command == ProvisioningCommand.Cancel
                 ? null
                 : _runs.Register(claimed, linked);
+            using var live = liveEvents?.Bind(claimed, request);
             var lostFence = false;
 
             try
             {
+                await PublishAsync(
+                        claimed.Id,
+                        [
+                            new ProvisioningEvent(
+                                claimed.Id,
+                                ProvisioningEventKind.OperationStarted,
+                                claimed.StackKind == ProvisioningStackKind.Platform
+                                    ? ProvisioningCapability.SharedEnvironment
+                                    : ProvisioningCapability.ContainerRuntime,
+                                "Operation started.",
+                                _timeProvider.GetUtcNow())
+                        ],
+                        cancellationToken)
+                    .ConfigureAwait(false);
+
                 var result = await RunWithHeartbeatAsync(
                         claimed,
                         request,
@@ -104,7 +108,7 @@ public sealed class ProvisioningOperationWorker(
                 if (lostFence)
                     continue;
 
-                await events.AppendAsync(result.Events, cancellationToken).ConfigureAwait(false);
+                await PublishAsync(claimed.Id, result.Events, cancellationToken).ConfigureAwait(false);
                 var terminal = TerminalState(claimed, result, linked, cancellationToken);
                 var needsCancel = terminal != ProvisioningOperationState.Succeeded;
                 var pulumiReleased = !needsCancel
@@ -120,7 +124,8 @@ public sealed class ProvisioningOperationWorker(
                     fencingToken: claimed.FencingToken).ConfigureAwait(false);
                 if (completed is not null)
                 {
-                    await events.AppendAsync(
+                    await PublishAsync(
+                        completed.Id,
                         [
                             new ProvisioningEvent(
                                 completed.Id,
@@ -274,6 +279,11 @@ public sealed class ProvisioningOperationWorker(
                 break;
             }
 
+            if (liveEvents is not null)
+            {
+                await liveEvents.HeartbeatAsync(operation.Id, CancellationToken.None).ConfigureAwait(false);
+            }
+
             if (await operations.IsCancelRequestedAsync(operation.Id, CancellationToken.None).ConfigureAwait(false))
                 await linked.CancelAsync().ConfigureAwait(false);
         }
@@ -306,6 +316,14 @@ public sealed class ProvisioningOperationWorker(
             ? ProvisioningOperationState.Succeeded
             : ProvisioningOperationState.Failed;
     }
+
+    private Task PublishAsync(
+        Guid operationId,
+        IReadOnlyList<ProvisioningEvent> values,
+        CancellationToken cancellationToken) =>
+        liveEvents is not null
+            ? liveEvents.PublishAsync(operationId, values, cancellationToken)
+            : events.AppendAsync(values, cancellationToken);
 
     private Task<ProviderRunResult> RunProviderAsync(
         ProvisioningOperation operation,
@@ -362,7 +380,8 @@ public sealed class ProvisioningOperationWorker(
             cancellationToken,
             stateLockMayBeHeld,
             operation.FencingToken).ConfigureAwait(false);
-        await events.AppendAsync(
+        await PublishAsync(
+            operation.Id,
             [
                 new ProvisioningEvent(
                     operation.Id,
@@ -396,7 +415,8 @@ public sealed class ProvisioningOperationWorker(
             cancellationToken,
             stateLockMayBeHeld,
             operation.FencingToken).ConfigureAwait(false);
-        await events.AppendAsync(
+        await PublishAsync(
+            operation.Id,
             [
                 new ProvisioningEvent(
                     operation.Id,
