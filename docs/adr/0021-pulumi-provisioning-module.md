@@ -67,11 +67,11 @@ AWS, Google Cloud, and on-prem (Kubernetes, or Docker hosts) are added later as 
 | Project | What it is | Stacks |
 |---|---|---|
 | `elsa-platform` | Shared infrastructure: Container Apps environment, registry, networking | One stack per environment, for example `staging` and `production` |
-| `elsa-engine` | Everything that belongs to one customer engine: resource group, SQL, Key Vault, identities, the Container App, ingress | One stack per engine, named from org and slug, for example `{org}-{slug}` |
+| `elsa-engine` | Everything that belongs to one customer engine: resource group, SQL, Key Vault, identities, the Container App, ingress | One stack per engine, named from the immutable managed-instance ID, for example `engine-{instanceId}` |
 
-Each engine stack has its own config and its own state blob. Engine stacks read shared outputs from the environment's platform stack through a `StackReference`. They do not create a second environment or registry.
+Each engine stack has its own config and its own state blob. Engine stacks read shared outputs from the environment's platform stack through a fully qualified `StackReference` (`organization/elsa-platform/{env}` on the Blob backend). They do not create a second environment or registry.
 
-Stack names are canonicalised to Pulumi's allowed charset. Control remains the source of lifecycle truth: admission, entitlements, idempotency keys, and leases. Pulumi is the realization engine behind that.
+Engine stack names derive only from the immutable managed-instance ID (`engine-{instanceId}`). Org and slug are tags or metadata, never the stack name, so `org/slug` and `org-slug` cannot fold onto one stack. A stack name is never renamed or reused. Control remains the source of lifecycle truth: admission, entitlements, idempotency keys, and leases one level above the module. The module owns run execution: its own queue and worker, and a lock keyed by `(project, stack)` over Pulumi's state lock. The Pulumi runner does not nest under the Bicep executor's lease. A held lock maps to `provider.stack.locked`, never a crash.
 
 ### 6. Credentials, secrets, and a pluggable state backend
 
@@ -112,7 +112,7 @@ Control decides whether a button is allowed. Pulumi does the work under the stac
 | Create, Retry, Resume, Apply release | `up` (`Provision` / `Update`) |
 | Preview | `preview` |
 | Refresh / check for drift | `refresh` |
-| Cancel | cancel the in-flight run, then `destroy` if the stack already created anything |
+| Cancel | stop the in-flight run only; idle stacks return `operation.nothing-to-cancel` and never `destroy` |
 | Delete | `destroy` |
 
 Retry and resume are `up` on the same stack, not a second engine. Full Hub wiring is later (#1015, #1016).
@@ -132,7 +132,6 @@ Retry and resume are `up` on the same stack, not a second engine. Full Hub wirin
 - Replacing Hub's poll with a live push.
 - New GitHub Actions workflow files.
 - AWS, GCP, or on-prem provider packages.
-- Full parity with `infra/azure-workload-proof` (that is #1014).
 - Production state-account cutover and import of existing Bicep engines (#1017).
 
 ## Alternatives considered

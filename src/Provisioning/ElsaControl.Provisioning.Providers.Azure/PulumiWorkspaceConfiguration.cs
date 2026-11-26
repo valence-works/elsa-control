@@ -33,13 +33,13 @@ public sealed record PulumiWorkspaceConfiguration(
             {
                 Backend = new ProjectBackend { Url = BackendUrl }
             },
-            SecretsProvider = SecretsProviderUrl,
+            SecretsProvider = string.IsNullOrWhiteSpace(SecretsProviderUrl) ? null : SecretsProviderUrl,
             EnvironmentVariables = environment,
             StackSettings = new Dictionary<string, StackSettings>(StringComparer.Ordinal)
             {
                 [StackName] = new StackSettings
                 {
-                    SecretsProvider = SecretsProviderUrl,
+                    SecretsProvider = string.IsNullOrWhiteSpace(SecretsProviderUrl) ? null : SecretsProviderUrl,
                     Config = config
                 }
             },

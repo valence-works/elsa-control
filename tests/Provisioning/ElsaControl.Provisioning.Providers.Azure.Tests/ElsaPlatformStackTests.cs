@@ -1,7 +1,12 @@
 using ElsaControl.Provisioning.Providers.Azure;
-using ElsaControl.Provisioning.Providers.Azure.Pulumi;
+using ElsaControl.Provisioning.Providers.Azure.Programs;
 using Pulumi;
+using Pulumi.AzureNative.App;
+using Pulumi.AzureNative.Monitor;
+using Pulumi.AzureNative.OperationalInsights;
 using Pulumi.Testing;
+using ResourceGroup = Pulumi.AzureNative.Resources.ResourceGroup;
+using PulumiDeployment = Pulumi.Deployment;
 
 namespace ElsaControl.Provisioning.Providers.Azure.Tests;
 
@@ -9,13 +14,10 @@ namespace ElsaControl.Provisioning.Providers.Azure.Tests;
 public sealed class ElsaPlatformStackTests
 {
     [Fact]
-    public async Task Platform_stack_exports_capability_kinds()
+    public async Task Platform_stack_exports_capability_kinds_and_shared_environment()
     {
-        using var config = PulumiTestConfig.Set(PulumiProjectNames.Platform, new Dictionary<string, string>
-        {
-            ["environmentName"] = "staging"
-        });
-        var resources = await Deployment.TestAsync<ElsaPlatformStack>(
+        using var config = PulumiTestConfig.Set(PulumiProjectNames.Platform, EngineTestConfig.Platform());
+        var resources = await PulumiDeployment.TestAsync<ElsaPlatformStack>(
             new EmptyMocks(),
             new TestOptions
             {
@@ -26,7 +28,16 @@ public sealed class ElsaPlatformStackTests
 
         var stack = resources.OfType<ElsaPlatformStack>().Single();
         Assert.Equal("staging", await stack.EnvironmentName.GetValueAsync());
-        Assert.Equal("shared-container-environment", await stack.ContainerEnvironmentKind.GetValueAsync());
+        Assert.Equal("shared-environment", await stack.ContainerEnvironmentKind.GetValueAsync());
         Assert.Equal("shared-registry", await stack.RegistryKind.GetValueAsync());
+        Assert.Equal("runtimeimages", await stack.RegistryName.GetValueAsync());
+        Assert.Contains(resources, resource => resource is ResourceGroup);
+        Assert.Contains(resources, resource => resource is Workspace);
+        Assert.Contains(resources, resource => resource is ManagedEnvironment);
+        Assert.Contains(resources, resource => resource is DiagnosticSetting);
+        Assert.DoesNotContain(
+            resources,
+            resource => resource.GetResourceType().Contains("Registry", StringComparison.OrdinalIgnoreCase)
+                        && resource is not DiagnosticSetting);
     }
 }

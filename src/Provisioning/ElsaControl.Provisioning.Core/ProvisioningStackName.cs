@@ -1,13 +1,29 @@
 using System.Text;
+using ElsaControl.Provisioning.Abstractions;
 
 namespace ElsaControl.Provisioning.Core;
 
 /// <summary>
-/// Canonicalises stack names to Pulumi's allowed charset: letters, digits,
-/// hyphens, underscores, and periods.
+/// Stack names. Engine stacks derive only from the immutable managed-instance
+/// ID. Org and slug are never part of the name.
 /// </summary>
 public static class ProvisioningStackName
 {
+    public const string EnginePrefix = "engine-";
+
+    public static string ForEngine(Guid instanceId)
+    {
+        if (instanceId == Guid.Empty)
+            throw new ArgumentException("Engine stack names require a non-empty instance ID.", nameof(instanceId));
+        return EnginePrefix + instanceId.ToString("N").ToLowerInvariant();
+    }
+
+    public static string ForPlatform(string environmentName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(environmentName);
+        return Canonicalize(environmentName).ToLowerInvariant();
+    }
+
     public static string Canonicalize(string value)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(value);

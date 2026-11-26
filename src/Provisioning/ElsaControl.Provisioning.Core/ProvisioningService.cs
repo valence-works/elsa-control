@@ -10,9 +10,11 @@ namespace ElsaControl.Provisioning.Core;
 public sealed class ProvisioningService(
     IProvisioningOperationStore operations,
     IProvisioningEventStore events,
+    ProvisioningRunRegistry? runs = null,
     TimeProvider? timeProvider = null) : IProvisioningService
 {
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
+    private readonly ProvisioningRunRegistry _runs = runs ?? new ProvisioningRunRegistry();
 
     public Task<ProvisioningEnqueueResult> PreviewAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
         EnqueueAsync(request, ProvisioningCommand.Preview, cancellationToken);
@@ -82,12 +84,15 @@ public sealed class ProvisioningService(
 
         foreach (var pair in request.StackConfig)
         {
-            if (ProvisioningEventSanitizer.ContainsSensitiveToken(pair.Key)
-                || ProvisioningEventSanitizer.ContainsSensitiveToken(pair.Value))
+            if (ProvisioningEventSanitizer.ContainsSecretOrResourceIdentifier(pair.Key)
+                || ProvisioningEventSanitizer.ContainsSecretOrResourceIdentifier(pair.Value))
             {
                 throw new InvalidOperationException("Stack config must not contain secrets or cloud identifiers.");
             }
         }
+
+        if (command == ProvisioningCommand.Cancel)
+            _runs.TryCancel(request.Target.StackKind, ProvisioningStackName.Canonicalize(request.Target.StackName));
 
         var hash = InMemoryProvisioningStore.HashRequest(request);
         var result = await operations.CreateOrGetAsync(request, hash, _timeProvider.GetUtcNow(), cancellationToken)
@@ -95,7 +100,6 @@ public sealed class ProvisioningService(
         if (result.Replayed)
             return result;
 
-        ProvisioningRequestBuffer.Put(result.OperationId, request);
         var kind = result.LockConflict
             ? ProvisioningEventKind.LockConflicted
             : ProvisioningEventKind.OperationQueued;

@@ -1,18 +1,25 @@
 using ElsaControl.Provisioning.Abstractions;
-using ElsaControl.Provisioning.Providers.Azure.Pulumi;
+using ElsaControl.Provisioning.Providers.Azure.Programs;
 using Pulumi.Automation;
 
 namespace ElsaControl.Provisioning.Providers.Azure;
 
 /// <summary>
 /// Builds Automation API workspace options for <c>elsa-platform</c> and
-/// <c>elsa-engine</c>. Preview / Up / Refresh / Destroy against a live backend
-/// are #1014; this skeleton exposes the runner configuration and program
-/// selection.
+/// <c>elsa-engine</c> and selects the checked-in programs.
 /// </summary>
 public sealed class AzurePulumiAutomationRunner
 {
     public const string ProviderId = "azure";
+
+    public AzurePulumiAutomationRunner(string? pulumiOrganization = null)
+    {
+        PulumiOrganization = string.IsNullOrWhiteSpace(pulumiOrganization)
+            ? PulumiStackReferenceName.DefaultOrganization
+            : pulumiOrganization.Trim();
+    }
+
+    public string PulumiOrganization { get; }
 
     public PulumiFn CreateProgram(ProvisioningStackKind stackKind) =>
         stackKind switch
@@ -41,10 +48,9 @@ public sealed class AzurePulumiAutomationRunner
         if (!string.Equals(target.ProviderId, ProviderId, StringComparison.Ordinal))
             throw new ArgumentException("Azure provider required.", nameof(target));
 
-        var backend = AzureBlobStateBackend.From(target.StateBackend);
-        var secrets = AzureKeyVaultSecretsProvider.From(target.SecretsProvider);
+        var (backendUrl, backendEnvironment, secretsUrl) = ResolveBackend(target);
         var environment = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var pair in backend.EnvironmentVariables)
+        foreach (var pair in backendEnvironment)
             environment[pair.Key] = pair.Value;
         foreach (var pair in credentialEnvironment)
             environment[pair.Key] = pair.Value;
@@ -54,7 +60,7 @@ public sealed class AzurePulumiAutomationRunner
             && !config.ContainsKey("platformStack")
             && target.PlatformStackName is not null)
         {
-            config["platformStack"] = $"{PulumiProjectNames.Platform}/{target.PlatformStackName}";
+            config["platformStack"] = PulumiStackReferenceName.Platform(target.PlatformStackName, PulumiOrganization);
         }
 
         if (target.StackKind == ProvisioningStackKind.Engine && !config.ContainsKey("engineName"))
@@ -65,9 +71,23 @@ public sealed class AzurePulumiAutomationRunner
         return new PulumiWorkspaceConfiguration(
             ProjectName(target.StackKind),
             target.StackName,
-            backend.BackendUrl,
-            secrets.SecretsProviderUrl,
+            backendUrl,
+            secretsUrl,
             environment,
             config);
+    }
+
+    private static (string BackendUrl, IReadOnlyDictionary<string, string> Environment, string SecretsUrl)
+        ResolveBackend(ProvisioningTarget target)
+    {
+        if (string.Equals(target.StateBackend.Kind, StateBackendReference.FileKind, StringComparison.Ordinal))
+        {
+            var file = FileStateBackend.From(target.StateBackend);
+            return (file.BackendUrl, file.EnvironmentVariables, "passphrase");
+        }
+
+        var backend = AzureBlobStateBackend.From(target.StateBackend);
+        var secrets = AzureKeyVaultSecretsProvider.From(target.SecretsProvider);
+        return (backend.BackendUrl, backend.EnvironmentVariables, secrets.SecretsProviderUrl);
     }
 }

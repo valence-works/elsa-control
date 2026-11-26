@@ -61,8 +61,10 @@ if ! docker exec "$container_id" sh -ec '
   test -z "$modules"
   locks="$(find /app \( -name package-lock.json -o -name npm-shrinkwrap.json \) -print -quit)" || exit 1
   test -z "$locks"
+  command -v pulumi >/dev/null
+  pulumi version >/dev/null
 ' >/dev/null 2>&1; then
-  fail "application payload is missing the console or contains npm development artifacts"
+  fail "application payload is missing the console, Pulumi CLI, or contains npm development artifacts"
 fi
 
 healthy=false

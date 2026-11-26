@@ -47,6 +47,9 @@ ARG TARGETARCH
 ARG SQLCMD_VERSION=1.10.0
 ARG SQLCMD_AMD64_SHA256=92516d98c63d99b0994de5b61350c91f6915f9b76f139a59039fbcb225c2e987
 ARG SQLCMD_ARM64_SHA256=9faaa981f9c374f319ac796dedb4678499b8596c87d5b6c512e9b0e7a3b74f8e
+ARG PULUMI_VERSION=3.278.0
+ARG PULUMI_AMD64_SHA256=bc1b25c6ae82793ba1f0b890b2a6c0d380652694e42e8a2556736071eda9f583
+ARG PULUMI_ARM64_SHA256=35de8596e629caf1556ac7560cdbd5b09a07a096dda0e0dd035d09bb5a3287cb
 # Copying the shared .NET runtime does not copy its OS dependencies. Keep full
 # globalization/time-zone support; invariant mode is not compatible with SQL.
 RUN tdnf install --assumeyes tar bzip2 icu tzdata libstdc++ openssl-libs \
@@ -65,7 +68,20 @@ RUN tdnf install --assumeyes tar bzip2 icu tzdata libstdc++ openssl-libs \
     && command -v az >/dev/null \
     && command -v curl >/dev/null \
     && /usr/local/bin/sqlcmd --version >/dev/null \
-    && rm /tmp/sqlcmd.tar.bz2
+    && rm /tmp/sqlcmd.tar.bz2 \
+    && case "$TARGETARCH" in \
+      amd64) pulumi_sha256="$PULUMI_AMD64_SHA256"; pulumi_arch="x64" ;; \
+      arm64) pulumi_sha256="$PULUMI_ARM64_SHA256"; pulumi_arch="arm64" ;; \
+      *) echo "Unsupported target architecture" >&2; exit 1 ;; \
+    esac \
+    && curl --fail --silent --show-error --location \
+      "https://github.com/pulumi/pulumi/releases/download/v${PULUMI_VERSION}/pulumi-v${PULUMI_VERSION}-linux-${pulumi_arch}.tar.gz" \
+      --output /tmp/pulumi.tar.gz \
+    && echo "${pulumi_sha256}  /tmp/pulumi.tar.gz" | sha256sum --check --status \
+    && tar --extract --gzip --file /tmp/pulumi.tar.gz --directory /tmp \
+    && install -m 0755 /tmp/pulumi/pulumi /tmp/pulumi/pulumi-* /usr/local/bin/ \
+    && /usr/local/bin/pulumi version >/dev/null \
+    && rm -rf /tmp/pulumi.tar.gz /tmp/pulumi
 COPY --from=runtime /usr/share/dotnet /usr/share/dotnet
 RUN ln -s /usr/share/dotnet/dotnet /usr/bin/dotnet \
     && dotnet --list-runtimes | grep --fixed-strings 'Microsoft.AspNetCore.App 10.' >/dev/null

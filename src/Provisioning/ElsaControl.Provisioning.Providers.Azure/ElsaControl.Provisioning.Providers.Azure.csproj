@@ -3,9 +3,14 @@
     <ProjectReference Include="..\ElsaControl.Provisioning.Abstractions\ElsaControl.Provisioning.Abstractions.csproj" />
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="..\ElsaControl.Provisioning.Core\ElsaControl.Provisioning.Core.csproj" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Binder" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
     <PackageReference Include="OpenTelemetry.Api" />
     <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" />
     <PackageReference Include="Pulumi" />
     <PackageReference Include="Pulumi.Automation" />
+    <PackageReference Include="Pulumi.AzureNative" />
   </ItemGroup>
 </Project>

@@ -4,15 +4,17 @@ namespace ElsaControl.Provisioning.Providers.Azure;
 
 /// <summary>
 /// Azure <see cref="IInfrastructureProvider"/>. Realization is Pulumi C# through
-/// the Automation API. This skeleton maps commands onto workspace configuration
-/// and sanitised engine events; full apply is #1014.
+/// the Automation API. Operations that are not implemented fail closed.
 /// </summary>
 public sealed class AzureInfrastructureProvider(
     AzurePulumiAutomationRunner runner,
     ICredentialResolver credentials,
+    IPulumiAutomationClient automation,
+    IResourceGroupAbsenceProbe? absence = null,
     TimeProvider? timeProvider = null) : IInfrastructureProvider
 {
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
+    private readonly IResourceGroupAbsenceProbe _absence = absence ?? new RecordingResourceGroupAbsenceProbe();
 
     public string ProviderId => AzurePulumiAutomationRunner.ProviderId;
 
@@ -36,72 +38,118 @@ public sealed class AzureInfrastructureProvider(
         ProvisioningOperation operation,
         ProvisioningRequest request,
         CancellationToken cancellationToken = default) =>
-        CompleteAsync(operation, request, mutate: false, cancellationToken);
+        RunAsync(ProvisioningCommand.Preview, operation, request, cancellationToken);
 
     public Task<ProviderRunResult> ProvisionAsync(
         ProvisioningOperation operation,
         ProvisioningRequest request,
         CancellationToken cancellationToken = default) =>
-        CompleteAsync(operation, request, mutate: true, cancellationToken);
+        RunAsync(ProvisioningCommand.Provision, operation, request, cancellationToken);
 
     public Task<ProviderRunResult> UpdateAsync(
         ProvisioningOperation operation,
         ProvisioningRequest request,
         CancellationToken cancellationToken = default) =>
-        CompleteAsync(operation, request, mutate: true, cancellationToken);
+        RunAsync(ProvisioningCommand.Update, operation, request, cancellationToken);
 
     public Task<ProviderRunResult> RefreshAsync(
         ProvisioningOperation operation,
         ProvisioningRequest request,
         CancellationToken cancellationToken = default) =>
-        CompleteAsync(operation, request, mutate: false, cancellationToken);
+        RunAsync(ProvisioningCommand.Refresh, operation, request, cancellationToken);
 
-    public Task CancelAsync(ProvisioningOperation operation, CancellationToken cancellationToken = default)
+    public Task<ProviderRunResult> CancelAsync(
+        ProvisioningOperation operation,
+        ProvisioningRequest request,
+        CancellationToken cancellationToken = default)
     {
-        cancellationToken.ThrowIfCancellationRequested();
         ArgumentNullException.ThrowIfNull(operation);
-        return Task.CompletedTask;
+        ArgumentNullException.ThrowIfNull(request);
+        cancellationToken.ThrowIfCancellationRequested();
+        var now = _timeProvider.GetUtcNow();
+        var nothing = new ProvisioningEvent(
+            operation.Id,
+            ProvisioningEventKind.OperationCancelled,
+            ResourceKind(request),
+            "Nothing to cancel.",
+            now);
+        return Task.FromResult(new ProviderRunResult(
+            true,
+            [nothing],
+            failureCode: ProvisioningFailureCodes.NothingToCancel));
     }
 
-    public Task<ProviderRunResult> DestroyAsync(
+    public async Task<ProviderRunResult> DestroyAsync(
         ProvisioningOperation operation,
         ProvisioningRequest request,
-        CancellationToken cancellationToken = default) =>
-        CompleteAsync(operation, request, mutate: true, cancellationToken);
+        CancellationToken cancellationToken = default)
+    {
+        var result = await RunAsync(ProvisioningCommand.Destroy, operation, request, cancellationToken)
+            .ConfigureAwait(false);
+        if (!result.Succeeded)
+            return result;
 
-    private async Task<ProviderRunResult> CompleteAsync(
+        var groupName = request.StackConfig.TryGetValue("resourceGroupName", out var configured)
+            ? configured
+            : operation.StackName;
+        var presence = await _absence.ObserveAsync(groupName, cancellationToken).ConfigureAwait(false);
+        if (presence != ResourceGroupPresence.Absent)
+        {
+            var failed = new ProvisioningEvent(
+                operation.Id,
+                ProvisioningEventKind.ResourceFailed,
+                "resource-group",
+                "Owned resource group is not absent.",
+                _timeProvider.GetUtcNow());
+            return ProviderRunResult.Fail([..result.Events, failed], ProvisioningFailureCodes.ResourceGroupPresent);
+        }
+
+        var receipt = new ProvisioningEvent(
+            operation.Id,
+            ProvisioningEventKind.ResourceSucceeded,
+            "resource-group",
+            "Owned resource group is absent.",
+            _timeProvider.GetUtcNow());
+        return ProviderRunResult.Ok([..result.Events, receipt], result.Outputs, ownedResourcesAbsent: true);
+    }
+
+    private async Task<ProviderRunResult> RunAsync(
+        ProvisioningCommand command,
         ProvisioningOperation operation,
         ProvisioningRequest request,
-        bool mutate,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(operation);
         ArgumentNullException.ThrowIfNull(request);
         cancellationToken.ThrowIfCancellationRequested();
 
+        if (command is not (ProvisioningCommand.Preview or ProvisioningCommand.Provision
+            or ProvisioningCommand.Update or ProvisioningCommand.Refresh or ProvisioningCommand.Destroy))
+        {
+            return NotImplemented(operation, request);
+        }
+
         var environment = await credentials.ResolveEnvironmentAsync(request.Target.Credentials, cancellationToken)
             .ConfigureAwait(false);
         var workspace = runner.CreateWorkspace(request.Target, request.StackConfig, environment);
-        _ = workspace.ToLocalWorkspaceOptions(runner.CreateProgram(request.Target.StackKind));
+        var program = runner.CreateProgram(request.Target.StackKind);
+        return await automation.RunAsync(command, operation, workspace, program, cancellationToken)
+            .ConfigureAwait(false);
+    }
 
-        var now = _timeProvider.GetUtcNow();
-        var resourceKind = request.Target.StackKind == ProvisioningStackKind.Platform
+    private ProviderRunResult NotImplemented(ProvisioningOperation operation, ProvisioningRequest request)
+    {
+        var failed = new ProvisioningEvent(
+            operation.Id,
+            ProvisioningEventKind.ResourceFailed,
+            ResourceKind(request),
+            "Provider operation is not implemented.",
+            _timeProvider.GetUtcNow());
+        return ProviderRunResult.Fail([failed], ProvisioningFailureCodes.NotImplemented);
+    }
+
+    private static string ResourceKind(ProvisioningRequest request) =>
+        request.Target.StackKind == ProvisioningStackKind.Platform
             ? ProvisioningCapability.SharedEnvironment
             : ProvisioningCapability.ContainerRuntime;
-        var started = mutate ? "Apply started." : "Preview started.";
-        var completed = mutate ? "Apply completed." : "Preview completed.";
-        var events = new[]
-        {
-            new ProvisioningEvent(operation.Id, ProvisioningEventKind.ResourceStarted, resourceKind, started, now),
-            new ProvisioningEvent(operation.Id, ProvisioningEventKind.ResourceSucceeded, resourceKind, completed, now)
-        };
-        var outputs = new Dictionary<string, string>(StringComparer.Ordinal)
-        {
-            ["project"] = workspace.ProjectName,
-            ["stack"] = workspace.StackName
-        };
-        if (request.Target.StackKind == ProvisioningStackKind.Engine)
-            outputs["platformStack"] = request.Target.PlatformStackName ?? string.Empty;
-        return ProviderRunResult.Ok(events, outputs);
-    }
 }

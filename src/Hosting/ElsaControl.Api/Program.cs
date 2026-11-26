@@ -12,6 +12,7 @@ using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.Deployment.Core.Telemetry;
 using ElsaControl.Deployment.Core.Provisioning;
 using ElsaControl.Provisioning.Core;
+using ElsaControl.Provisioning.Providers.Azure;
 using ElsaControl.Deployment.Core.Workspace;
 using ElsaControl.Deployment.Azure;
 using ElsaControl.PackageCatalog.Abstractions.Catalog;
@@ -686,9 +687,14 @@ ElsaInstanceHealthMonitorComposition.AddHealthMonitor(
 var azureProviderWorkerEnabled = builder.Configuration.GetValue("Deployment:AzureProvider:WorkerEnabled", false);
 if (azureProviderWorkerEnabled && !builder.Environment.IsEnvironment("Testing"))
     builder.Services.AddHostedService<AzureProviderOperationHostedService>();
+var provisioningTesting = builder.Environment.IsEnvironment("Testing");
 builder.Services.AddProvisioning(
     builder.Configuration,
-    runWorker: !builder.Environment.IsEnvironment("Testing"));
+    runWorker: !provisioningTesting,
+    allowFakeProvider: provisioningTesting);
+var provisioningWorkerEnabled = builder.Configuration.GetValue("Provisioning:WorkerEnabled", false);
+if (provisioningWorkerEnabled && !provisioningTesting)
+    builder.Services.AddAzureProvisioning(builder.Configuration);
 var webhookDispatchEnabled = builder.Configuration.GetValue("Deployment:WebhookDispatch:Enabled", false);
 if (webhookDispatchEnabled && !builder.Environment.IsEnvironment("Testing"))
     builder.Services.AddHostedService<DeploymentWebhookDispatchHostedService>();

@@ -25,4 +25,11 @@ public interface IProvisioningOperationStore
         DateTimeOffset now,
         string? failureCode,
         CancellationToken cancellationToken = default);
+
+    Task<ProvisioningRequest?> GetRequestAsync(Guid operationId, CancellationToken cancellationToken = default);
+
+    Task<ProvisioningOperation?> FindRunningAsync(
+        ProvisioningStackKind kind,
+        string stackName,
+        CancellationToken cancellationToken = default);
 }

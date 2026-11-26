@@ -40,9 +40,16 @@ public static partial class ProvisioningEventSanitizer
     }
 
     public static bool ContainsSensitiveToken(string value) =>
+        ContainsSecretOrResourceIdentifier(value)
+        || Endpoint().IsMatch(value);
+
+    /// <summary>
+    /// Stack config may include an admitted image repository host. It must
+    /// never include secret values, subscription paths, or resource IDs.
+    /// </summary>
+    public static bool ContainsSecretOrResourceIdentifier(string value) =>
         SubscriptionPath().IsMatch(value)
         || ResourceIdentifier().IsMatch(value)
-        || Endpoint().IsMatch(value)
         || SecretToken().IsMatch(value);
 
     [GeneratedRegex(@"subscriptions[/\\]", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]

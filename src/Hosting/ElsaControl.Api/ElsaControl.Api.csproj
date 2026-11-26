@@ -10,6 +10,7 @@
     <ProjectReference Include="..\..\Deployment\ElsaControl.Deployment.Core\ElsaControl.Deployment.Core.csproj" />
     <ProjectReference Include="..\..\Deployment\ElsaControl.Deployment.Azure\ElsaControl.Deployment.Azure.csproj" />
     <ProjectReference Include="..\..\Provisioning\ElsaControl.Provisioning.Core\ElsaControl.Provisioning.Core.csproj" />
+    <ProjectReference Include="..\..\Provisioning\ElsaControl.Provisioning.Providers.Azure\ElsaControl.Provisioning.Providers.Azure.csproj" />
     <ProjectReference Include="..\..\Deployment\ElsaControl.Deployment.Artifacts\ElsaControl.Deployment.Artifacts.csproj" />
     <ProjectReference Include="..\..\RuntimeBuilder\ElsaControl.RuntimeBuilder.Abstractions\ElsaControl.RuntimeBuilder.Abstractions.csproj" />
     <ProjectReference Include="..\..\RuntimeBuilder\ElsaControl.RuntimeBuilder.Core\ElsaControl.RuntimeBuilder.Core.csproj" />

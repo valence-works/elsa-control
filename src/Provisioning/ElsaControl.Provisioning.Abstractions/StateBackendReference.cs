@@ -7,6 +7,7 @@ namespace ElsaControl.Provisioning.Abstractions;
 public sealed record StateBackendReference
 {
     public const string AzureBlobKind = "azure-blob";
+    public const string FileKind = "file";
     public const string InMemoryKind = "in-memory";
 
     public StateBackendReference(string kind, string locator, bool lockingEnabled = true)

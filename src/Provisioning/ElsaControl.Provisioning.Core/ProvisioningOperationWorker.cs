@@ -11,9 +11,11 @@ public sealed class ProvisioningOperationWorker(
     IProvisioningOperationStore operations,
     IProvisioningEventStore events,
     IInfrastructureProvider provider,
+    ProvisioningRunRegistry? runs = null,
     TimeProvider? timeProvider = null)
 {
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
+    private readonly ProvisioningRunRegistry _runs = runs ?? new ProvisioningRunRegistry();
 
     public async Task<int> ProcessOnceAsync(int batchSize = 10, CancellationToken cancellationToken = default)
     {
@@ -59,38 +61,24 @@ public sealed class ProvisioningOperationWorker(
                 ],
                 cancellationToken).ConfigureAwait(false);
 
-            // The worker owns the request envelope for this skeleton: it reconstructs
-            // a command-only request from the operation. Tests that need spec/target
-            // pass them through the in-memory pending map.
-            if (!ProvisioningRequestBuffer.TryTake(claimed.Id, out var request))
+            var request = await operations.GetRequestAsync(claimed.Id, cancellationToken).ConfigureAwait(false);
+            if (request is null)
             {
-                await FailAsync(claimed, "operation.request-missing", cancellationToken).ConfigureAwait(false);
+                await FailAsync(claimed, ProvisioningFailureCodes.RequestMissing, cancellationToken).ConfigureAwait(false);
                 continue;
             }
 
             try
             {
-                if (claimed.Command == ProvisioningCommand.Cancel)
-                {
-                    var cancelling = await operations.CompleteAsync(
-                        claimed.Id,
-                        ProvisioningOperationState.Cancelling,
-                        _timeProvider.GetUtcNow(),
-                        failureCode: null,
-                        cancellationToken).ConfigureAwait(false);
-                    if (cancelling is not null)
-                        claimed = cancelling;
-                }
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                using var registration = claimed.Command == ProvisioningCommand.Cancel
+                    ? null
+                    : _runs.Register(claimed, linked);
 
-                var result = await RunProviderAsync(claimed, request, cancellationToken).ConfigureAwait(false);
+                var result = await RunProviderAsync(claimed, request, linked.Token).ConfigureAwait(false);
                 await events.AppendAsync(result.Events, cancellationToken).ConfigureAwait(false);
-                var terminal = claimed.Command == ProvisioningCommand.Cancel
-                    ? result.Succeeded
-                        ? ProvisioningOperationState.Cancelled
-                        : ProvisioningOperationState.Failed
-                    : result.Succeeded
-                        ? ProvisioningOperationState.Succeeded
-                        : ProvisioningOperationState.Failed;
+                var terminal = TerminalState(claimed, result, linked, cancellationToken);
+
                 var completed = await operations.CompleteAsync(
                     claimed.Id,
                     terminal,
@@ -112,7 +100,9 @@ public sealed class ProvisioningOperationWorker(
                                     ? ProvisioningCapability.SharedEnvironment
                                     : ProvisioningCapability.ContainerRuntime,
                                 terminal == ProvisioningOperationState.Succeeded
-                                    ? "Operation succeeded."
+                                    ? result.FailureCode == ProvisioningFailureCodes.NothingToCancel
+                                        ? "Nothing to cancel."
+                                        : "Operation succeeded."
                                     : terminal == ProvisioningOperationState.Cancelled
                                         ? "Operation cancelled."
                                         : "Operation failed.",
@@ -125,13 +115,43 @@ public sealed class ProvisioningOperationWorker(
             {
                 throw;
             }
+            catch (OperationCanceledException)
+            {
+                await CompleteCancelledAsync(claimed, cancellationToken).ConfigureAwait(false);
+            }
             catch (Exception)
             {
-                await FailAsync(claimed, "provider.failed", cancellationToken).ConfigureAwait(false);
+                await FailAsync(claimed, ProvisioningFailureCodes.ProviderFailed, cancellationToken).ConfigureAwait(false);
             }
         }
 
         return processed;
+    }
+
+    private static ProvisioningOperationState TerminalState(
+        ProvisioningOperation operation,
+        ProviderRunResult result,
+        CancellationTokenSource linked,
+        CancellationToken hostToken)
+    {
+        if (operation.Command == ProvisioningCommand.Cancel
+            && result.FailureCode == ProvisioningFailureCodes.NothingToCancel)
+        {
+            return ProvisioningOperationState.Succeeded;
+        }
+
+        if (operation.Command == ProvisioningCommand.Cancel
+            || result.FailureCode == ProvisioningFailureCodes.Cancelled
+            || (linked.IsCancellationRequested && !hostToken.IsCancellationRequested))
+        {
+            return result.Succeeded || result.FailureCode == ProvisioningFailureCodes.Cancelled
+                ? ProvisioningOperationState.Cancelled
+                : ProvisioningOperationState.Failed;
+        }
+
+        return result.Succeeded
+            ? ProvisioningOperationState.Succeeded
+            : ProvisioningOperationState.Failed;
     }
 
     private Task<ProviderRunResult> RunProviderAsync(
@@ -144,18 +164,29 @@ public sealed class ProvisioningOperationWorker(
             ProvisioningCommand.Provision => provider.ProvisionAsync(operation, request, cancellationToken),
             ProvisioningCommand.Update => provider.UpdateAsync(operation, request, cancellationToken),
             ProvisioningCommand.Refresh => provider.RefreshAsync(operation, request, cancellationToken),
-            ProvisioningCommand.Cancel => CancelAsync(operation, request, cancellationToken),
+            ProvisioningCommand.Cancel => provider.CancelAsync(operation, request, cancellationToken),
             ProvisioningCommand.Destroy => provider.DestroyAsync(operation, request, cancellationToken),
-            _ => Task.FromResult(ProviderRunResult.Fail([], "operation.unknown-command"))
+            _ => Task.FromResult(ProviderRunResult.Fail([], ProvisioningFailureCodes.UnknownCommand))
         };
 
-    private async Task<ProviderRunResult> CancelAsync(
-        ProvisioningOperation operation,
-        ProvisioningRequest request,
-        CancellationToken cancellationToken)
+    private async Task CompleteCancelledAsync(ProvisioningOperation operation, CancellationToken cancellationToken)
     {
-        await provider.CancelAsync(operation, cancellationToken).ConfigureAwait(false);
-        return await provider.DestroyAsync(operation, request, cancellationToken).ConfigureAwait(false);
+        await operations.CompleteAsync(
+            operation.Id,
+            ProvisioningOperationState.Cancelled,
+            _timeProvider.GetUtcNow(),
+            ProvisioningFailureCodes.Cancelled,
+            cancellationToken).ConfigureAwait(false);
+        await events.AppendAsync(
+            [
+                new ProvisioningEvent(
+                    operation.Id,
+                    ProvisioningEventKind.OperationCancelled,
+                    ProvisioningCapability.ContainerRuntime,
+                    "Operation cancelled.",
+                    _timeProvider.GetUtcNow())
+            ],
+            cancellationToken).ConfigureAwait(false);
     }
 
     private async Task FailAsync(ProvisioningOperation operation, string failureCode, CancellationToken cancellationToken)

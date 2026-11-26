@@ -9,9 +9,10 @@ public sealed class ProvisioningServiceTests
     public async Task Provision_enqueues_and_does_not_run_on_the_request_thread()
     {
         var store = new InMemoryProvisioningStore();
+        var runs = new ProvisioningRunRegistry();
         var provider = new FakeInfrastructureProvider();
-        var service = new ProvisioningService(store, store);
-        var worker = new ProvisioningOperationWorker(store, store, provider);
+        var service = new ProvisioningService(store, store, runs);
+        var worker = new ProvisioningOperationWorker(store, store, provider, runs);
 
         var platform = await service.ProvisionAsync(ProvisioningFixtures.Request(
             ProvisioningCommand.Provision,
@@ -32,9 +33,10 @@ public sealed class ProvisioningServiceTests
     public async Task Engine_stack_reads_platform_output_and_keeps_per_stack_config()
     {
         var store = new InMemoryProvisioningStore();
+        var runs = new ProvisioningRunRegistry();
         var provider = new FakeInfrastructureProvider();
-        var service = new ProvisioningService(store, store);
-        var worker = new ProvisioningOperationWorker(store, store, provider);
+        var service = new ProvisioningService(store, store, runs);
+        var worker = new ProvisioningOperationWorker(store, store, provider, runs);
 
         await service.ProvisionAsync(ProvisioningFixtures.Request(
             ProvisioningCommand.Provision,
@@ -73,9 +75,10 @@ public sealed class ProvisioningServiceTests
     public async Task Preview_refresh_and_destroy_round_trip_through_the_worker()
     {
         var store = new InMemoryProvisioningStore();
+        var runs = new ProvisioningRunRegistry();
         var provider = new FakeInfrastructureProvider();
-        var service = new ProvisioningService(store, store);
-        var worker = new ProvisioningOperationWorker(store, store, provider);
+        var service = new ProvisioningService(store, store, runs);
+        var worker = new ProvisioningOperationWorker(store, store, provider, runs);
 
         await service.ProvisionAsync(ProvisioningFixtures.Request(
             ProvisioningCommand.Provision,
@@ -114,7 +117,8 @@ public sealed class ProvisioningServiceTests
             ProvisioningFixtures.EngineSpec(),
             "round-destroy"));
         await worker.ProcessOnceAsync();
-        Assert.Equal(ProvisioningOperationState.Succeeded, (await service.GetOperationAsync(destroy.OperationId))!.State);
+        var destroyed = await service.GetOperationAsync(destroy.OperationId);
+        Assert.Equal(ProvisioningOperationState.Succeeded, destroyed!.State);
         Assert.False(provider.StackExists("round-engine"));
         Assert.NotEqual(preview.OperationId, provision.OperationId);
         Assert.NotEqual(provision.OperationId, destroy.OperationId);
@@ -154,12 +158,13 @@ public sealed class ProvisioningServiceTests
     }
 
     [Fact]
-    public async Task Cancel_through_the_worker_destroys_the_stack_and_marks_cancelled()
+    public async Task Cancel_on_an_idle_stack_does_not_destroy()
     {
         var store = new InMemoryProvisioningStore();
+        var runs = new ProvisioningRunRegistry();
         var provider = new FakeInfrastructureProvider();
-        var service = new ProvisioningService(store, store);
-        var worker = new ProvisioningOperationWorker(store, store, provider);
+        var service = new ProvisioningService(store, store, runs);
+        var worker = new ProvisioningOperationWorker(store, store, provider, runs);
 
         await service.ProvisionAsync(ProvisioningFixtures.Request(
             ProvisioningCommand.Provision,
@@ -185,12 +190,69 @@ public sealed class ProvisioningServiceTests
         Assert.Equal(1, await worker.ProcessOnceAsync());
 
         var completed = await service.GetOperationAsync(cancel.OperationId);
-        Assert.Equal(ProvisioningOperationState.Cancelled, completed!.State);
-        Assert.False(provider.StackExists("cancel-engine"));
+        Assert.Equal(ProvisioningOperationState.Succeeded, completed!.State);
+        Assert.Equal(ProvisioningFailureCodes.NothingToCancel, completed.FailureCode);
+        Assert.True(provider.StackExists("cancel-engine"));
         var cancelEvents = await service.ListEventsAsync(cancel.OperationId);
-        Assert.Contains(cancelEvents, value => value.Kind == ProvisioningEventKind.OperationCancelled);
+        Assert.Contains(cancelEvents, value => value.Kind == ProvisioningEventKind.OperationSucceeded);
         foreach (var value in cancelEvents)
             Assert.False(ProvisioningEventSanitizer.ContainsSensitiveToken(value.Message));
+    }
+
+    [Fact]
+    public async Task Cancel_signals_an_in_flight_run_and_does_not_destroy()
+    {
+        var store = new InMemoryProvisioningStore();
+        var runs = new ProvisioningRunRegistry();
+        var provider = new FakeInfrastructureProvider();
+        var service = new ProvisioningService(store, store, runs);
+        var worker = new ProvisioningOperationWorker(store, store, provider, runs);
+
+        var provision = await service.ProvisionAsync(ProvisioningFixtures.Request(
+            ProvisioningCommand.Provision,
+            ProvisioningFixtures.PlatformTarget("inflight"),
+            ProvisioningFixtures.PlatformSpec("inflight"),
+            "inflight-provision"));
+        var claimed = await store.ClaimAsync(provision.OperationId, DateTimeOffset.UtcNow);
+        Assert.Equal(ProvisioningOperationState.Running, claimed!.State);
+        using var cts = new CancellationTokenSource();
+        using var registration = runs.Register(claimed, cts);
+
+        var cancel = await service.CancelAsync(ProvisioningFixtures.Request(
+            ProvisioningCommand.Cancel,
+            ProvisioningFixtures.PlatformTarget("inflight"),
+            ProvisioningFixtures.PlatformSpec("inflight"),
+            "inflight-cancel"));
+        Assert.False(cancel.LockConflict);
+        Assert.True(cts.IsCancellationRequested);
+
+        Assert.Equal(1, await worker.ProcessOnceAsync());
+        var completed = await service.GetOperationAsync(cancel.OperationId);
+        Assert.Equal(ProvisioningOperationState.Succeeded, completed!.State);
+        Assert.Equal(ProvisioningFailureCodes.NothingToCancel, completed.FailureCode);
+        Assert.False(provider.StackExists("inflight"));
+    }
+
+    [Fact]
+    public async Task Platform_and_engine_locks_are_independent()
+    {
+        var store = new InMemoryProvisioningStore();
+        var service = new ProvisioningService(store, store);
+        var platform = await service.ProvisionAsync(ProvisioningFixtures.Request(
+            ProvisioningCommand.Provision,
+            ProvisioningFixtures.PlatformTarget("staging"),
+            ProvisioningFixtures.PlatformSpec("staging"),
+            "lock-platform-staging"));
+        var claimed = await store.ClaimAsync(platform.OperationId, DateTimeOffset.UtcNow);
+        Assert.Equal(ProvisioningOperationState.Running, claimed!.State);
+
+        var engine = await service.ProvisionAsync(ProvisioningFixtures.Request(
+            ProvisioningCommand.Provision,
+            ProvisioningFixtures.EngineTarget("staging"),
+            ProvisioningFixtures.EngineSpec(),
+            "lock-engine-staging"));
+        Assert.False(engine.LockConflict);
+        Assert.Equal(ProvisioningOperationState.Queued, engine.State);
     }
 
     [Fact]
@@ -211,7 +273,7 @@ public sealed class ProvisioningServiceTests
             DateTimeOffset.UtcNow,
             failureCode: null);
         Assert.Equal(ProvisioningOperationState.Cancelling, cancelling!.State);
-        Assert.Equal(first.OperationId, await store.GetHolderAsync("lock-cancel"));
+        Assert.Equal(first.OperationId, await store.GetHolderAsync(ProvisioningStackKind.Platform, "lock-cancel"));
 
         var second = await service.ProvisionAsync(ProvisioningFixtures.Request(
             ProvisioningCommand.Provision,

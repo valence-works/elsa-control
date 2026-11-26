@@ -9,6 +9,7 @@ public sealed class ProvisioningOperationStateMachineTests
     [InlineData(ProvisioningOperationState.Queued, ProvisioningOperationState.Running, true)]
     [InlineData(ProvisioningOperationState.Running, ProvisioningOperationState.Succeeded, true)]
     [InlineData(ProvisioningOperationState.Running, ProvisioningOperationState.Cancelling, true)]
+    [InlineData(ProvisioningOperationState.Running, ProvisioningOperationState.Cancelled, true)]
     [InlineData(ProvisioningOperationState.Cancelling, ProvisioningOperationState.Cancelled, true)]
     [InlineData(ProvisioningOperationState.Queued, ProvisioningOperationState.LockConflict, true)]
     [InlineData(ProvisioningOperationState.Succeeded, ProvisioningOperationState.Running, false)]

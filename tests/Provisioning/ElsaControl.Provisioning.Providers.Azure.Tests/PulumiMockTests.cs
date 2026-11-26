@@ -1,6 +1,6 @@
 using System.Collections.Immutable;
 using System.Text.Json;
-using ElsaControl.Provisioning.Providers.Azure.Pulumi;
+using ElsaControl.Provisioning.Providers.Azure.Programs;
 using Pulumi;
 using Pulumi.Testing;
 
@@ -17,12 +17,42 @@ internal sealed class EmptyMocks : IMocks
     {
         var outputs = ImmutableDictionary.CreateBuilder<string, object>();
         outputs.AddRange(args.Inputs);
+        if (args.Type is "azure-native:operationalinsights/workspace:Workspace"
+            or "azure-native:operationalinsights:Workspace")
+        {
+            outputs["customerId"] = "workspace-customer";
+        }
+
+        if (args.Type is "azure-native:app/managedEnvironment:ManagedEnvironment"
+            or "azure-native:app:ManagedEnvironment")
+        {
+            outputs["id"] = args.Id ?? $"{args.Name}_id";
+        }
+
         args.Id ??= $"{args.Name}_id";
+        outputs["id"] = args.Id;
         return Task.FromResult<(string?, object)>((args.Id, outputs));
     }
 
-    public Task<object> CallAsync(MockCallArgs args) =>
-        Task.FromResult<object>(ImmutableDictionary<string, object>.Empty);
+    public Task<object> CallAsync(MockCallArgs args)
+    {
+        var token = args.Token ?? string.Empty;
+        if (token.Contains("getSharedKeys", StringComparison.OrdinalIgnoreCase)
+            || token.Contains("listKeys", StringComparison.OrdinalIgnoreCase))
+        {
+            return Task.FromResult<object>(ImmutableDictionary<string, object>.Empty
+                .Add("primarySharedKey", "not-a-real-key"));
+        }
+
+        if (token.Contains("getRegistry", StringComparison.OrdinalIgnoreCase))
+        {
+            return Task.FromResult<object>(ImmutableDictionary<string, object>.Empty
+                .Add("id", "registry_id")
+                .Add("loginServer", "registry.example"));
+        }
+
+        return Task.FromResult<object>(ImmutableDictionary<string, object>.Empty);
+    }
 }
 
 internal sealed class PlatformStackReferenceMocks : IMocks
@@ -36,11 +66,26 @@ internal sealed class PlatformStackReferenceMocks : IMocks
             outputs["outputs"] = ImmutableDictionary<string, object>.Empty
                 .Add("containerEnvironmentKind", "shared-container-environment")
                 .Add("environmentName", "staging")
-                .Add("registryKind", "shared-registry");
+                .Add("registryKind", "shared-registry")
+                .Add("containerEnvironmentName", "aca-elsa-platform-staging")
+                .Add("resourceGroupName", "rg-elsa-platform-staging")
+                .Add("registryName", "runtimeimages")
+                .Add("containerEnvironmentId", "env_id")
+                .Add("registryId", "registry_id")
+                .Add("registryLoginServer", "registry.example");
             outputs["secretOutputNames"] = ImmutableArray<string>.Empty;
         }
 
+        if (args.Type is "azure-native:keyvault/vault:Vault" or "azure-native:keyvault:Vault")
+        {
+            outputs["properties"] = ImmutableDictionary<string, object>.Empty
+                .Add("vaultUri", "https://vault.example/");
+        }
+
         args.Id ??= $"{args.Name}_id";
+        outputs["id"] = args.Id;
+        outputs["principalId"] = "principal";
+        outputs["tenantId"] = "tenant";
         return Task.FromResult<(string?, object)>((args.Id, outputs));
     }
 
@@ -84,4 +129,37 @@ internal static class OutputExtensions
         });
         return completion.Task;
     }
+}
+
+internal static class EngineTestConfig
+{
+    public static readonly Guid InstanceId = Guid.Parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+
+    public static Dictionary<string, string> Values(string? engineName = null, string? platformStack = null) =>
+        new(StringComparer.Ordinal)
+        {
+            ["instanceId"] = InstanceId.ToString("D"),
+            ["location"] = "westeurope",
+            ["isolation"] = "Dedicated",
+            ["topology"] = "combined",
+            ["imageRepository"] = "valenceruntimeimages.azurecr.io/runtime-combined",
+            ["imageDigest"] = new string('a', 64),
+            ["planFingerprint"] = new string('b', 64),
+            ["platformStack"] = platformStack ?? "organization/elsa-platform/staging",
+            ["engineName"] = engineName ?? "engine-" + InstanceId.ToString("N"),
+            ["cpu"] = "0.5",
+            ["memory"] = "1Gi",
+            ["minReplicas"] = "0",
+            ["maxReplicas"] = "1",
+            ["elsaVersion"] = "3.8"
+        };
+
+    public static Dictionary<string, string> Platform(string environmentName = "staging") =>
+        new(StringComparer.Ordinal)
+        {
+            ["environmentName"] = environmentName,
+            ["location"] = "westeurope",
+            ["registryName"] = "runtimeimages",
+            ["registryResourceGroupName"] = "rg-runtime-images"
+        };
 }

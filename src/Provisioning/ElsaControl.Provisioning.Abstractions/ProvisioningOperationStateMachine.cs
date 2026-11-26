@@ -25,7 +25,8 @@ public static class ProvisioningOperationStateMachine
             [
                 ProvisioningOperationState.Succeeded,
                 ProvisioningOperationState.Failed,
-                ProvisioningOperationState.Cancelling
+                ProvisioningOperationState.Cancelling,
+                ProvisioningOperationState.Cancelled
             ],
             [ProvisioningOperationState.Cancelling] =
             [
