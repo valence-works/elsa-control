@@ -41,6 +41,11 @@ public static class ManagedElsaInstanceOverviewEndpoints
     internal const string InstanceUnknownCode = "instance.unknown";
     internal const string InstanceRecoveryRequiredCode =
         ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReasonCode;
+    internal const string RetryInFlightCode = "instance.retry.in-flight";
+    internal const string RetryDeletingCode = "instance.retry.deleting";
+    internal const string RetryRecoveryRequiredCode = "instance.retry.recovery-required";
+    internal const string RetryNotFailedCreateCode = "instance.retry.not-failed-create";
+    internal const string RetryPermissionRequiredCode = "instance.retry.permission-required";
     internal const int DefaultActivityLimit = 25;
     internal const int MaxActivityLimit = 100;
     private const int ActivityLookupWindow = 500;
@@ -177,7 +182,7 @@ public static class ManagedElsaInstanceOverviewEndpoints
             var activeOperation = activeOperations.GetValueOrDefault(instance.Id);
             var lastPage = await queries.ListOperationsAsync(
                 workspaceId, instance.Id, page: 1, pageSize: 100, cancellationToken, access.OrganizationId);
-            var lastOperation = lastPage.Items.FirstOrDefault(operation => operation.CompletedAt is not null);
+            var lastOperation = SelectCustomerLastOperation(lastPage.Items);
             var snapshot = await operationalStore.GetSnapshotAsync(workspaceId, instanceId, cancellationToken)
                 ?? new ManagedLifecycleOperationalHealthSnapshot(
                     workspaceId,
@@ -195,6 +200,8 @@ public static class ManagedElsaInstanceOverviewEndpoints
                 access.OrganizationId, ElsaInstanceOperationAction.UpdateIntent, cancellationToken: cancellationToken);
             var deleteGate = await commercialGate.EvaluateAsync(
                 access.OrganizationId, ElsaInstanceOperationAction.Delete, cancellationToken: cancellationToken);
+            var retryGate = await commercialGate.EvaluateAsync(
+                access.OrganizationId, ElsaInstanceOperationAction.Retry, cancellationToken: cancellationToken);
             var response = ManagedElsaInstanceOverviewProjection.ToOverview(
                 instance,
                 workspaceId,
@@ -207,7 +214,8 @@ public static class ManagedElsaInstanceOverviewEndpoints
                 health,
                 restartGate,
                 applyGate,
-                deleteGate);
+                deleteGate,
+                retryGate);
             context.Response.Headers.ETag = StrongETag(instance.Version);
             return Results.Ok(response);
         }).RequireWorkspaceAccess().AllowCloudBff().AllowHubBff();
@@ -731,6 +739,66 @@ public static class ManagedElsaInstanceOverviewEndpoints
         ElsaInstanceOperationGuard.IsBlocking(activeOperation.State) &&
         !IsResumableCustomerDelete(activeOperation);
 
+    internal static ElsaInstanceOperationSummary? SelectCustomerLastOperation(
+        IReadOnlyList<ElsaInstanceOperationSummary> operations) =>
+        operations.FirstOrDefault(operation => operation.CompletedAt is not null);
+
+    internal static bool HasCustomerRetryInFlight(ElsaInstanceOperationSummary? activeOperation) =>
+        activeOperation is
+        {
+            State: ElsaInstanceOperationState.Accepted
+                or ElsaInstanceOperationState.Queued
+                or ElsaInstanceOperationState.WaitingForPriorOperation
+                or ElsaInstanceOperationState.EntitlementHeld
+                or ElsaInstanceOperationState.Running
+        };
+
+    internal static bool HasCustomerRetryRecoveryRequired(
+        ElsaInstanceOperationSummary? activeOperation,
+        ElsaInstanceOperationSummary? lastOperation) =>
+        activeOperation is { State: ElsaInstanceOperationState.RecoveryRequired } ||
+        lastOperation is { State: ElsaInstanceOperationState.RecoveryRequired };
+
+    internal static bool IsTerminalFailedCreate(
+        ElsaInstance instance,
+        ElsaInstanceOperationSummary? lastOperation) =>
+        instance.ObservedLifecycle == ElsaObservedLifecycle.Failed &&
+        lastOperation is
+        {
+            Action: ElsaInstanceOperationAction.Create,
+            State: ElsaInstanceOperationState.Failed
+        };
+
+    /// <summary>
+    /// One customer-safe Retry rule for overview <c>allowedActions.retry</c>
+    /// and the operations route. Operator Recover stays on its own path.
+    /// </summary>
+    internal static ManagedElsaInstanceOverviewActionDecisionResponse CustomerRetryDecision(
+        ElsaInstance instance,
+        ElsaInstanceOperationSummary? lastOperation,
+        ElsaInstanceOperationSummary? activeOperation,
+        WorkspaceRole role,
+        ElsaInstanceCommercialGateDecision commercialGate)
+    {
+        ArgumentNullException.ThrowIfNull(instance);
+        ArgumentNullException.ThrowIfNull(commercialGate);
+
+        if (role is not (WorkspaceRole.Owner or WorkspaceRole.SourceAdmin))
+            return new(false, RetryPermissionRequiredCode);
+        if (instance.ObservedLifecycle == ElsaObservedLifecycle.Deleted ||
+            instance.Intent.DesiredLifecycle == ElsaDesiredLifecycle.Deleting)
+            return new(false, RetryDeletingCode);
+        if (HasCustomerRetryRecoveryRequired(activeOperation, lastOperation))
+            return new(false, RetryRecoveryRequiredCode);
+        if (HasCustomerRetryInFlight(activeOperation))
+            return new(false, RetryInFlightCode);
+        if (!IsTerminalFailedCreate(instance, lastOperation))
+            return new(false, RetryNotFailedCreateCode);
+        if (!commercialGate.Allowed)
+            return new(false, commercialGate.Code);
+        return new(true, null);
+    }
+
     internal static bool TryReadMajor(string releaseLine, out int major)
     {
         var firstPart = releaseLine.Split('.', 2)[0];
@@ -752,7 +820,8 @@ internal static class ManagedElsaInstanceOverviewProjection
         ManagedLifecycleOperationalHealthResult health,
         ElsaInstanceCommercialGateDecision restartGate,
         ElsaInstanceCommercialGateDecision applyGate,
-        ElsaInstanceCommercialGateDecision deleteGate)
+        ElsaInstanceCommercialGateDecision deleteGate,
+        ElsaInstanceCommercialGateDecision retryGate)
     {
         var observed = ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(instance, activeOperation);
         var healthy = ManagedElsaInstanceCustomerProjection.IsCustomerHealthy(
@@ -836,7 +905,9 @@ internal static class ManagedElsaInstanceOverviewProjection
                 ActionDecision(canMutate, hasActiveOperation, mutationDenial, restartGate),
                 ActionDecision(canMutate, hasActiveOperation, mutationDenial, applyGate),
                 new ManagedElsaInstanceOverviewActionDecisionResponse(canOpen, canOpen ? null : unavailableReason),
-                ActionDecision(canDelete, hasBlockingDelete, deleteDenial, deleteGate)));
+                ActionDecision(canDelete, hasBlockingDelete, deleteDenial, deleteGate),
+                ManagedElsaInstanceOverviewEndpoints.CustomerRetryDecision(
+                    instance, lastOperation, activeOperation, role, retryGate)));
     }
 
     internal static ManagedElsaInstanceActivityItemResponse ToActivityItem(
@@ -1040,7 +1111,8 @@ public sealed record ManagedElsaInstanceOverviewAllowedActionsResponse(
     ManagedElsaInstanceOverviewActionDecisionResponse Restart,
     ManagedElsaInstanceOverviewActionDecisionResponse ApplyRelease,
     ManagedElsaInstanceOverviewActionDecisionResponse Open,
-    ManagedElsaInstanceOverviewActionDecisionResponse Delete);
+    ManagedElsaInstanceOverviewActionDecisionResponse Delete,
+    ManagedElsaInstanceOverviewActionDecisionResponse Retry);
 
 public sealed record ManagedElsaInstanceOverviewActionDecisionResponse(bool Allowed, string? ReasonCode);
 

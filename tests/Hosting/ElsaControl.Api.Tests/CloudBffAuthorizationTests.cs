@@ -308,6 +308,7 @@ public sealed class CloudBffAuthorizationTests
             "POST /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/apply-release",
             "POST /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/delete",
             "POST /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/delete-confirmations",
+            "POST /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/operations",
             "POST /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/restart",
             "POST /api/workspaces/{workspaceId:guid}/instances/",
             "PUT /api/organizations/{organizationId:guid}/workspaces/{workspaceId:guid}/members/{accountId:guid}",
