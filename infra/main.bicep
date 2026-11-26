@@ -33,6 +33,9 @@ param enablePulumiProvisioning bool = false
 @description('Principal ID of the existing provisioner user-assigned identity. Required when enablePulumiProvisioning is true. Role assignments use this object ID, not the client ID.')
 param pulumiProvisionerPrincipalId string = ''
 
+@description('API egress subnet resource ID for the dedicated Pulumi seed vault firewall. Required when enablePulumiProvisioning is true. Unused in production.')
+param pulumiApiEgressSubnetId string = ''
+
 var resolvedSqlDatabaseSkuName = !empty(sqlDatabaseSkuName) ? sqlDatabaseSkuName : 'S0'
 var resolvedSqlDatabaseSkuTier = !empty(sqlDatabaseSkuTier) ? sqlDatabaseSkuTier : (startsWith(resolvedSqlDatabaseSkuName, 'GP_S_') ? 'GeneralPurpose' : 'Standard')
 var resolvedSqlDatabaseSkuFamily = !empty(sqlDatabaseSkuFamily) ? sqlDatabaseSkuFamily : (startsWith(resolvedSqlDatabaseSkuName, 'GP_S_') ? 'Gen5' : '')
@@ -94,6 +97,7 @@ module control_pulumi_provisioning 'control-pulumi-provisioning/pulumi-provision
   params: {
     location: location
     provisionerPrincipalId: pulumiProvisionerPrincipalId
+    apiEgressSubnetId: pulumiApiEgressSubnetId
     tags: tags
   }
 }

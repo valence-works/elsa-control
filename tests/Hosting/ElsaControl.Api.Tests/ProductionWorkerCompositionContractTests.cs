@@ -35,11 +35,8 @@ public sealed class ProductionWorkerCompositionContractTests : IDisposable
     [Fact]
     public void Provisioning_worker_stays_off_in_the_production_template()
     {
-        Assert.Equal("false", _settings["Provisioning:WorkerEnabled"]);
-        Assert.Equal("production", _settings["Provisioning:EnvironmentName"]);
-        Assert.False(_settings.ContainsKey("Provisioning:StateBackendLocator"));
-        Assert.False(_settings.ContainsKey("Provisioning:SecretsProviderLocator"));
-        Assert.False(_settings.ContainsKey("Provisioning:SeedVaultUri"));
+        Assert.DoesNotContain(_settings.Keys, key => key.StartsWith("Provisioning:", StringComparison.Ordinal));
+        Assert.DoesNotContain(_settings.Keys, key => key.StartsWith("ARM_", StringComparison.Ordinal));
     }
 
     [Fact]

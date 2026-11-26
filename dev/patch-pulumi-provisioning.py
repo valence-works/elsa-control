@@ -19,6 +19,9 @@ param enablePulumiProvisioning bool = false
 @description('Principal ID of the existing provisioner user-assigned identity. Required when enablePulumiProvisioning is true. Role assignments use this object ID, not the client ID.')
 param pulumiProvisionerPrincipalId string = ''
 
+@description('API egress subnet resource ID for the dedicated Pulumi seed vault firewall. Required when enablePulumiProvisioning is true. Unused in production.')
+param pulumiApiEgressSubnetId string = ''
+
 """
 
 PULUMI_MODULE = """
@@ -28,6 +31,7 @@ module control_pulumi_provisioning 'control-pulumi-provisioning/pulumi-provision
   params: {
     location: location
     provisionerPrincipalId: pulumiProvisionerPrincipalId
+    apiEgressSubnetId: pulumiApiEgressSubnetId
     tags: tags
   }
 }

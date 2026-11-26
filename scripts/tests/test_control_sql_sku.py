@@ -78,6 +78,7 @@ class ControlSqlSkuTests(unittest.TestCase):
         self.assertEqual(STAGING_MAX_SIZE_BYTES, staging["sqlDatabaseMaxSizeBytes"]["value"])
         self.assertTrue(staging["enablePulumiProvisioning"]["value"])
         self.assertEqual("2b9e04ce-ccf6-4931-9f34-862c374fcf78", staging["pulumiProvisionerPrincipalId"]["value"])
+        self.assertIn("snet-api-egress", staging["pulumiApiEgressSubnetId"]["value"])
 
         self.assertEqual("S0", production["sqlDatabaseSkuName"]["value"])
         self.assertEqual("Standard", production["sqlDatabaseSkuTier"]["value"])
@@ -87,6 +88,7 @@ class ControlSqlSkuTests(unittest.TestCase):
         self.assertNotIn("environmentName", production)
         self.assertNotIn("enablePulumiProvisioning", production)
         self.assertNotIn("pulumiProvisionerPrincipalId", production)
+        self.assertNotIn("pulumiApiEgressSubnetId", production)
 
         for name in (
             "sqlDatabaseSkuName",

@@ -22,11 +22,10 @@ names to find plain values; the CLI fetches the values but the script keeps
 only the names, and it prints names and status only.
 
 This module grants a data-plane role only to the API identity. The staging
-Pulumi proof (#1034) grants the existing provisioner Key Vault Secrets User on
-this vault and Key Vault Crypto User on the `pulumi-secrets` key from
-`infra/control-pulumi-provisioning`, not from this module. An operator writes
-each secret value after the vault exists. CI never writes a secret value to
-the vault.
+Pulumi proof (#1034) uses a dedicated seed vault in
+`infra/control-pulumi-provisioning` and must not grant the provisioner any
+role on this vault. An operator writes each secret value after the vault
+exists. CI never writes a secret value to the vault.
 Before the reference switch (pre-cutover mode, #865), a production `--reapply`
 puts back the plain App Service values it captured, as it did before #863.
 

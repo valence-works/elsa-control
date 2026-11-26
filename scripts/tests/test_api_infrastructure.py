@@ -1203,8 +1203,10 @@ class PulumiProvisioningInfrastructureTests(unittest.TestCase):
         self.assertNotIn("pulumiProvisionerPrincipalId", production)
         staging = json.loads(STAGING_MAIN_PARAMETERS.read_text())["parameters"]
         self.assertTrue(staging["enablePulumiProvisioning"]["value"])
+        self.assertIn("snet-api-egress", staging["pulumiApiEgressSubnetId"]["value"])
         self.assertEqual("S0", staging["sqlDatabaseSkuName"]["value"])
         self.assertEqual("S0", production["sqlDatabaseSkuName"]["value"])
+        self.assertNotIn("pulumiApiEgressSubnetId", production)
         production_workers = json.loads(PRODUCTION_WORKER_PARAMETERS.read_text())
         self.assertNotIn("stpulumi", json.dumps(production_workers))
         self.assertNotIn("enablePulumiProvisioning", json.dumps(production_workers))
@@ -1227,7 +1229,14 @@ class PulumiProvisioningInfrastructureTests(unittest.TestCase):
         self.assertIn(KEY_VAULT_SECRETS_USER, source)
         self.assertIn("scope: stateContainer", source)
         self.assertIn("scope: pulumiSecretsKey", source)
-        self.assertIn("scope: vault", source)
+        self.assertIn("scope: seedVault", source)
+        self.assertIn("enableRbacAuthorization: true", source)
+        self.assertIn("enableSoftDelete: true", source)
+        self.assertIn("enablePurgeProtection: true", source)
+        self.assertIn("publicNetworkAccess: 'Enabled'", source)
+        self.assertIn("defaultAction: 'Deny'", source)
+        self.assertNotIn("scope: vault", source)
+        self.assertNotIn("ecapikv", source)
         self.assertNotIn(CONTRIBUTOR_ROLE, source)
         self.assertNotIn("scope: resourceGroup()", source)
         self.assertNotIn("scope: subscription()", source)
@@ -1247,13 +1256,28 @@ class PulumiProvisioningInfrastructureTests(unittest.TestCase):
             set(outputs),
         )
         suffix = unique_string(STAGING_RESOURCE_GROUP_ID)
-        self.assertIn(f"stpulumi{suffix}/pulumi-state", (ROOT / "scripts" / "render-worker-settings.py").read_text())
-        self.assertIn(f"azurekeyvault://ecapikv{suffix}.vault.azure.net/keys/pulumi-secrets", (ROOT / "scripts" / "render-worker-settings.py").read_text())
+        overlay = (ROOT / "scripts" / "render-worker-settings.py").read_text()
+        self.assertIn(f"stpulumi{suffix}/pulumi-state", overlay)
+        self.assertIn(f"azurekeyvault://ecseedkv{suffix}.vault.azure.net/keys/pulumi-secrets", overlay)
+        self.assertIn(f"https://ecseedkv{suffix}.vault.azure.net/", overlay)
+        self.assertNotIn(f"ecapikv{suffix}", overlay)
         self.assertIn("control-pulumi-provisioning", REGENERATE_INFRA.read_text())
         readme = PULUMI_README.read_text()
         self.assertIn("account keys", readme)
         self.assertIn("SAS tokens", readme)
         self.assertIn("connection strings", readme)
+
+    def test_provisioner_gets_no_role_on_the_control_api_vault(self) -> None:
+        source = PULUMI_MODULE.read_text()
+        self.assertNotIn("ecapikv", source)
+        self.assertNotRegex(source, r"Microsoft\.KeyVault/vaults@[^']+' existing")
+        self.assertIn("scope: seedVault", source)
+        self.assertNotIn("scope: vault", source)
+        main = MAIN_BICEP.read_text()
+        self.assertIn("apiEgressSubnetId: pulumiApiEgressSubnetId", main)
+        api_vault = (ROOT / "infra" / "api-key-vault" / "api-key-vault.module.bicep").read_text()
+        self.assertNotIn("pulumiProvisionerPrincipalId", api_vault)
+        self.assertNotIn("provisionerPrincipalId", api_vault)
 
     def test_pulumi_patch_is_idempotent_on_sku_parameterized_main(self) -> None:
         generated = """param environmentName string
@@ -1286,6 +1310,8 @@ output API_IDENTITY_CLIENTID string = 'unused'
         twice = patch.patch_main(once)
         self.assertEqual(once, twice)
         self.assertIn("param enablePulumiProvisioning bool = false", once)
+        self.assertIn("param pulumiApiEgressSubnetId string = ''", once)
+        self.assertIn("apiEgressSubnetId: pulumiApiEgressSubnetId", once)
         self.assertIn("module control_pulumi_provisioning", once)
         self.assertEqual(1, once.count("param enablePulumiProvisioning bool = false"))
         self.assertEqual(1, once.count("module control_pulumi_provisioning"))
@@ -1311,6 +1337,7 @@ output API_IDENTITY_CLIENTID string = 'unused'
                 "Microsoft.Storage/storageAccounts",
                 "Microsoft.Storage/storageAccounts/blobServices",
                 "Microsoft.Storage/storageAccounts/blobServices/containers",
+                "Microsoft.KeyVault/vaults",
                 "Microsoft.KeyVault/vaults/keys",
                 "Microsoft.Authorization/roleAssignments",
             },
@@ -1318,8 +1345,16 @@ output API_IDENTITY_CLIENTID string = 'unused'
         )
         self.assertEqual(1, len(by_type["Microsoft.Storage/storageAccounts"]))
         self.assertEqual(1, len(by_type["Microsoft.Storage/storageAccounts/blobServices/containers"]))
+        self.assertEqual(1, len(by_type["Microsoft.KeyVault/vaults"]))
         self.assertEqual(1, len(by_type["Microsoft.KeyVault/vaults/keys"]))
         self.assertEqual(3, len(by_type["Microsoft.Authorization/roleAssignments"]))
+        vault = by_type["Microsoft.KeyVault/vaults"][0]
+        self.assertTrue(vault["properties"]["enableRbacAuthorization"])
+        self.assertTrue(vault["properties"]["enableSoftDelete"])
+        self.assertTrue(vault["properties"]["enablePurgeProtection"])
+        self.assertEqual("Enabled", vault["properties"]["publicNetworkAccess"])
+        self.assertEqual("Deny", vault["properties"]["networkAcls"]["defaultAction"])
+        self.assertEqual("None", vault["properties"]["networkAcls"]["bypass"])
         account = by_type["Microsoft.Storage/storageAccounts"][0]
         self.assertFalse(account["properties"]["allowSharedKeyAccess"])
         self.assertFalse(account["properties"]["allowBlobPublicAccess"])
@@ -1339,9 +1374,11 @@ output API_IDENTITY_CLIENTID string = 'unused'
             self.assertNotIn(forbidden, rendered)
         for assignment in by_type["Microsoft.Authorization/roleAssignments"]:
             scope = assignment.get("scope", "")
-            self.assertFalse(scope.endswith("/resourceGroups/'") or "subscription().id" in json.dumps(assignment))
+            blob = json.dumps(assignment)
+            self.assertFalse(scope.endswith("/resourceGroups/'") or "subscription().id" in blob)
             self.assertNotIn("Microsoft.Resources/resourceGroups", scope)
             self.assertNotIn("Microsoft.Resources/subscriptions", scope)
+            self.assertNotIn("ecapikv", blob)
 
 
 if __name__ == "__main__":

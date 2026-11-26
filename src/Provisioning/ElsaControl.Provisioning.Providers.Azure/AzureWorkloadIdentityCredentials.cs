@@ -19,12 +19,17 @@ public sealed class AzureWorkloadIdentityCredentials : ICredentialResolver
         if (!string.Equals(reference.Kind, Kind, StringComparison.Ordinal))
             throw new ArgumentException("Azure workload identity is required.", nameof(reference));
 
+        var clientId = reference.Locator ?? string.Empty;
         var environment = new Dictionary<string, string>(StringComparer.Ordinal)
         {
-            ["AZURE_CLIENT_ID"] = reference.Locator ?? string.Empty
+            ["AZURE_CLIENT_ID"] = clientId,
+            ["ARM_CLIENT_ID"] = clientId,
+            ["ARM_USE_MSI"] = "true"
         };
         CopyEnvironment(environment, "ARM_SUBSCRIPTION_ID");
         CopyEnvironment(environment, "AZURE_SUBSCRIPTION_ID");
+        CopyEnvironment(environment, "ARM_TENANT_ID");
+        environment.Remove("ARM_USE_CLI");
         return Task.FromResult<IReadOnlyDictionary<string, string>>(environment);
     }
 

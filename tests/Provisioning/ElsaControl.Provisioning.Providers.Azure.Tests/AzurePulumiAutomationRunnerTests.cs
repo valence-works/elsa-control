@@ -37,6 +37,29 @@ public sealed class AzurePulumiAutomationRunnerTests
     }
 
     [Fact]
+    public async Task Workload_identity_forces_msi_and_never_the_azure_cli()
+    {
+        var previousCli = Environment.GetEnvironmentVariable("ARM_USE_CLI");
+        var previousMsi = Environment.GetEnvironmentVariable("ARM_USE_MSI");
+        Environment.SetEnvironmentVariable("ARM_USE_CLI", "true");
+        Environment.SetEnvironmentVariable("ARM_USE_MSI", "false");
+        try
+        {
+            var environment = await new AzureWorkloadIdentityCredentials().ResolveEnvironmentAsync(
+                new CredentialReference(CredentialReference.AzureWorkloadIdentityKind, "d57a6279-2806-4289-9442-d862b53451a1"));
+            Assert.Equal("true", environment["ARM_USE_MSI"]);
+            Assert.Equal("d57a6279-2806-4289-9442-d862b53451a1", environment["ARM_CLIENT_ID"]);
+            Assert.Equal("d57a6279-2806-4289-9442-d862b53451a1", environment["AZURE_CLIENT_ID"]);
+            Assert.False(environment.ContainsKey("ARM_USE_CLI"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ARM_USE_CLI", previousCli);
+            Environment.SetEnvironmentVariable("ARM_USE_MSI", previousMsi);
+        }
+    }
+
+    [Fact]
     public void File_backend_is_used_for_local_tests()
     {
         var directory = Path.Combine(Path.GetTempPath(), $"elsa-pulumi-{Guid.NewGuid():N}");

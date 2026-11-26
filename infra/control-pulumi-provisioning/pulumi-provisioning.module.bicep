@@ -1,15 +1,25 @@
-// Staging-only Pulumi provisioning proof (#1034). State backend, secrets key,
-// and the three smallest data-plane roles for the existing provisioner UAMI.
-// Secret values, account keys, SAS tokens, and connection strings never appear
-// here. Production keeps enablePulumiProvisioning false.
+// Staging-only Pulumi provisioning proof (#1034). State backend, dedicated seed
+// vault, secrets key, and the three smallest data-plane roles for the existing
+// provisioner UAMI. Secret values, account keys, SAS tokens, and connection
+// strings never appear here. Production keeps enablePulumiProvisioning false.
 targetScope = 'resourceGroup'
 
-@description('Azure region for the state account. Follows the Control resource group.')
+@description('Azure region for the state account and seed vault. Follows the Control resource group.')
 param location string = resourceGroup().location
 
 @description('Principal ID (object ID) of the existing provisioner user-assigned identity. Role assignments use this, not the client ID.')
 @minLength(36)
 param provisionerPrincipalId string
+
+@description('API egress subnet. The seed vault firewall allows this subnet, matching the Control API Key Vault pattern.')
+@minLength(1)
+param apiEgressSubnetId string
+
+@description('IPv4 CIDRs allowed to write seed-vault values (operator write path). Empty omits those firewall rules.')
+param operatorWriteIpCidrs array = []
+
+@description('Optional IPv4 CIDRs for the API outbound NAT address. Empty omits those firewall rules.')
+param apiOutboundIpCidrs array = []
 
 param tags object = {}
 
@@ -19,14 +29,24 @@ var storageBlobDataContributorRoleId = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
 @description('Key Vault Crypto User. Assigned on the pulumi-secrets key only.')
 var keyVaultCryptoUserRoleId = '12338af0-0e69-4776-bea7-57ae8d297424'
 
-@description('Key Vault Secrets User. Assigned on the existing Control API Key Vault only.')
+@description('Key Vault Secrets User. Assigned on the dedicated seed vault only, never on the Control API Key Vault.')
 var keyVaultSecretsUserRoleId = '4633458b-17de-408a-b874-0445c86b69e6'
 
 var uniqueSuffix = uniqueString(resourceGroup().id)
 var storageAccountName = take('stpulumi${uniqueSuffix}', 24)
-var vaultName = take('ecapikv${uniqueSuffix}', 24)
+var seedVaultName = take('ecseedkv${uniqueSuffix}', 24)
 var containerName = 'pulumi-state'
 var keyName = 'pulumi-secrets'
+
+var subnetRules = [
+  {
+    id: apiEgressSubnetId
+  }
+]
+
+var ipRules = [for cidr in concat(operatorWriteIpCidrs, apiOutboundIpCidrs): {
+  value: cidr
+}]
 
 resource stateAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: storageAccountName
@@ -66,12 +86,32 @@ resource stateContainer 'Microsoft.Storage/storageAccounts/blobServices/containe
   }
 }
 
-resource vault 'Microsoft.KeyVault/vaults@2023-07-01' existing = {
-  name: vaultName
+resource seedVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
+  name: seedVaultName
+  location: location
+  tags: tags
+  properties: {
+    tenantId: subscription().tenantId
+    sku: {
+      family: 'A'
+      name: 'standard'
+    }
+    enableRbacAuthorization: true
+    enableSoftDelete: true
+    enablePurgeProtection: true
+    softDeleteRetentionInDays: 90
+    publicNetworkAccess: 'Enabled'
+    networkAcls: {
+      bypass: 'None'
+      defaultAction: 'Deny'
+      virtualNetworkRules: subnetRules
+      ipRules: ipRules
+    }
+  }
 }
 
 resource pulumiSecretsKey 'Microsoft.KeyVault/vaults/keys@2023-07-01' = {
-  parent: vault
+  parent: seedVault
   name: keyName
   properties: {
     kty: 'RSA'
@@ -109,8 +149,8 @@ resource secretsKeyCryptoUser 'Microsoft.Authorization/roleAssignments@2022-04-0
 }
 
 resource seedVaultSecretsUser 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(vault.id, provisionerPrincipalId, keyVaultSecretsUserRoleId, 'pulumi-seed')
-  scope: vault
+  name: guid(seedVault.id, provisionerPrincipalId, keyVaultSecretsUserRoleId, 'pulumi-seed')
+  scope: seedVault
   properties: {
     principalId: provisionerPrincipalId
     principalType: 'ServicePrincipal'
@@ -121,7 +161,7 @@ resource seedVaultSecretsUser 'Microsoft.Authorization/roleAssignments@2022-04-0
 output storageAccountName string = stateAccount.name
 output containerName string = stateContainer.name
 output stateBackendLocator string = '${stateAccount.name}/${containerName}'
-output vaultName string = vault.name
-output seedVaultUri string = vault.properties.vaultUri
-output secretsProviderLocator string = 'azurekeyvault://${vaultName}.vault.azure.net/keys/${keyName}'
+output vaultName string = seedVault.name
+output seedVaultUri string = seedVault.properties.vaultUri
+output secretsProviderLocator string = 'azurekeyvault://${seedVaultName}.vault.azure.net/keys/${keyName}'
 output keyName string = pulumiSecretsKey.name
