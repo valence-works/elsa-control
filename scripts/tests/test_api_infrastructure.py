@@ -687,13 +687,19 @@ class ApiInfrastructureTests(unittest.TestCase):
         )
 
     def test_forwarded_headers_come_only_from_the_application(self) -> None:
-        # Program.cs owns ForwardedHeadersOptions (#859); neither the module nor the API source
-        # may set the host-level switch.
+        # Program.cs owns ForwardedHeadersOptions (#859); neither the Control API module
+        # nor Control API source may set the host-level switch. Engine runtimes keep the
+        # Bicep parity setting in container-app.bicep / ElsaEngineStack.
         self.assertNotIn("ASPNETCORE_FORWARDEDHEADERS_ENABLED", API_MODULE.read_text())
         self.assertIn("ASPNETCORE_FORWARDEDHEADERS_ENABLED", self.generated_api_module())
+        api_roots = (
+            ROOT / "src" / "Hosting" / "ElsaControl.Api",
+            ROOT / "src" / "Hosting" / "ElsaControl.AppHost",
+        )
         api_sources = [
             path
-            for path in (ROOT / "src").rglob("*")
+            for root in api_roots
+            for path in root.rglob("*")
             if path.is_file()
             and path.suffix in {".cs", ".json", ".bicep", ".bicepparam"}
             and not {"bin", "obj"}.intersection(path.parts)
