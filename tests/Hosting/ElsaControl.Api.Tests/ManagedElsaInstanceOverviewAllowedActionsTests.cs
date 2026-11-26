@@ -175,12 +175,57 @@ public sealed class ManagedElsaInstanceOverviewAllowedActionsTests
         Assert.Equal(typeof(ManagedElsaInstanceOverviewActionDecisionResponse), restart.GetType());
     }
 
+    [Fact]
+    public void Last_operation_exposes_a_mapped_crash_loop_reason_without_replacing_failure_code()
+    {
+        var instance = Instance(ElsaObservedLifecycle.Failed, ElsaInstanceHealth.Unreachable);
+        var lastOperation = new ElsaInstanceOperationSummary(
+            Guid.Parse("40000000-0000-0000-0000-000000000002"),
+            instance.Id,
+            ElsaInstanceOperationAction.Create,
+            ElsaInstanceOperationState.Failed,
+            1, 1, Now, Now, Now, null, null, null,
+            "azure.step.failed",
+            ElsaObservedLifecycle.Failed,
+            ElsaInstanceHealth.Unreachable,
+            ReasonCode: ManagedElsaProvisioningFailureReason.AzureHealthCrashLoop);
+        var overview = Overview(instance, lastOperation: lastOperation);
+
+        Assert.Equal(ManagedElsaReasonCodeCatalog.ProvisioningHealthCrashLoop, overview.LastOperation!.ReasonCode);
+        Assert.NotEqual(overview.LastOperation.ReasonCode, overview.LastOperation.FailureCode);
+        Assert.True(overview.AllowedActions.Restart.Allowed is false || overview.AllowedActions.Delete.Allowed);
+    }
+
+    [Fact]
+    public void Active_operation_progress_exposes_a_mapped_timeout_reason()
+    {
+        var instance = Instance(ElsaObservedLifecycle.Provisioning);
+        var active = new ElsaInstanceOperationSummary(
+            Guid.Parse("40000000-0000-0000-0000-000000000003"),
+            instance.Id,
+            ElsaInstanceOperationAction.Create,
+            ElsaInstanceOperationState.RecoveryRequired,
+            1, 1, Now, Now, null, null, null, null,
+            ManagedElsaReasonCodeCatalog.ProvisioningTimeoutFoundation,
+            ElsaObservedLifecycle.Provisioning,
+            ElsaInstanceHealth.Unknown,
+            ReasonCode: ManagedElsaReasonCodeCatalog.ProvisioningTimeoutFoundation,
+            AttemptStartedAt: Now);
+        var overview = Overview(instance, active);
+
+        Assert.Equal(
+            ManagedElsaReasonCodeCatalog.ProvisioningTimeoutFoundation,
+            overview.ActiveOperation!.Progress!.ReasonCode);
+        Assert.Null(overview.LastOperation);
+    }
+
     private static ManagedElsaInstanceOverviewResponse Overview(
         ElsaInstance instance,
         ElsaInstanceOperationSummary? activeOperation = null,
         WorkspaceRole role = WorkspaceRole.Owner,
         ElsaInstanceCommercialGateDecision? deleteGate = null,
-        bool? canDeletePermission = null) =>
+        bool? canDeletePermission = null,
+        ElsaInstanceOperationSummary? lastOperation = null) =>
         ManagedElsaInstanceOverviewProjection.ToOverview(
             instance,
             instance.WorkspaceId,
@@ -189,7 +234,7 @@ public sealed class ManagedElsaInstanceOverviewAllowedActionsTests
             canDeletePermission: canDeletePermission ?? role is WorkspaceRole.Owner or WorkspaceRole.SourceAdmin,
             identity: null,
             activeOperation,
-            lastOperation: null,
+            lastOperation,
             new ManagedLifecycleOperationalHealthResult(
                 ManagedLifecycleOperationalHealthStatus.Healthy,
                 ManagedLifecycleOperationalHealthDiagnosticCodes.Healthy,

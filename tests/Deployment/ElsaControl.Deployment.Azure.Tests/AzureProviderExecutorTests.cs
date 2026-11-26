@@ -829,7 +829,37 @@ public sealed partial class AzureProviderExecutorTests
         Assert.Equal(AzureProviderOperationStatus.Failed, result.Operation.Status);
         Assert.Equal("proof-rg", result.Operation.Resources.ResourceGroupName);
         Assert.Equal(AzureProviderHealth.Degraded, result.Operation.Health);
+        Assert.Equal(ManagedElsaProvisioningFailureReason.AzureHealthUnhealthy, result.Code);
         Assert.DoesNotContain(AzureProviderRunnerStep.Promotion, runner.Steps);
+    }
+
+    [Fact]
+    public async Task Crash_loop_health_failure_keeps_the_specific_reason_and_never_reaches_promotion()
+    {
+        var store = new FakeOperationStore();
+        var runner = new RecordingRunner
+        {
+            FailureStep = AzureProviderRunnerStep.Health,
+            FailureCode = ManagedElsaProvisioningFailureReason.AzureHealthCrashLoop,
+            FailureDiagnostics =
+            [
+                new AzureProviderDiagnostic("azure.step.health.failed", "azure.step.health.failed"),
+                new AzureProviderDiagnostic(
+                    ManagedElsaProvisioningFailureReason.AzureHealthCrashLoop,
+                    ManagedElsaProvisioningFailureReason.AzureHealthCrashLoop)
+            ]
+        };
+        var executor = new AzureProviderExecutor(store, runner, new StaticTimeProvider(Now), TimeSpan.FromMinutes(5));
+
+        var result = await executor.ApplyAsync(CreateRequest(), CreatePlan());
+
+        Assert.Equal(AzureProviderExecutionOutcome.Failed, result.Outcome);
+        Assert.Equal(AzureProviderOperationStatus.Failed, result.Operation.Status);
+        Assert.Equal(ManagedElsaProvisioningFailureReason.AzureHealthCrashLoop, result.Code);
+        Assert.Contains(result.Operation.Diagnostics, diagnostic => diagnostic.Code == ManagedElsaProvisioningFailureReason.AzureHealthCrashLoop);
+        Assert.All(result.Operation.Diagnostics, diagnostic => Assert.Equal(diagnostic.Code, diagnostic.Message));
+        Assert.DoesNotContain(AzureProviderRunnerStep.Promotion, runner.Steps);
+        Assert.DoesNotContain("subscriptions/", result.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

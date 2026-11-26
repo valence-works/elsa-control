@@ -1823,20 +1823,46 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             }
             if (state.Status == AzureCommandProcessStatus.Cancelled || cancellationToken.IsCancellationRequested)
                 return Uncertain(command, AzureProviderOperationPhase.HealthVerified, "azure.health.cancelled", "Candidate health verification was interrupted.");
+            if (await ObserveReplicaCrashLoopAsync(command, cancellationToken))
+                return HealthFailed(command, ManagedElsaProvisioningFailureReason.AzureHealthCrashLoop,
+                    "The candidate runtime kept restarting instead of becoming healthy.");
             if (attempt + 1 < _options.ObservationAttempts)
                 await Task.Delay(_options.ObservationDelay, cancellationToken);
         }
 
-        return new AzureProviderRunnerResult(
+        return HealthFailed(command, ManagedElsaProvisioningFailureReason.AzureHealthTimeout,
+            "The candidate did not become healthy within the bounded observation window.");
+    }
+
+    private async Task<bool> ObserveReplicaCrashLoopAsync(
+        AzureProviderRunnerCommand command,
+        CancellationToken cancellationToken)
+    {
+        var replicas = await ExecuteAzAsync(command,
+            ["containerapp", "replica", "list", "--subscription", _scope.SubscriptionId, "--resource-group", ResourceGroupName(command),
+                "--name", AppName(command), "--revision", command.Resources.WorkloadRevisionName!,
+                "--query", "[].{runningState:properties.runningState,runningStateDetails:properties.runningStateDetails,restartCounts:properties.containers[].restartCount,containers:properties.containers}",
+                "--output", "json", "--only-show-errors"],
+            ParseStringAsync,
+            cancellationToken);
+        return replicas.Succeeded &&
+               replicas.Value is not null &&
+               AzureContainerAppReplicaCrashLoop.Detected(replicas.Value.Value.AsMemory());
+    }
+
+    private static AzureProviderRunnerResult HealthFailed(
+        AzureProviderRunnerCommand command,
+        string code,
+        string message) =>
+        new(
             AzureProviderRunnerOutcome.Failed,
             AzureProviderOperationPhase.HealthVerified,
             command.Resources,
             AzureProviderHealth.Failed,
             null,
-            AzureProviderSafeDiagnostics.Failure(command.Step, AzureProviderRunnerOutcome.Failed, "azure.health.unhealthy"),
-            "azure.health.unhealthy",
-            "The candidate did not become healthy within the bounded observation window.");
-    }
+            AzureProviderSafeDiagnostics.Failure(command.Step, AzureProviderRunnerOutcome.Failed, code),
+            code,
+            message);
 
     private async Task<AzureProviderRunnerResult> RunPromotionAsync(
         AzureProviderRunnerCommand command,

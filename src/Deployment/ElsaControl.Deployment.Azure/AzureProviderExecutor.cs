@@ -555,7 +555,7 @@ public sealed class AzureProviderExecutor
                         operation,
                         leaseToken,
                         runnerResult.Outcome == AzureProviderRunnerOutcome.Uncertain ? AzureProviderOperationStatus.RecoveryRequired : AzureProviderOperationStatus.Failed,
-                        SafeStepCode(step, runnerResult.Outcome),
+                        FinalizeRunnerCode(step, runnerResult.Outcome, runnerResult.Code),
                         SafeStepMessage(step, runnerResult.Outcome),
                         CancellationToken.None);
                 }
@@ -576,12 +576,17 @@ public sealed class AzureProviderExecutor
                 }
                 if (step == AzureProviderRunnerStep.Health && runnerResult.Health != AzureProviderHealth.Healthy)
                 {
+                    var healthCode = FinalizeRunnerCode(
+                        step,
+                        AzureProviderRunnerOutcome.Failed,
+                        runnerResult.Code,
+                        ManagedElsaProvisioningFailureReason.AzureHealthUnhealthy);
                     var unhealthy = await CheckpointAsync(
                         operation,
                         leaseToken,
                         new AzureProviderCheckpoint(
                             phase,
-                            "azure.health.unhealthy",
+                            healthCode,
                             "The candidate did not pass health verification.",
                             runnerResult.Resources,
                             runnerResult.Endpoint,
@@ -590,7 +595,7 @@ public sealed class AzureProviderExecutor
                         CancellationToken.None);
                     if (unhealthy is null)
                         return await GetConcurrentResultAsync(operation);
-                    return await FinalizeResultAsync(unhealthy, leaseToken, AzureProviderOperationStatus.Failed, "azure.health.unhealthy", "The candidate did not pass health verification.");
+                    return await FinalizeResultAsync(unhealthy, leaseToken, AzureProviderOperationStatus.Failed, healthCode, "The candidate did not pass health verification.");
                 }
 
                 var checkpoint = new AzureProviderCheckpoint(
@@ -1290,6 +1295,15 @@ public sealed class AzureProviderExecutor
             AzureProviderRunnerOutcome.Uncertain => "azure.step.uncertain",
             _ => "azure.step.invalid"
         };
+
+    private static string FinalizeRunnerCode(
+        AzureProviderRunnerStep step,
+        AzureProviderRunnerOutcome outcome,
+        string? runnerCode,
+        string? fallback = null) =>
+        ManagedElsaProvisioningFailureReason.IsProviderPersistedCode(runnerCode)
+            ? runnerCode!
+            : fallback ?? SafeStepCode(step, outcome);
 
     private static string StepLabel(AzureProviderRunnerStep step) =>
         step switch

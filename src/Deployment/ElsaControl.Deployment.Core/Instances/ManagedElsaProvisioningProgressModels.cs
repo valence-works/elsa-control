@@ -43,8 +43,8 @@ public sealed record ManagedElsaProvisioningProgress(
     int? AttemptNumber = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     DateTimeOffset? AttemptStartedAt = null,
-    // Value-free translator finding when a Create was rejected before hand-off.
-    // Omitted when null so ordinary snapshots do not grow a new key.
+    // Value-free translator finding or provisioning failure class. Omitted when
+    // null so ordinary snapshots do not grow a new key.
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string? ReasonCode = null);
 
