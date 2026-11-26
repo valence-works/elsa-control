@@ -425,6 +425,40 @@ public sealed class ProvisioningServiceTests
     }
 
     [Fact]
+    public async Task Failed_provider_cancel_keeps_the_stack_lock_for_reclaim()
+    {
+        var store = new InMemoryProvisioningStore();
+        var runs = new ProvisioningRunRegistry();
+        var provider = new FakeInfrastructureProvider
+        {
+            Stall = TimeSpan.FromSeconds(30),
+            CancelFails = true
+        };
+        var service = new ProvisioningService(store, store, runs);
+        var worker = new ProvisioningOperationWorker(store, store, provider, runs);
+        var provision = await service.ProvisionAsync(ProvisioningFixtures.Request(
+            ProvisioningCommand.Provision,
+            ProvisioningFixtures.PlatformTarget("cancel-fail"),
+            ProvisioningFixtures.PlatformSpec("cancel-fail"),
+            "cancel-fail-provision"));
+
+        using var cts = new CancellationTokenSource();
+        var processing = worker.ProcessOnceAsync(cancellationToken: cts.Token);
+        await provider.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => processing);
+
+        var completed = await service.GetOperationAsync(provision.OperationId);
+        Assert.Equal(ProvisioningOperationState.Cancelled, completed!.State);
+        Assert.Equal(ProvisioningFailureCodes.Interrupted, completed.FailureCode);
+        Assert.True(completed.StateLockMayBeHeld);
+        Assert.Equal(
+            provision.OperationId,
+            await store.GetHolderAsync(ProvisioningStackKind.Platform, "cancel-fail"));
+        Assert.Equal(1, provider.CancelCalls);
+    }
+
+    [Fact]
     public async Task Cancel_of_a_queued_create_does_not_run_the_provider()
     {
         var store = new InMemoryProvisioningStore();

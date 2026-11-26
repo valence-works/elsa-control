@@ -317,8 +317,9 @@ public sealed class ProvisioningOperationWorker(
 
         try
         {
-            await provider.CancelAsync(operation, request, CancellationToken.None).ConfigureAwait(false);
-            return true;
+            var result = await provider.CancelAsync(operation, request, CancellationToken.None)
+                .ConfigureAwait(false);
+            return result.Succeeded;
         }
         catch (Exception exception)
         {

@@ -31,6 +31,12 @@ public sealed class FakeInfrastructureProvider : IInfrastructureProvider, ICrede
 
     public TimeSpan Stall { get; set; }
 
+    /// <summary>
+    /// When true, CancelAsync returns a failed result without throwing, the
+    /// same way the Azure client reports a backend cancel that did not run.
+    /// </summary>
+    public bool CancelFails { get; set; }
+
     public TaskCompletionSource Started { get; } = new();
 
     public int CancelCalls { get; private set; }
@@ -97,6 +103,17 @@ public sealed class FakeInfrastructureProvider : IInfrastructureProvider, ICrede
         lock (_gate)
         {
             CancelCalls++;
+            if (CancelFails)
+            {
+                var failed = Event(
+                    operation.Id,
+                    ProvisioningEventKind.LockConflicted,
+                    ResourceKind(request),
+                    "Stack lock conflict.",
+                    now);
+                return Task.FromResult(ProviderRunResult.Fail([failed], ProvisioningFailureCodes.StackLocked));
+            }
+
             _cancelled.Add(operation.Id);
         }
 

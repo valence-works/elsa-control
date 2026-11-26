@@ -731,12 +731,7 @@ public sealed class EfProvisioningStore :
     {
         if (db.Database.IsSqlServer())
         {
-            return await db.Database.SqlQuery<Guid>(
-                    $"""
-                     SELECT [OperationId] AS [Value]
-                     FROM [{ProvisioningDbContext.SchemaName}].[Locks]
-                     WHERE [LeaseExpiresAt] <= TODATETIMEOFFSET(SYSUTCDATETIME(), 0)
-                     """)
+            return await db.Database.SqlQueryRaw<Guid>(ProvisioningLeaseSql.ListExpired())
                 .ToListAsync(cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -759,15 +754,10 @@ public sealed class EfProvisioningStore :
     {
         if (db.Database.IsSqlServer())
         {
-            var expired = await db.Database.SqlQuery<int>(
-                    $"""
-                     SELECT CASE WHEN EXISTS (
-                         SELECT 1 FROM [{ProvisioningDbContext.SchemaName}].[Locks]
-                         WHERE [LockKey] = {lockKey}
-                           AND [OperationId] = {operationId}
-                           AND [LeaseExpiresAt] <= TODATETIMEOFFSET(SYSUTCDATETIME(), 0)
-                     ) THEN 1 ELSE 0 END AS [Value]
-                     """)
+            var expired = await db.Database.SqlQueryRaw<int>(
+                    ProvisioningLeaseSql.LeaseExpired(),
+                    lockKey,
+                    operationId)
                 .SingleAsync(cancellationToken)
                 .ConfigureAwait(false);
             return expired == 1;
@@ -796,15 +786,11 @@ public sealed class EfProvisioningStore :
         var seconds = Math.Max(1, (int)Math.Ceiling(_replica.Lease.TotalSeconds));
         if (db.Database.IsSqlServer())
         {
-            await db.Database.ExecuteSqlInterpolatedAsync(
-                $"""
-                 UPDATE [{ProvisioningDbContext.SchemaName}].[Locks]
-                 SET [LeaseExpiresAt] = TODATETIMEOFFSET(DATEADD(second, {seconds}, SYSUTCDATETIME()), 0)
-                 WHERE [LockKey] = {held.LockKey}
-                   AND [Owner] = {held.Owner}
-                   AND [FencingToken] = {held.FencingToken}
-                 """,
-                cancellationToken).ConfigureAwait(false);
+            await db.Database.ExecuteSqlRawAsync(
+                    ProvisioningLeaseSql.StampExpiry(),
+                    new object[] { seconds, held.LockKey, held.Owner, held.FencingToken },
+                    cancellationToken)
+                .ConfigureAwait(false);
         }
         else
         {
