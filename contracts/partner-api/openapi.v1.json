@@ -1,0 +1,130 @@
+{
+  "openapi": "3.1.1",
+  "info": {
+    "title": "ElsaControl.Api | partner-v1",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "http://localhost/"
+    }
+  ],
+  "paths": {
+    "/partner/v1/account": {
+      "get": {
+        "tags": [
+          "Partner API"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PartnerAccountResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/partner/v1/account/workspace": {
+      "get": {
+        "tags": [
+          "Partner API"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PartnerWorkspaceResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "PartnerAccountResponse": {
+        "required": [
+          "organizationId",
+          "workspaceId",
+          "accountId",
+          "keyId",
+          "role",
+          "scopes",
+          "permissions"
+        ],
+        "type": "object",
+        "properties": {
+          "organizationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspaceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "accountId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "keyId": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "PartnerWorkspaceResponse": {
+        "required": [
+          "workspaceId",
+          "accountId",
+          "keyId",
+          "role"
+        ],
+        "type": "object",
+        "properties": {
+          "workspaceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "accountId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "keyId": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Partner API"
+    }
+  ]
+}

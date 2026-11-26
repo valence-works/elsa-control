@@ -433,6 +433,17 @@ public sealed class AccountWorkspaceStore(CatalogDbContext dbContext) : IAccount
         return await WorkspaceSummaryAsync(organizationId, workspaceId, accountId, cancellationToken);
     }
 
+    public Task<bool> IsPartnerProvisionerAsync(
+        Guid workspaceId,
+        Guid accountId,
+        CancellationToken cancellationToken = default) =>
+        dbContext.WorkspaceMemberships.AsNoTracking()
+            .AnyAsync(
+                x => x.WorkspaceId == workspaceId &&
+                     x.AccountId == accountId &&
+                     x.Role == WorkspaceRole.PartnerProvisioner,
+                cancellationToken);
+
     public async Task<WorkspaceSummary> SetWorkspaceMembershipAsync(Guid organizationId, Guid workspaceId, Guid accountId, WorkspaceRole role, CancellationToken cancellationToken = default)
     {
         var now = DateTimeOffset.UtcNow;

@@ -153,6 +153,9 @@ public static class OrganizationWorkspaceEndpoints
             OrganizationWorkspaceFailure.LastWorkspaceOwner => Results.Problem(
                 title: "The last workspace owner cannot be removed.",
                 statusCode: StatusCodes.Status409Conflict),
+            OrganizationWorkspaceFailure.PartnerProvisionerCannotBeOwner => Results.Problem(
+                title: "PartnerProvisioner cannot be granted Owner.",
+                statusCode: StatusCodes.Status403Forbidden),
             _ => Results.Problem(
                 title: "Organization workspace request failed.",
                 statusCode: StatusCodes.Status400BadRequest)

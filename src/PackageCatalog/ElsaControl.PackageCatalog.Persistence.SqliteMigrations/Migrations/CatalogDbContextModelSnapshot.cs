@@ -792,6 +792,79 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.ToTable("OrganizationSubscriptions");
                 });
 
+            modelBuilder.Entity("ElsaControl.PackageCatalog.Core.Accounts.PartnerApiKey", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("CreatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid?>("CreatedByAccountId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CreatedByOperatorSubject")
+                        .HasMaxLength(512)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("ExpiresAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("KeyId")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("LastUsedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Name")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("OrganizationId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("ProvisionerAccountId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("RevokedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid?>("RevokedByAccountId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("RevokedByOperatorSubject")
+                        .HasMaxLength(512)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Scopes")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SecretHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("WorkspaceId")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("KeyId")
+                        .IsUnique();
+
+                    b.HasIndex("ProvisionerAccountId");
+
+                    b.HasIndex("OrganizationId", "WorkspaceId");
+
+                    b.HasIndex("OrganizationId", "RevokedAt", "ExpiresAt");
+
+                    b.ToTable("PartnerApiKeys");
+                });
+
             modelBuilder.Entity("ElsaControl.PackageCatalog.Core.Accounts.Workspace", b =>
                 {
                     b.Property<Guid>("Id")
@@ -6437,6 +6510,34 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                         .IsRequired();
 
                     b.Navigation("Organization");
+                });
+
+            modelBuilder.Entity("ElsaControl.PackageCatalog.Core.Accounts.PartnerApiKey", b =>
+                {
+                    b.HasOne("ElsaControl.PackageCatalog.Core.Accounts.Organization", "Organization")
+                        .WithMany()
+                        .HasForeignKey("OrganizationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("ElsaControl.PackageCatalog.Core.Accounts.Account", "ProvisionerAccount")
+                        .WithMany()
+                        .HasForeignKey("ProvisionerAccountId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ElsaControl.PackageCatalog.Core.Accounts.Workspace", "Workspace")
+                        .WithMany()
+                        .HasForeignKey("OrganizationId", "WorkspaceId")
+                        .HasPrincipalKey("OrganizationId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Organization");
+
+                    b.Navigation("ProvisionerAccount");
+
+                    b.Navigation("Workspace");
                 });
 
             modelBuilder.Entity("ElsaControl.PackageCatalog.Core.Accounts.Workspace", b =>

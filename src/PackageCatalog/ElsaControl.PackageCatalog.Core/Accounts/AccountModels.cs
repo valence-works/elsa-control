@@ -245,7 +245,9 @@ public enum OrganizationAuditAction
     BillingCleanupRequested,
     BillingCleanupCompleted,
     AzureSubscriptionBindChanged,
-    BillingLifecycleDeadlineMoved
+    BillingLifecycleDeadlineMoved,
+    PartnerApiKeyCreated,
+    PartnerApiKeyRevoked
 }
 
 public enum WorkspaceKind
@@ -260,7 +262,8 @@ public enum WorkspaceRole
 {
     Reader,
     SourceAdmin,
-    Owner
+    Owner,
+    PartnerProvisioner
 }
 
 public enum PackageSourceVisibility
