@@ -85,4 +85,17 @@ public sealed class ManagedElsaProvisioningFailureReasonTests
 
         Assert.Equal("azure.imageRegistry.unsupported", mapped);
     }
+
+    [Fact]
+    public void Resolve_does_not_surface_internal_step_codes_from_provider_diagnostics()
+    {
+        var mapped = ManagedElsaProvisioningFailureReason.Resolve(
+            reconciliationDiagnosticCode: null,
+            failureCode: "azure.step.failed",
+            lastObservationReasonCode: "azure.step.workload.failed",
+            diagnosticCodes: ["azure.step.workload.failed", "azure.step.foundation.uncertain"],
+            currentStage: ManagedElsaProvisioningProgressStages.RuntimeDeployment);
+
+        Assert.Null(mapped);
+    }
 }

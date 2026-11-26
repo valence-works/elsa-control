@@ -1829,6 +1829,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             };
         }
 
+        var sawCrashLoopEvidence = false;
         for (var attempt = 0; attempt < _options.ObservationAttempts; attempt++)
         {
             var state = await ExecuteAzAsync(command,
@@ -1845,14 +1846,16 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             if (state.Status == AzureCommandProcessStatus.Cancelled || cancellationToken.IsCancellationRequested)
                 return Uncertain(command, AzureProviderOperationPhase.HealthVerified, "azure.health.cancelled", "Candidate health verification was interrupted.");
             if (await ObserveReplicaCrashLoopAsync(command, cancellationToken))
-                return HealthFailed(command, ManagedElsaProvisioningFailureReason.AzureHealthCrashLoop,
-                    "The candidate runtime kept restarting instead of becoming healthy.");
+                sawCrashLoopEvidence = true;
             if (attempt + 1 < _options.ObservationAttempts)
                 await Task.Delay(_options.ObservationDelay, cancellationToken);
         }
 
-        return HealthFailed(command, ManagedElsaProvisioningFailureReason.AzureHealthTimeout,
-            "The candidate did not become healthy within the bounded observation window.");
+        return sawCrashLoopEvidence
+            ? HealthFailed(command, ManagedElsaProvisioningFailureReason.AzureHealthCrashLoop,
+                "The candidate runtime kept restarting instead of becoming healthy.")
+            : HealthFailed(command, ManagedElsaProvisioningFailureReason.AzureHealthTimeout,
+                "The candidate did not become healthy within the bounded observation window.");
     }
 
     private async Task<bool> ObserveReplicaCrashLoopAsync(
@@ -1862,7 +1865,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         var replicas = await ExecuteAzAsync(command,
             ["containerapp", "replica", "list", "--subscription", _scope.SubscriptionId, "--resource-group", ResourceGroupName(command),
                 "--name", AppName(command), "--revision", command.Resources.WorkloadRevisionName!,
-                "--query", "[].{runningState:properties.runningState,runningStateDetails:properties.runningStateDetails,restartCounts:properties.containers[].restartCount,containers:properties.containers}",
+                "--query", "[].{runningState:properties.runningState,runningStateDetails:properties.runningStateDetails,restartCounts:properties.containers[].restartCount,containers:properties.containers[].{restartCount:restartCount,runningState:runningState,runningStateDetails:runningStateDetails}}",
                 "--output", "json", "--only-show-errors"],
             ParseStringAsync,
             cancellationToken);

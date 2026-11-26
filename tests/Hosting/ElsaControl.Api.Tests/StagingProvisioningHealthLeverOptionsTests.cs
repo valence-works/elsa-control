@@ -54,12 +54,13 @@ public sealed class StagingProvisioningHealthLeverOptionsTests
     [Fact]
     public async Task Validator_skips_allowlist_shape_while_the_lever_is_off()
     {
-        var validator = new StagingProvisioningHealthLeverConfigurationValidator(Options.Create(
+        var validator = CreateValidator(
             new StagingProvisioningHealthLeverOptions
             {
                 Enabled = false,
                 AllowedInstanceIds = ["not-a-guid"]
-            }));
+            },
+            new StripeBillingOptions { Enabled = true, SecretKey = "sk_live_harness" });
 
         await validator.StartAsync(CancellationToken.None);
     }
@@ -67,16 +68,35 @@ public sealed class StagingProvisioningHealthLeverOptionsTests
     [Fact]
     public async Task Validator_fails_closed_on_malformed_allowlist_ids_when_enabled()
     {
-        var validator = new StagingProvisioningHealthLeverConfigurationValidator(Options.Create(
+        var validator = CreateValidator(
             new StagingProvisioningHealthLeverOptions
             {
                 Enabled = true,
                 AllowedInstanceIds = ["not-a-guid"]
-            }));
+            },
+            TestStripe());
 
         var error = await Assert.ThrowsAsync<InvalidOperationException>(() => validator.StartAsync(CancellationToken.None));
 
         Assert.Contains("AllowedInstanceIds[0]", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Validator_fails_closed_when_enabled_without_stripe_test_mode()
+    {
+        var validator = CreateValidator(
+            new StagingProvisioningHealthLeverOptions
+            {
+                Enabled = true,
+                AllowedInstanceIds = [InstanceId.ToString("D")]
+            },
+            new StripeBillingOptions { Enabled = true, SecretKey = "sk_live_harness" });
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => validator.StartAsync(CancellationToken.None));
+
+        Assert.Contains("test-mode", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("sk_live", error.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(InstanceId.ToString("D"), error.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -137,4 +157,12 @@ public sealed class StagingProvisioningHealthLeverOptionsTests
 
         throw new InvalidOperationException("Could not locate the repository root from the test output directory.");
     }
+
+    private static StagingProvisioningHealthLeverConfigurationValidator CreateValidator(
+        StagingProvisioningHealthLeverOptions options,
+        StripeBillingOptions stripe) =>
+        new(Options.Create(options), Options.Create(stripe));
+
+    private static StripeBillingOptions TestStripe() =>
+        new() { Enabled = true, SecretKey = "sk_test_harness" };
 }

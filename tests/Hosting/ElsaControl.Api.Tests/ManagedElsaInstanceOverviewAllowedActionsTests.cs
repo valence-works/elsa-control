@@ -193,7 +193,10 @@ public sealed class ManagedElsaInstanceOverviewAllowedActionsTests
 
         Assert.Equal(ManagedElsaReasonCodeCatalog.ProvisioningHealthCrashLoop, overview.LastOperation!.ReasonCode);
         Assert.NotEqual(overview.LastOperation.ReasonCode, overview.LastOperation.FailureCode);
-        Assert.True(overview.AllowedActions.Restart.Allowed is false || overview.AllowedActions.Delete.Allowed);
+        Assert.False(overview.AllowedActions.Restart.Allowed);
+        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.InstanceFailedCode, overview.AllowedActions.Restart.ReasonCode);
+        Assert.True(overview.AllowedActions.Delete.Allowed);
+        Assert.Null(overview.AllowedActions.Delete.ReasonCode);
     }
 
     [Fact]

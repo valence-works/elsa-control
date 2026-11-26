@@ -19,6 +19,13 @@ public sealed class AzureContainerAppReplicaCrashLoopTests
     }
 
     [Fact]
+    public void Quoted_aca_exit_code_is_crash_loop_evidence()
+    {
+        Assert.True(AzureContainerAppReplicaCrashLoop.Detected(
+            """[{"runningState":"Running","runningStateDetails":"Container terminated with exit code '1'"}]""".AsMemory()));
+    }
+
+    [Fact]
     public void CrashLoopBackOff_details_are_a_crash_loop()
     {
         Assert.True(AzureContainerAppReplicaCrashLoop.Detected(

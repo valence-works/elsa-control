@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -6,8 +7,10 @@ using ElsaControl.Api.Authentication;
 using ElsaControl.Api.OrganizationBilling;
 using ElsaControl.Billing.Stripe;
 using ElsaControl.Deployment.Azure;
+using ElsaControl.PackageCatalog.Core.Accounts;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace ElsaControl.Api.Tests;
 
@@ -108,17 +111,85 @@ public sealed class AdminStagingProvisioningHealthLeverApiTests
     }
 
     [Fact]
-    public async Task Live_stripe_key_leaves_the_gate_closed()
+    public async Task Enabled_lever_with_a_live_stripe_key_refuses_to_start()
     {
         await using var app = CreateApp(
             enabled: true,
             allowlisted: AllowlistedInstanceId,
             stripeSecretKey: LiveSecretKey);
 
-        var response = await PostCrashLoopAsync(Operator(app), AllowlistedInstanceId);
+        var exception = await Assert.ThrowsAnyAsync<Exception>(async () =>
+        {
+            _ = app.Services;
+            await Task.CompletedTask;
+        });
 
-        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
-        Assert.Equal(StagingProvisioningHealthLeverDefaults.DisabledCode, await ProblemCodeAsync(response));
+        Assert.Contains("test-mode", FlattenException(exception), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("sk_live", FlattenException(exception), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Audit_write_records_outcome_mode_and_fingerprinted_operator()
+    {
+        var logs = new ConcurrentBag<string>();
+        var logger = new CapturingLogger(logs);
+
+        StagingProvisioningHealthLeverAudit.Write(
+            logger,
+            StagingProvisioningHealthLeverOutcome.Armed,
+            StagingProvisioningHealthFailureMode.CrashLoop,
+            "api-key");
+        StagingProvisioningHealthLeverAudit.Write(
+            logger,
+            StagingProvisioningHealthLeverOutcome.Reset,
+            StagingProvisioningHealthFailureMode.None,
+            "api-key");
+
+        Assert.Contains(logs, message =>
+            message.Contains(StagingProvisioningHealthLeverDefaults.CrashLoopCode, StringComparison.Ordinal) &&
+            message.Contains(StagingProvisioningHealthLeverDefaults.CrashLoopMode, StringComparison.Ordinal) &&
+            message.Contains(
+                OrganizationInternalEntitlementPolicy.FingerprintOperatorSubject("api-key")!,
+                StringComparison.Ordinal));
+        Assert.Contains(logs, message =>
+            message.Contains(StagingProvisioningHealthLeverDefaults.ResetCode, StringComparison.Ordinal));
+        Assert.All(logs, message =>
+        {
+            Assert.DoesNotContain(AllowlistedInstanceId.ToString("D"), message, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("api-key", message, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task Arm_and_reset_write_an_audit_log_without_instance_ids()
+    {
+        var logs = new ConcurrentBag<string>();
+        await using var app = CreateApp(
+            enabled: true,
+            allowlisted: AllowlistedInstanceId,
+            configureServices: services => services.AddSingleton<ILoggerProvider>(new CapturingLoggerProvider(logs)));
+        var client = Operator(app);
+
+        (await PostCrashLoopAsync(client, AllowlistedInstanceId)).EnsureSuccessStatusCode();
+        (await PostResetAsync(client, AllowlistedInstanceId)).EnsureSuccessStatusCode();
+
+        var entries = logs.Where(message =>
+                message.Contains("staging provisioning health lever", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        Assert.Contains(entries, message =>
+            message.Contains(StagingProvisioningHealthLeverDefaults.CrashLoopCode, StringComparison.Ordinal) &&
+            message.Contains(StagingProvisioningHealthLeverDefaults.CrashLoopMode, StringComparison.Ordinal) &&
+            message.Contains(
+                OrganizationInternalEntitlementPolicy.FingerprintOperatorSubject("api-key")!,
+                StringComparison.Ordinal));
+        Assert.Contains(entries, message =>
+            message.Contains(StagingProvisioningHealthLeverDefaults.ResetCode, StringComparison.Ordinal) &&
+            message.Contains("none", StringComparison.Ordinal));
+        Assert.All(entries, message =>
+        {
+            Assert.DoesNotContain(AllowlistedInstanceId.ToString("D"), message, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("api-key", message, StringComparison.Ordinal);
+        });
     }
 
     [Fact]
@@ -208,7 +279,8 @@ public sealed class AdminStagingProvisioningHealthLeverApiTests
         Guid? allowlisted = null,
         Guid? smokeOwnerInstanceId = null,
         string? stripeSecretKey = TestSecretKey,
-        IReadOnlyDictionary<string, string?>? additionalConfiguration = null)
+        IReadOnlyDictionary<string, string?>? additionalConfiguration = null,
+        Action<IServiceCollection>? configureServices = null)
     {
         var stripeMode = StripeBillingOptions.GetKeyMode(stripeSecretKey);
         var configuration = new Dictionary<string, string?>
@@ -228,7 +300,7 @@ public sealed class AdminStagingProvisioningHealthLeverApiTests
                 configuration[key] = value;
         }
 
-        return new ControlApiTestApplication(configuration);
+        return new ControlApiTestApplication(configuration, configureServices);
     }
 
     private static HttpClient Operator(ControlApiTestApplication app)
@@ -249,4 +321,36 @@ public sealed class AdminStagingProvisioningHealthLeverApiTests
 
     private static async Task<string?> ProblemCodeAsync(HttpResponseMessage response) =>
         (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString();
+
+    private static string FlattenException(Exception exception)
+    {
+        var parts = new List<string>();
+        for (var current = exception; current is not null; current = current.InnerException)
+            parts.Add(current.Message);
+        return string.Join(" ", parts);
+    }
+
+    private sealed class CapturingLoggerProvider(ConcurrentBag<string> messages) : ILoggerProvider
+    {
+        public ILogger CreateLogger(string categoryName) => new CapturingLogger(messages);
+
+        public void Dispose()
+        {
+        }
+    }
+
+    private sealed class CapturingLogger(ConcurrentBag<string> messages) : ILogger
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter) =>
+            messages.Add(formatter(state, exception));
+    }
 }

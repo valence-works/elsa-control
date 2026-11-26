@@ -2867,8 +2867,12 @@ public sealed partial class AzureBicepProviderRunnerTests : IDisposable
         process.Success(args => args.Contains("containerapp") && args.Contains("show") && args.Any(x => x.Contains("fqdn", StringComparison.Ordinal)), "proof-app.hash.azurecontainerapps.io");
         process.Success(args => args.Contains("containerapp") && args.Contains("revision") && args.Contains("show"), "Unhealthy");
         process.Success(IsReplicaList, """[{"runningState":"Running","restartCounts":[2]}]""");
+        process.Success(args => args.Contains("containerapp") && args.Contains("revision") && args.Contains("show"), "Unhealthy");
+        process.Success(IsReplicaList, """[{"runningState":"Running","restartCounts":[3]}]""");
+        var options = _fixture.Options with { ObservationAttempts = 2 };
 
-        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Health, HealthResources()));
+        var result = await new AzureBicepProviderRunner(options, _fixture.Scope, process)
+            .RunAsync(_fixture.Command(AzureProviderRunnerStep.Health, HealthResources()));
 
         Assert.Equal(AzureProviderRunnerOutcome.Failed, result.Outcome);
         Assert.Equal(AzureProviderHealth.Failed, result.Health);
@@ -2893,6 +2897,43 @@ public sealed partial class AzureBicepProviderRunnerTests : IDisposable
         Assert.Equal(ManagedElsaProvisioningFailureReason.AzureHealthCrashLoop, result.Code);
         Assert.DoesNotContain("139", result.Code, StringComparison.Ordinal);
         Assert.DoesNotContain("exit code", result.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Restarts_then_a_healthy_revision_completes_health()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("containerapp") && args.Contains("show") && args.Any(x => x.Contains("fqdn", StringComparison.Ordinal)), "proof-app.hash.azurecontainerapps.io");
+        process.Success(args => args.Contains("containerapp") && args.Contains("revision") && args.Contains("show"), "Unhealthy");
+        process.Success(IsReplicaList, """[{"runningState":"Running","restartCounts":[2]}]""");
+        process.Success(args => args.Contains("containerapp") && args.Contains("revision") && args.Contains("show"), "Healthy");
+        var options = _fixture.Options with { ObservationAttempts = 2 };
+
+        var result = await new AzureBicepProviderRunner(options, _fixture.Scope, process)
+            .RunAsync(_fixture.Command(AzureProviderRunnerStep.Health, HealthResources()));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Completed, result.Outcome);
+        Assert.Equal(AzureProviderHealth.Healthy, result.Health);
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Code == ManagedElsaProvisioningFailureReason.AzureHealthCrashLoop);
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Code == ManagedElsaProvisioningFailureReason.AzureHealthTimeout);
+    }
+
+    [Fact]
+    public async Task A_single_exit_or_back_off_then_a_healthy_revision_completes_health()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("containerapp") && args.Contains("show") && args.Any(x => x.Contains("fqdn", StringComparison.Ordinal)), "proof-app.hash.azurecontainerapps.io");
+        process.Success(args => args.Contains("containerapp") && args.Contains("revision") && args.Contains("show"), "Unhealthy");
+        process.Success(IsReplicaList, """[{"runningState":"Running","runningStateDetails":"Back-off restarting failed container, exit code '1'"}]""");
+        process.Success(args => args.Contains("containerapp") && args.Contains("revision") && args.Contains("show"), "Healthy");
+        var options = _fixture.Options with { ObservationAttempts = 2 };
+
+        var result = await new AzureBicepProviderRunner(options, _fixture.Scope, process)
+            .RunAsync(_fixture.Command(AzureProviderRunnerStep.Health, HealthResources()));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Completed, result.Outcome);
+        Assert.Equal(AzureProviderHealth.Healthy, result.Health);
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Code == ManagedElsaProvisioningFailureReason.AzureHealthCrashLoop);
     }
 
     [Fact]

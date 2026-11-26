@@ -600,6 +600,30 @@ public sealed class AzureManagedElsaProvisioningProgressProjectorTests
     }
 
     [Fact]
+    public void Generic_failed_step_diagnostics_do_not_project_a_reason_code()
+    {
+        var result = Project(
+            lifecycleState: ElsaInstanceOperationState.Failed,
+            failureCode: "azure.step.failed",
+            completedAt: AcceptedAt.AddMinutes(8),
+            provider: Provider(
+                AzureProviderOperationStatus.Failed,
+                AzureProviderOperationPhase.WorkloadSubmitted,
+                attemptedStep: AzureProviderRunnerStep.Workload) with
+            {
+                Diagnostics =
+                [
+                    new AzureProviderDiagnostic("azure.step.workload.failed", "azure.step.workload.failed")
+                ],
+                LastObservationReasonCode = "azure.step.workload.failed"
+            });
+
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Failed, result.State);
+        Assert.Null(result.ReasonCode);
+        Assert.DoesNotContain("azure.step.", result.ReasonCode ?? "", StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Health_crash_loop_projects_a_distinct_reason_code_at_health_verification()
     {
         var result = Project(

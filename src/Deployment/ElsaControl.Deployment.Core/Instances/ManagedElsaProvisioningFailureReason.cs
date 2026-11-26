@@ -74,7 +74,6 @@ public static class ManagedElsaProvisioningFailureReason
         IEnumerable<string>? diagnosticCodes,
         string? currentStage)
     {
-        string? translatorFinding = null;
         foreach (var code in Candidates(
                      reconciliationDiagnosticCode,
                      lastObservationReasonCode,
@@ -83,12 +82,11 @@ public static class ManagedElsaProvisioningFailureReason
         {
             if (TryMap(code, currentStage, out var mapped))
                 return mapped;
-            translatorFinding ??= ManagedElsaReasonCodeCatalog.IsSafeTranslatorFinding(code)
-                ? code
-                : null;
         }
 
-        return translatorFinding;
+        return ManagedElsaReasonCodeCatalog.IsSafeTranslatorFinding(reconciliationDiagnosticCode)
+            ? reconciliationDiagnosticCode
+            : null;
     }
 
     public static string? TimeoutForStage(string? currentStage) => currentStage switch

@@ -4,9 +4,11 @@ using System.Text.RegularExpressions;
 namespace ElsaControl.Deployment.Azure;
 
 /// <summary>
-/// Value-free crash-loop detection from Container Apps replica observations.
-/// Replica names, resource IDs, and provider detail strings are inspected
-/// in memory and never returned.
+/// Value-free crash-loop evidence from Container Apps replica observations.
+/// A true result is evidence for the Health window, not a terminal
+/// classification; the runner classifies crash-loop only when that window
+/// expires. Replica names, resource IDs, and provider detail strings are
+/// inspected in memory and never returned.
 /// </summary>
 internal static partial class AzureContainerAppReplicaCrashLoop
 {
@@ -144,6 +146,6 @@ internal static partial class AzureContainerAppReplicaCrashLoop
             ? value.GetString()
             : null;
 
-    [GeneratedRegex(@"\bexit(?:ed|ing)?(?:\s+with)?(?:\s+code)?\s*[:=]?\s*(\d+)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"\bexit(?:ed|ing)?(?:\s+with)?(?:\s+code)?\s*[:=]?\s*'?(\d+)'?\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex ExitCodePattern();
 }
