@@ -3,7 +3,6 @@
 import importlib.util
 import json
 import re
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,20 +15,46 @@ renderer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(renderer)
 
 GUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-
-
-def worker_template_keys_on_main() -> set[str]:
-    for ref in ("origin/main", "main"):
-        result = subprocess.run(
-            ["git", "show", f"{ref}:infra/control-worker-composition/worker-settings.template.json"],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode == 0:
-            return {key for key in json.loads(result.stdout) if not key.startswith("$")}
-    raise AssertionError("could not read worker-settings.template.json from main")
+# Frozen key set of infra/control-worker-composition/worker-settings.template.json on main
+# at #1034. CI checkouts are shallow and cannot git-show origin/main.
+MAIN_WORKER_TEMPLATE_KEYS = frozenset({
+    "Deployment__ElsaInstanceLifecycle__Enabled",
+    "Deployment__ElsaInstanceLifecycle__PollInterval",
+    "Deployment__AzureProvider__WorkerEnabled",
+    "Deployment__AzureProvider__PollInterval",
+    "Deployment__AzureProvider__BatchSize",
+    "Deployment__AzureProvider__InstanceLifecycle__Enabled",
+    "Deployment__ElsaInstanceHealthMonitor__Enabled",
+    "Deployment__AzureProvider__Runner__Enabled",
+    "Deployment__AzureProvider__Runner__DisposableProofMode",
+    "Deployment__AzureProvider__Runner__CleanupObservationAttempts",
+    "Deployment__AzureProvider__Runner__AzureCliClientId",
+    "Deployment__AzureProvider__Runner__LighthouseManagingTenantId",
+    "Deployment__AzureProvider__Runner__SqlBootstrapObjectId",
+    "Deployment__AzureProvider__Runner__SqlBootstrapLogin",
+    "Deployment__AzureProvider__Runner__SqlBootstrapIp",
+    "Deployment__AzureProvider__Runner__RuntimeAdminUsername",
+    "Deployment__AzureProvider__Runner__ReleaseFeedServiceIndex",
+    "Deployment__AzureProvider__Runner__Owner",
+    "Deployment__AzureProvider__Runner__RegistryAuthorityMode",
+    "Deployment__AzureProvider__Runner__RegistryDeploymentMetadataRoleDefinitionId",
+    "Deployment__AzureProvider__Runner__RegistryDeploymentMetadataRoleAssignmentId",
+    "Deployment__AzureProvider__Runner__RegistryRoleAdministrationAssignmentId",
+    "Deployment__AzureProvider__Runner__TargetScope__SubscriptionId",
+    "Deployment__AzureProvider__Runner__TargetScope__ResourceGroupName",
+    "Deployment__AzureProvider__Runner__TargetScope__RegistrySubscriptionId",
+    "Deployment__AzureProvider__Runner__TargetScope__RegistryResourceGroupName",
+    "Deployment__AzureProvider__Runner__TargetScope__RegistryName",
+    "Deployment__AzureProvider__Runner__TargetScope__Location",
+    "Deployment__AzureProvider__Secrets__0__Name",
+    "Deployment__AzureProvider__Secrets__0__Reference",
+    "Deployment__AzureProvider__Secrets__1__Name",
+    "Deployment__AzureProvider__Secrets__1__Reference",
+    "Deployment__AzureProvider__Secrets__2__Name",
+    "Deployment__AzureProvider__Secrets__2__Reference",
+    "RuntimeBuilder__InstancePlans__DefaultEgress",
+    "ControlPlane__Origin",
+})
 
 
 class CompositionFilesTests(unittest.TestCase):
@@ -175,9 +200,8 @@ class RenderTests(unittest.TestCase):
 
     def test_production_render_key_set_matches_main(self):
         rendered = renderer.render(self.workers, self.resolved, self.pending)
-        main_keys = worker_template_keys_on_main()
-        self.assertEqual(main_keys, set(self.workers))
-        self.assertEqual(main_keys, set(rendered))
+        self.assertEqual(MAIN_WORKER_TEMPLATE_KEYS, set(self.workers))
+        self.assertEqual(MAIN_WORKER_TEMPLATE_KEYS, set(rendered))
 
     def test_render_with_resolved_decisions_produces_only_template_keys(self):
         rendered = renderer.render(self.workers, self.resolved, self.pending, self.overrides)
@@ -340,7 +364,7 @@ class RenderTests(unittest.TestCase):
             production_workers = Path(directory) / "w.json"
             self.assertEqual(0, renderer.main(["workers", "--output", str(production_workers)]))
             self.assertEqual(
-                worker_template_keys_on_main(),
+                MAIN_WORKER_TEMPLATE_KEYS,
                 {entry["name"] for entry in json.loads(production_workers.read_text())})
             self.assertEqual(0, renderer.main(["release-verification", "--output", str(Path(directory) / "v.json")]))
             self.assertEqual(0, renderer.main(["rollback", "--output", str(Path(directory) / "r.json")]))
