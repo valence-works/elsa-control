@@ -75,8 +75,21 @@ outside the checkout:
 ```sh
 python3 scripts/render-worker-settings.py workers --environment staging --output ~/.elsa-control-ops/staging-workers.json
 python3 scripts/render-worker-settings.py release-verification --environment staging --output ~/.elsa-control-ops/staging-verification.json
-python3 scripts/render-worker-settings.py rollback --output ~/.elsa-control-ops/staging-workers-off.json
+python3 scripts/render-worker-settings.py rollback --environment staging --output ~/.elsa-control-ops/staging-workers-off.json
 ```
+
+The staging overlay also turns on the Pulumi provisioning proof (#1034) **only
+when** `infra/main.parameters.staging.json` sets `enablePulumiProvisioning`
+true. Production rendering never merges that overlay, so the production key
+set stays byte-for-byte the same as `main`. The overlay sets
+`Provisioning__WorkerEnabled=true`, `Provisioning__EnvironmentName=staging`,
+Blob/Key Vault locators for the staging-only state account and dedicated seed
+vault (`ecseedkv…`, not the Control API Key Vault), `Provisioning__SeedVaultUri`
+for #1033 `IsComplete`, and azure-native MSI auth (`ARM_USE_MSI=true` plus
+`ARM_CLIENT_ID` of the provisioner UAMI). It never sets `ARM_USE_CLI`.
+`python3 scripts/render-worker-settings.py rollback --environment staging`
+turns the Pulumi worker off with the other worker switches and keeps MSI on
+so a later re-enable cannot fall back to an `az` CLI session.
 
 The staging worker payload sets provider `BatchSize=1` to bound concurrent spend and a 45-minute
 command timeout for a cold Container Apps environment. Production retains its 15-minute setting;

@@ -33,6 +33,13 @@ public sealed class ProductionWorkerCompositionContractTests : IDisposable
     private readonly Dictionary<string, string?> _settings = Render("worker-settings.template.json");
 
     [Fact]
+    public void Provisioning_worker_stays_off_in_the_production_template()
+    {
+        Assert.DoesNotContain(_settings.Keys, key => key.StartsWith("Provisioning:", StringComparison.Ordinal));
+        Assert.DoesNotContain(_settings.Keys, key => key.StartsWith("ARM_", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Only_the_documented_decisions_are_pending()
     {
         var pending = ReadParameters().Where(pair => pair.Value is null).Select(pair => pair.Key).Order().ToArray();

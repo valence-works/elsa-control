@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -23,10 +24,11 @@ MAIN_PARAMETERS = ROOT / "infra" / "main.parameters.json"
 REGENERATE_INFRA = ROOT / "dev" / "regenerate-infra.sh"
 PATCH_API_IDENTITY = ROOT / "dev" / "patch-api-provisioner-identity.py"
 PATCH_CONTROL_SQL_SKU = ROOT / "dev" / "patch-control-sql-sku.py"
+PATCH_PULUMI_PROVISIONING = ROOT / "dev" / "patch-pulumi-provisioning.py"
 CONTROL_SQL_SKU_LIB = ROOT / "scripts" / "lib" / "control_sql_sku.py"
 APP_SERVICE_DOC = ROOT / "docs" / "deployment" / "azure-app-service.md"
 # Hand-maintained directories dev/regenerate-infra.sh must carry across a regeneration.
-PRESERVED_INFRA_DIRECTORIES = ("azure-production", "azure-workload-proof", "azure-customer-subscription", "managed-telemetry", "control-deploy-identity", "control-worker-composition", "control-egress", "api-key-vault")
+PRESERVED_INFRA_DIRECTORIES = ("azure-production", "azure-workload-proof", "azure-customer-subscription", "managed-telemetry", "control-deploy-identity", "control-worker-composition", "control-egress", "api-key-vault", "control-pulumi-provisioning")
 
 SUBSCRIPTION = "00000000-0000-0000-0000-000000000000"
 RESOURCE_GROUP = "rg-api-test"
@@ -661,6 +663,7 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertIn("'${provisioner_identity_outputs_id}': { }", module)
         self.assertIn("patch-api-provisioner-identity.py", regeneration)
         self.assertIn("patch-control-sql-sku.py", regeneration)
+        self.assertIn("patch-pulumi-provisioning.py", regeneration)
         for directory in PRESERVED_INFRA_DIRECTORIES:
             self.assertIn(directory, regeneration)
         self.assertNotIn("dashboard", module.lower())
@@ -932,6 +935,7 @@ class ApiInfrastructureTests(unittest.TestCase):
         shutil.copy2(REGENERATE_INFRA, temporary / "dev" / "regenerate-infra.sh")
         shutil.copy2(PATCH_API_IDENTITY, temporary / "dev" / "patch-api-provisioner-identity.py")
         shutil.copy2(PATCH_CONTROL_SQL_SKU, temporary / "dev" / "patch-control-sql-sku.py")
+        shutil.copy2(PATCH_PULUMI_PROVISIONING, temporary / "dev" / "patch-pulumi-provisioning.py")
         lib_dir = temporary / "scripts" / "lib"
         lib_dir.mkdir(parents=True)
         shutil.copy2(CONTROL_SQL_SKU_LIB, lib_dir / "control_sql_sku.py")
@@ -1078,6 +1082,303 @@ class ApiInfrastructureTests(unittest.TestCase):
             (Path(match.group("path")) / "azure-production/manual.marker").read_text(),
             "azure-production",
         )
+
+
+STAGING_RESOURCE_GROUP_ID = (
+    "/subscriptions/8e23037a-420f-4ad0-9594-9d194de29e84/resourceGroups/rg-valence-control-staging"
+)
+STORAGE_BLOB_DATA_CONTRIBUTOR = "ba92f5b4-2d11-453d-a403-e96b0029c9fe"
+KEY_VAULT_CRYPTO_USER = "12338af0-0e69-4776-bea7-57ae8d297424"
+KEY_VAULT_SECRETS_USER = "4633458b-17de-408a-b874-0445c86b69e6"
+CONTRIBUTOR_ROLE = "b24988ac-6180-42a0-ab88-20f7382dd24c"
+PULUMI_MODULE = ROOT / "infra" / "control-pulumi-provisioning" / "pulumi-provisioning.module.bicep"
+PULUMI_README = ROOT / "infra" / "control-pulumi-provisioning" / "README.md"
+PRODUCTION_MAIN_PARAMETERS = ROOT / "infra" / "main.parameters.production.json"
+STAGING_MAIN_PARAMETERS = ROOT / "infra" / "main.parameters.staging.json"
+PRODUCTION_WORKER_PARAMETERS = ROOT / "infra" / "control-worker-composition" / "worker-settings.parameters.production.json"
+
+
+def unique_string(*values: str) -> str:
+    """ARM uniqueString: UTF-8 MurmurHash64 encoded with the 13-char a-z2-7 alphabet."""
+
+    alphabet = "abcdefghijklmnopqrstuvwxyz234567"
+
+    def rotate_left32(value: int, amount: int) -> int:
+        value &= 0xFFFFFFFF
+        return ((value << amount) | (value >> (32 - amount))) & 0xFFFFFFFF
+
+    data = "-".join(values).encode("utf-8")
+    length = len(data)
+    h1 = 0
+    h2 = 0
+    magic0 = 2869860233
+    magic1 = 597399067
+    magic2 = 2246822507
+    magic3 = 3266489909
+    index = 0
+    while index + 7 < length:
+        k2 = data[index] | (data[index + 1] << 8) | (data[index + 2] << 16) | (data[index + 3] << 24)
+        k4 = data[index + 4] | (data[index + 5] << 8) | (data[index + 6] << 16) | (data[index + 7] << 24)
+        k2 = (k2 * magic1) & 0xFFFFFFFF
+        k2 = rotate_left32(k2, 15)
+        k2 = (k2 * magic0) & 0xFFFFFFFF
+        h1 ^= k2
+        h1 = rotate_left32(h1, 19)
+        h1 = (h1 + h2) & 0xFFFFFFFF
+        h1 = (h1 * 5 + 1444728091) & 0xFFFFFFFF
+        k4 = (k4 * magic0) & 0xFFFFFFFF
+        k4 = rotate_left32(k4, 17)
+        k4 = (k4 * magic1) & 0xFFFFFFFF
+        h2 ^= k4
+        h2 = rotate_left32(h2, 13)
+        h2 = (h2 + h1) & 0xFFFFFFFF
+        h2 = (h2 * 5 + 197830471) & 0xFFFFFFFF
+        index += 8
+    tail = length - index
+    if tail > 0:
+        k2 = 0
+        k4 = 0
+        if tail >= 7:
+            k4 ^= data[index + 6] << 16
+        if tail >= 6:
+            k4 ^= data[index + 5] << 8
+        if tail >= 5:
+            k4 ^= data[index + 4]
+            k4 = (k4 * magic0) & 0xFFFFFFFF
+            k4 = rotate_left32(k4, 17)
+            k4 = (k4 * magic1) & 0xFFFFFFFF
+            h2 ^= k4
+        if tail >= 4:
+            k2 ^= data[index + 3] << 24
+        if tail >= 3:
+            k2 ^= data[index + 2] << 16
+        if tail >= 2:
+            k2 ^= data[index + 1] << 8
+        if tail >= 1:
+            k2 ^= data[index]
+            k2 = (k2 * magic1) & 0xFFFFFFFF
+            k2 = rotate_left32(k2, 15)
+            k2 = (k2 * magic0) & 0xFFFFFFFF
+            h1 ^= k2
+    h1 ^= length
+    h2 ^= length
+    h1 = (h1 + h2) & 0xFFFFFFFF
+    h2 = (h2 + h1) & 0xFFFFFFFF
+    h1 ^= h1 >> 16
+    h1 = (h1 * magic2) & 0xFFFFFFFF
+    h1 ^= h1 >> 13
+    h1 = (h1 * magic3) & 0xFFFFFFFF
+    h1 ^= h1 >> 16
+    h2 ^= h2 >> 16
+    h2 = (h2 * magic2) & 0xFFFFFFFF
+    h2 ^= h2 >> 13
+    h2 = (h2 * magic3) & 0xFFFFFFFF
+    h2 ^= h2 >> 16
+    h1 = (h1 + h2) & 0xFFFFFFFF
+    h2 = (h2 + h1) & 0xFFFFFFFF
+    value = ((h2 << 32) | h1) & 0xFFFFFFFFFFFFFFFF
+    chars = []
+    for _ in range(13):
+        chars.append(alphabet[(value >> 59) & 31])
+        value = (value << 5) & 0xFFFFFFFFFFFFFFFF
+    return "".join(chars)
+
+
+class PulumiProvisioningInfrastructureTests(unittest.TestCase):
+    def test_unique_string_matches_arm_test_vectors_and_staging_webapp(self) -> None:
+        self.assertEqual("aaaaaaaaaaaaa", unique_string(""))
+        self.assertEqual("rbgf3xv4ufgzg", unique_string("test"))
+        self.assertEqual("pivml2tg5alca", unique_string("test", "test2"))
+        self.assertEqual("bqgd334z2uj64", unique_string("test", "test2", "test3"))
+        self.assertEqual("tud53zotij43k", unique_string(STAGING_RESOURCE_GROUP_ID))
+        self.assertIn("api-tud53zotij43k.azurewebsites.net", (ROOT / "scripts" / "render-worker-settings.py").read_text())
+
+    def test_main_template_defaults_pulumi_provisioning_off(self) -> None:
+        main = MAIN_BICEP.read_text()
+        self.assertIn("param enablePulumiProvisioning bool = false", main)
+        self.assertIn("module control_pulumi_provisioning 'control-pulumi-provisioning/pulumi-provisioning.module.bicep' = if (enablePulumiProvisioning)", main)
+        self.assertNotIn("enablePulumiProvisioning: true", main)
+        production = json.loads(PRODUCTION_MAIN_PARAMETERS.read_text())["parameters"]
+        self.assertNotIn("enablePulumiProvisioning", production)
+        self.assertNotIn("pulumiProvisionerPrincipalId", production)
+        staging = json.loads(STAGING_MAIN_PARAMETERS.read_text())["parameters"]
+        self.assertTrue(staging["enablePulumiProvisioning"]["value"])
+        self.assertIn("snet-api-egress", staging["pulumiApiEgressSubnetId"]["value"])
+        self.assertEqual("S0", staging["sqlDatabaseSkuName"]["value"])
+        self.assertEqual("S0", production["sqlDatabaseSkuName"]["value"])
+        self.assertNotIn("pulumiApiEgressSubnetId", production)
+        production_workers = json.loads(PRODUCTION_WORKER_PARAMETERS.read_text())
+        self.assertNotIn("stpulumi", json.dumps(production_workers))
+        self.assertNotIn("enablePulumiProvisioning", json.dumps(production_workers))
+
+    def test_module_source_is_keyless_and_narrowly_scoped(self) -> None:
+        source = PULUMI_MODULE.read_text()
+        self.assertIn("kind: 'StorageV2'", source)
+        self.assertIn("name: 'Standard_LRS'", source)
+        self.assertIn("allowSharedKeyAccess: false", source)
+        self.assertIn("allowBlobPublicAccess: false", source)
+        self.assertIn("minimumTlsVersion: 'TLS1_2'", source)
+        self.assertIn("isVersioningEnabled: true", source)
+        self.assertIn("deleteRetentionPolicy", source)
+        self.assertIn("name: containerName", source)
+        self.assertIn("var containerName = 'pulumi-state'", source)
+        self.assertIn("kty: 'RSA'", source)
+        self.assertIn("keySize: 2048", source)
+        self.assertIn(STORAGE_BLOB_DATA_CONTRIBUTOR, source)
+        self.assertIn(KEY_VAULT_CRYPTO_USER, source)
+        self.assertIn(KEY_VAULT_SECRETS_USER, source)
+        self.assertIn("scope: stateContainer", source)
+        self.assertIn("scope: pulumiSecretsKey", source)
+        self.assertIn("scope: seedVault", source)
+        self.assertIn("enableRbacAuthorization: true", source)
+        self.assertIn("enableSoftDelete: true", source)
+        self.assertIn("enablePurgeProtection: true", source)
+        self.assertIn("publicNetworkAccess: 'Enabled'", source)
+        self.assertIn("defaultAction: 'Deny'", source)
+        self.assertNotIn("scope: vault", source)
+        self.assertNotIn("ecapikv", source)
+        self.assertNotIn(CONTRIBUTOR_ROLE, source)
+        self.assertNotIn("scope: resourceGroup()", source)
+        self.assertNotIn("scope: subscription()", source)
+        for forbidden in ("listKeys", "connectionString", "accountKey", "sharedAccessSignature", "sasToken"):
+            self.assertNotIn(forbidden, source)
+        outputs = re.findall(r"^output (\S+) ", source, re.MULTILINE)
+        self.assertEqual(
+            {
+                "storageAccountName",
+                "containerName",
+                "stateBackendLocator",
+                "vaultName",
+                "seedVaultUri",
+                "secretsProviderLocator",
+                "keyName",
+            },
+            set(outputs),
+        )
+        suffix = unique_string(STAGING_RESOURCE_GROUP_ID)
+        overlay = (ROOT / "scripts" / "render-worker-settings.py").read_text()
+        self.assertIn(f"stpulumi{suffix}/pulumi-state", overlay)
+        self.assertIn(f"azurekeyvault://ecseedkv{suffix}.vault.azure.net/keys/pulumi-secrets", overlay)
+        self.assertIn(f"https://ecseedkv{suffix}.vault.azure.net/", overlay)
+        self.assertNotIn(f"ecapikv{suffix}", overlay)
+        self.assertIn("control-pulumi-provisioning", REGENERATE_INFRA.read_text())
+        readme = PULUMI_README.read_text()
+        self.assertIn("account keys", readme)
+        self.assertIn("SAS tokens", readme)
+        self.assertIn("connection strings", readme)
+
+    def test_provisioner_gets_no_role_on_the_control_api_vault(self) -> None:
+        source = PULUMI_MODULE.read_text()
+        self.assertNotIn("ecapikv", source)
+        self.assertNotRegex(source, r"Microsoft\.KeyVault/vaults@[^']+' existing")
+        self.assertIn("scope: seedVault", source)
+        self.assertNotIn("scope: vault", source)
+        main = MAIN_BICEP.read_text()
+        self.assertIn("apiEgressSubnetId: pulumiApiEgressSubnetId", main)
+        api_vault = (ROOT / "infra" / "api-key-vault" / "api-key-vault.module.bicep").read_text()
+        self.assertNotIn("pulumiProvisionerPrincipalId", api_vault)
+        self.assertNotIn("provisionerPrincipalId", api_vault)
+
+    def test_pulumi_patch_is_idempotent_on_sku_parameterized_main(self) -> None:
+        generated = """param environmentName string
+param location string
+@description('Id of the user or app to assign application roles')
+param principalId string = ''
+
+@description('Azure SQL Catalog service objective (SKU name). Empty selects Standard S0 for every environment. Pass GP_S_Gen5 to request serverless.')
+param sqlDatabaseSkuName string = ''
+
+var resolvedSqlDatabaseSkuName = !empty(sqlDatabaseSkuName) ? sqlDatabaseSkuName : 'S0'
+
+var tags = {
+  'azd-env-name': environmentName
+}
+
+resource rg 'Microsoft.Resources/resourceGroups@2022-09-01' = {
+  name: 'rg-${environmentName}'
+  location: location
+}
+
+output API_IDENTITY_CLIENTID string = 'unused'
+"""
+        spec = importlib.util.spec_from_file_location("patch_pulumi_provisioning", PATCH_PULUMI_PROVISIONING)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        patch = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(patch)
+        once = patch.patch_main(generated)
+        twice = patch.patch_main(once)
+        self.assertEqual(once, twice)
+        self.assertIn("param enablePulumiProvisioning bool = false", once)
+        self.assertIn("param pulumiApiEgressSubnetId string = ''", once)
+        self.assertIn("apiEgressSubnetId: pulumiApiEgressSubnetId", once)
+        self.assertIn("module control_pulumi_provisioning", once)
+        self.assertEqual(1, once.count("param enablePulumiProvisioning bool = false"))
+        self.assertEqual(1, once.count("module control_pulumi_provisioning"))
+
+    def test_module_compiles_and_emits_only_storage_key_and_three_roles(self) -> None:
+        az = shutil.which("az")
+        if az is None:
+            self.skipTest("Azure CLI with Bicep is required for Pulumi provisioning contract tests")
+        result = subprocess.run(
+            [az, "bicep", "build", "--file", str(PULUMI_MODULE), "--stdout"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        template = json.loads(result.stdout)
+        by_type: dict[str, list[dict]] = {}
+        for resource in template["resources"]:
+            by_type.setdefault(resource["type"], []).append(resource)
+        self.assertEqual(
+            {
+                "Microsoft.Storage/storageAccounts",
+                "Microsoft.Storage/storageAccounts/blobServices",
+                "Microsoft.Storage/storageAccounts/blobServices/containers",
+                "Microsoft.KeyVault/vaults",
+                "Microsoft.KeyVault/vaults/keys",
+                "Microsoft.Authorization/roleAssignments",
+            },
+            set(by_type),
+        )
+        self.assertEqual(1, len(by_type["Microsoft.Storage/storageAccounts"]))
+        self.assertEqual(1, len(by_type["Microsoft.Storage/storageAccounts/blobServices/containers"]))
+        self.assertEqual(1, len(by_type["Microsoft.KeyVault/vaults"]))
+        self.assertEqual(1, len(by_type["Microsoft.KeyVault/vaults/keys"]))
+        self.assertEqual(3, len(by_type["Microsoft.Authorization/roleAssignments"]))
+        vault = by_type["Microsoft.KeyVault/vaults"][0]
+        self.assertTrue(vault["properties"]["enableRbacAuthorization"])
+        self.assertTrue(vault["properties"]["enableSoftDelete"])
+        self.assertTrue(vault["properties"]["enablePurgeProtection"])
+        self.assertEqual("Enabled", vault["properties"]["publicNetworkAccess"])
+        self.assertEqual("Deny", vault["properties"]["networkAcls"]["defaultAction"])
+        self.assertEqual("None", vault["properties"]["networkAcls"]["bypass"])
+        account = by_type["Microsoft.Storage/storageAccounts"][0]
+        self.assertFalse(account["properties"]["allowSharedKeyAccess"])
+        self.assertFalse(account["properties"]["allowBlobPublicAccess"])
+        self.assertEqual("TLS1_2", account["properties"]["minimumTlsVersion"])
+        blob = by_type["Microsoft.Storage/storageAccounts/blobServices"][0]
+        self.assertTrue(blob["properties"]["isVersioningEnabled"])
+        self.assertTrue(blob["properties"]["deleteRetentionPolicy"]["enabled"])
+        key = by_type["Microsoft.KeyVault/vaults/keys"][0]
+        self.assertEqual("RSA", key["properties"]["kty"])
+        self.assertGreaterEqual(key["properties"]["keySize"], 2048)
+        rendered = json.dumps(template)
+        self.assertIn(STORAGE_BLOB_DATA_CONTRIBUTOR, rendered)
+        self.assertIn(KEY_VAULT_CRYPTO_USER, rendered)
+        self.assertIn(KEY_VAULT_SECRETS_USER, rendered)
+        self.assertNotIn(CONTRIBUTOR_ROLE, rendered)
+        for forbidden in ("listKeys", "connectionString", "accountKey", "sharedAccessSignature"):
+            self.assertNotIn(forbidden, rendered)
+        for assignment in by_type["Microsoft.Authorization/roleAssignments"]:
+            scope = assignment.get("scope", "")
+            blob = json.dumps(assignment)
+            self.assertFalse(scope.endswith("/resourceGroups/'") or "subscription().id" in blob)
+            self.assertNotIn("Microsoft.Resources/resourceGroups", scope)
+            self.assertNotIn("Microsoft.Resources/subscriptions", scope)
+            self.assertNotIn("ecapikv", blob)
 
 
 if __name__ == "__main__":

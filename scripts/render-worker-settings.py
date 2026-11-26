@@ -39,11 +39,29 @@ HANDOFF_SETTINGS_KEYS = frozenset({
     "ManagedElsa__Handoff__Issuer",
     "ManagedElsa__Handoff__CloudContinuationUrl",
 })
+STAGING_MAIN_PARAMETERS = ROOT / "infra" / "main.parameters.staging.json"
+PRODUCTION_MAIN_PARAMETERS = ROOT / "infra" / "main.parameters.production.json"
 STAGING_WORKER_SETTINGS = {
     "Deployment__AzureProvider__BatchSize": "1",
     # A cold Container Apps environment can exceed the production 15-minute command bound.
     # Keep staging's first-engine rehearsal bounded without timing out healthy Azure work.
     "Deployment__AzureProvider__Runner__CommandTimeout": "00:45:00",
+}
+# Pulumi provisioning proof (#1034). Applied only when enablePulumiProvisioning is true.
+# Production rendering never merges this overlay, so the production key set stays on main.
+PULUMI_WORKER_SETTINGS = {
+    "Provisioning__WorkerEnabled": "true",
+    "Provisioning__EnvironmentName": "staging",
+    "ARM_SUBSCRIPTION_ID": "${WorkloadSubscriptionId}",
+    "ARM_TENANT_ID": "${TenantId}",
+    "ARM_USE_MSI": "true",
+    "ARM_CLIENT_ID": "${ProvisionerClientId}",
+    "Provisioning__CredentialLocator": "${ProvisionerClientId}",
+    "Provisioning__SqlBootstrapObjectId": "${ProvisionerPrincipalId}",
+    "Provisioning__SqlBootstrapLogin": "${ProvisionerIdentityName}",
+    "Provisioning__StateBackendLocator": "stpulumitud53zotij43k/pulumi-state",
+    "Provisioning__SecretsProviderLocator": "azurekeyvault://ecseedkvtud53zotij43k.vault.azure.net/keys/pulumi-secrets",
+    "Provisioning__SeedVaultUri": "https://ecseedkvtud53zotij43k.vault.azure.net/",
 }
 
 PLACEHOLDER = re.compile(r"\$\{([A-Za-z][A-Za-z0-9_]*)\}")
@@ -55,6 +73,8 @@ ALLOWED_KEY_PREFIXES = (
     "ControlPlane__",
     "ReleaseCatalog__Verification__",
     "ReleaseCatalog__Admission__",
+    "Provisioning__",
+    "ARM_",
 )
 # The API image owns these; an app setting would silently retarget the runner's tools.
 IMAGE_OWNED_KEYS = frozenset({
@@ -72,6 +92,15 @@ WORKER_ENABLE_KEYS = (
 # while all three workers are; rollback turns it off together with them.
 HEALTH_MONITOR_KEY = "Deployment__ElsaInstanceHealthMonitor__Enabled"
 ROLLBACK_KEYS = (*WORKER_ENABLE_KEYS, HEALTH_MONITOR_KEY)
+PULUMI_WORKER_KEY = "Provisioning__WorkerEnabled"
+# Staging rollback turns the Pulumi worker off and keeps azure-native on MSI so
+# a later re-enable cannot fall back to an az CLI session.
+PULUMI_ROLLBACK_SETTINGS = {
+    **PULUMI_WORKER_SETTINGS,
+    PULUMI_WORKER_KEY: "false",
+    "ARM_USE_MSI": "true",
+}
+PULUMI_ROLLBACK_KEYS = tuple(PULUMI_ROLLBACK_SETTINGS)
 SETTING_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,127}$")
 # Values are identifiers, locators or short tokens; anything resembling a credential is refused.
 SAFE_VALUE = re.compile(r"^[A-Za-z0-9._:/@#\-]{1,512}$")
@@ -180,6 +209,13 @@ def render(template: dict[str, str], parameters: dict[str, str], pending: dict[s
     for key, value in rendered.items():
         if (key.endswith("ClientId") or key.endswith("ObjectId") or key.endswith("SubscriptionId") or key.endswith("TenantId")) and not GUID.match(value):
             raise CompositionError(f"{key} must be a canonical lowercase GUID")
+    if rendered.get("ARM_USE_CLI") == "true":
+        raise CompositionError("azure-native must not fall back to the Azure CLI")
+    if rendered.get(PULUMI_WORKER_KEY) == "true":
+        if rendered.get("ARM_USE_MSI") != "true":
+            raise CompositionError("the Pulumi worker must authenticate with ARM_USE_MSI")
+        if not GUID.match(rendered.get("ARM_CLIENT_ID", "")):
+            raise CompositionError("ARM_CLIENT_ID must be a canonical lowercase GUID")
     return rendered
 
 
@@ -209,6 +245,32 @@ def validate_staging_authority(staging: dict[str, str], production: dict[str, st
         raise CompositionError("staging ControlPlaneOrigin must differ from production")
 
 
+def pulumi_provisioning_enabled(environment: str) -> bool:
+    """Read enablePulumiProvisioning from the environment's main parameter file."""
+    path = STAGING_MAIN_PARAMETERS if environment == "staging" else PRODUCTION_MAIN_PARAMETERS
+    document = load_json(path)
+    parameters = document.get("parameters") if isinstance(document, dict) else None
+    if not isinstance(parameters, dict):
+        return False
+    flag = parameters.get("enablePulumiProvisioning")
+    return isinstance(flag, dict) and flag.get("value") is True
+
+
+def substitute_parameters(raw: str, parameters: dict[str, str], pending: dict[str, str], key: str) -> str:
+    def substitute(match: re.Match[str]) -> str:
+        name = match.group(1)
+        if name in parameters:
+            return parameters[name]
+        if name in pending:
+            raise CompositionError(f"pending decisions block rendering: {name} ({pending[name]})")
+        raise CompositionError(f"unknown parameter {name} referenced by {key}")
+
+    value = PLACEHOLDER.sub(substitute, raw)
+    if not SAFE_VALUE.match(value):
+        raise CompositionError(f"rendered value for {key} has an unsafe shape")
+    return value
+
+
 def to_app_settings(rendered: dict[str, str]) -> list[dict[str, object]]:
     return [{"name": key, "value": value, "slotSetting": False} for key, value in rendered.items()]
 
@@ -223,7 +285,7 @@ def write_payload(payload: list[dict[str, object]], output: Path) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def load_rollback(path: Path = ROLLBACK) -> list[dict[str, object]]:
+def load_rollback(path: Path = ROLLBACK, environment: str = "production") -> list[dict[str, object]]:
     payload = load_json(path)
     if (not isinstance(payload, list) or len(payload) != len(ROLLBACK_KEYS)
             or {entry.get("name") for entry in payload} != set(ROLLBACK_KEYS)):
@@ -231,7 +293,24 @@ def load_rollback(path: Path = ROLLBACK) -> list[dict[str, object]]:
     for entry in payload:
         if entry.get("value") != "false" or entry.get("slotSetting") is not False:
             raise CompositionError("rollback entries must set the switches to false")
-    return payload
+    if environment != "staging" or not pulumi_provisioning_enabled("staging"):
+        return payload
+    resolved, pending = load_parameters(STAGING_PARAMETERS)
+    extra: list[dict[str, object]] = []
+    for key, raw in PULUMI_ROLLBACK_SETTINGS.items():
+        extra.append({
+            "name": key,
+            "value": substitute_parameters(raw, resolved, pending, key),
+            "slotSetting": False,
+        })
+    names = {entry["name"]: entry["value"] for entry in extra}
+    if names.get(PULUMI_WORKER_KEY) != "false":
+        raise CompositionError("staging rollback must turn the Pulumi worker off")
+    if names.get("ARM_USE_MSI") != "true" or "ARM_USE_CLI" in names:
+        raise CompositionError("staging rollback must keep azure-native on managed identity")
+    if names.get("ARM_CLIENT_ID") != resolved["ProvisionerClientId"]:
+        raise CompositionError("staging rollback ARM_CLIENT_ID must be the provisioner UAMI")
+    return payload + extra
 
 
 def load_staging_handoff(path: Path = STAGING_HANDOFF) -> dict[str, str]:
@@ -273,6 +352,7 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("--environment", choices=("production", "staging"), default="production")
     rollback = sub.add_parser("rollback", help="write the workers-off payload")
     rollback.add_argument("--output", type=Path, required=True)
+    rollback.add_argument("--environment", choices=("production", "staging"), default="production")
     handoff = sub.add_parser("handoff", help="render the reviewed staging handoff settings")
     handoff.add_argument("--output", type=Path, required=True)
     handoff_rollback = sub.add_parser("handoff-rollback", help="write the staging handoff-off payload")
@@ -282,8 +362,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "rollback":
-            digest = write_payload(load_rollback(), args.output)
-            print(f"rendered {len(ROLLBACK_KEYS)} settings to {args.output} sha256={digest}")
+            payload = load_rollback(environment=args.environment)
+            digest = write_payload(payload, args.output)
+            print(f"rendered {len(payload)} settings to {args.output} sha256={digest}")
             return 0
         if args.command == "handoff":
             rendered = load_staging_handoff()
@@ -313,6 +394,8 @@ def main(argv: list[str] | None = None) -> int:
         template = load_template(WORKER_TEMPLATE if args.command == "workers" else VERIFICATION_TEMPLATE)
         if args.environment == "staging" and args.command == "workers":
             template.update(STAGING_WORKER_SETTINGS)
+            if pulumi_provisioning_enabled("staging"):
+                template.update(PULUMI_WORKER_SETTINGS)
         rendered = render(template, resolved, pending)
         digest = write_payload(to_app_settings(rendered), args.output)
         for key in rendered:

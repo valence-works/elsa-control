@@ -5,8 +5,8 @@ import json
 import re
 import tempfile
 import unittest
-from unittest import mock
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "render-worker-settings.py"
@@ -15,6 +15,46 @@ renderer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(renderer)
 
 GUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+# Frozen key set of infra/control-worker-composition/worker-settings.template.json on main
+# at #1034. CI checkouts are shallow and cannot git-show origin/main.
+MAIN_WORKER_TEMPLATE_KEYS = frozenset({
+    "Deployment__ElsaInstanceLifecycle__Enabled",
+    "Deployment__ElsaInstanceLifecycle__PollInterval",
+    "Deployment__AzureProvider__WorkerEnabled",
+    "Deployment__AzureProvider__PollInterval",
+    "Deployment__AzureProvider__BatchSize",
+    "Deployment__AzureProvider__InstanceLifecycle__Enabled",
+    "Deployment__ElsaInstanceHealthMonitor__Enabled",
+    "Deployment__AzureProvider__Runner__Enabled",
+    "Deployment__AzureProvider__Runner__DisposableProofMode",
+    "Deployment__AzureProvider__Runner__CleanupObservationAttempts",
+    "Deployment__AzureProvider__Runner__AzureCliClientId",
+    "Deployment__AzureProvider__Runner__LighthouseManagingTenantId",
+    "Deployment__AzureProvider__Runner__SqlBootstrapObjectId",
+    "Deployment__AzureProvider__Runner__SqlBootstrapLogin",
+    "Deployment__AzureProvider__Runner__SqlBootstrapIp",
+    "Deployment__AzureProvider__Runner__RuntimeAdminUsername",
+    "Deployment__AzureProvider__Runner__ReleaseFeedServiceIndex",
+    "Deployment__AzureProvider__Runner__Owner",
+    "Deployment__AzureProvider__Runner__RegistryAuthorityMode",
+    "Deployment__AzureProvider__Runner__RegistryDeploymentMetadataRoleDefinitionId",
+    "Deployment__AzureProvider__Runner__RegistryDeploymentMetadataRoleAssignmentId",
+    "Deployment__AzureProvider__Runner__RegistryRoleAdministrationAssignmentId",
+    "Deployment__AzureProvider__Runner__TargetScope__SubscriptionId",
+    "Deployment__AzureProvider__Runner__TargetScope__ResourceGroupName",
+    "Deployment__AzureProvider__Runner__TargetScope__RegistrySubscriptionId",
+    "Deployment__AzureProvider__Runner__TargetScope__RegistryResourceGroupName",
+    "Deployment__AzureProvider__Runner__TargetScope__RegistryName",
+    "Deployment__AzureProvider__Runner__TargetScope__Location",
+    "Deployment__AzureProvider__Secrets__0__Name",
+    "Deployment__AzureProvider__Secrets__0__Reference",
+    "Deployment__AzureProvider__Secrets__1__Name",
+    "Deployment__AzureProvider__Secrets__1__Reference",
+    "Deployment__AzureProvider__Secrets__2__Name",
+    "Deployment__AzureProvider__Secrets__2__Reference",
+    "RuntimeBuilder__InstancePlans__DefaultEgress",
+    "ControlPlane__Origin",
+})
 
 
 class CompositionFilesTests(unittest.TestCase):
@@ -33,6 +73,7 @@ class CompositionFilesTests(unittest.TestCase):
         self.assertEqual("360", self.workers["Deployment__AzureProvider__Runner__CleanupObservationAttempts"])
         self.assertEqual("westeurope", self.workers["Deployment__AzureProvider__Runner__TargetScope__Location"])
         self.assertEqual("unrestricted", self.workers["RuntimeBuilder__InstancePlans__DefaultEgress"])
+        self.assertFalse(any(key.startswith("Provisioning__") or key.startswith("ARM_") for key in self.workers))
 
     def test_worker_template_uses_only_the_three_provider_owned_secret_instructions(self):
         secrets = {self.workers[f"Deployment__AzureProvider__Secrets__{i}__Name"]:
@@ -64,6 +105,34 @@ class CompositionFilesTests(unittest.TestCase):
         renderer.validate_staging_authority(staging, self.resolved)
         self.assertEqual("00:45:00", renderer.STAGING_WORKER_SETTINGS["Deployment__AzureProvider__Runner__CommandTimeout"])
         self.assertEqual("1", renderer.STAGING_WORKER_SETTINGS["Deployment__AzureProvider__BatchSize"])
+        self.assertNotIn("Provisioning__WorkerEnabled", renderer.STAGING_WORKER_SETTINGS)
+        self.assertTrue(renderer.pulumi_provisioning_enabled("staging"))
+        self.assertFalse(renderer.pulumi_provisioning_enabled("production"))
+        self.assertEqual("true", renderer.PULUMI_WORKER_SETTINGS["Provisioning__WorkerEnabled"])
+        self.assertEqual("staging", renderer.PULUMI_WORKER_SETTINGS["Provisioning__EnvironmentName"])
+        self.assertEqual("true", renderer.PULUMI_WORKER_SETTINGS["ARM_USE_MSI"])
+        self.assertEqual("${ProvisionerClientId}", renderer.PULUMI_WORKER_SETTINGS["ARM_CLIENT_ID"])
+        self.assertNotIn("ARM_USE_CLI", renderer.PULUMI_WORKER_SETTINGS)
+        self.assertEqual("stpulumitud53zotij43k/pulumi-state", renderer.PULUMI_WORKER_SETTINGS["Provisioning__StateBackendLocator"])
+        self.assertEqual(
+            "azurekeyvault://ecseedkvtud53zotij43k.vault.azure.net/keys/pulumi-secrets",
+            renderer.PULUMI_WORKER_SETTINGS["Provisioning__SecretsProviderLocator"])
+        self.assertEqual(
+            "https://ecseedkvtud53zotij43k.vault.azure.net/",
+            renderer.PULUMI_WORKER_SETTINGS["Provisioning__SeedVaultUri"])
+
+    def test_pulumi_overlay_applies_only_when_the_staging_flag_is_on(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "main.parameters.staging.json"
+            path.write_text(json.dumps({"parameters": {"enablePulumiProvisioning": {"value": False}}}))
+            with mock.patch.object(renderer, "STAGING_MAIN_PARAMETERS", path):
+                self.assertFalse(renderer.pulumi_provisioning_enabled("staging"))
+                output = Path(directory) / "staging.json"
+                self.assertEqual(0, renderer.main(["workers", "--environment", "staging", "--output", str(output)]))
+                settings = {entry["name"] for entry in json.loads(output.read_text())}
+        self.assertNotIn("Provisioning__WorkerEnabled", settings)
+        self.assertNotIn("ARM_USE_MSI", settings)
+        self.assertNotIn("Provisioning__SeedVaultUri", settings)
 
     def test_production_parameters_are_non_secret_identifiers(self):
         for name, value in self.resolved.items():
@@ -125,8 +194,14 @@ class RenderTests(unittest.TestCase):
     def test_production_render_succeeds_with_every_decision_made(self):
         rendered = renderer.render(self.workers, self.resolved, self.pending)
         self.assertEqual("9.160.165.252", rendered["Deployment__AzureProvider__Runner__SqlBootstrapIp"])
+        self.assertFalse(any(key.startswith("Provisioning__") or key.startswith("ARM_") for key in rendered))
         self.assertFalse(any(key.startswith("Staging__LateSuccessLever__") for key in rendered))
         self.assertFalse(any(key.startswith("Staging__LateSuccessLever__") for key in self.workers))
+
+    def test_production_render_key_set_matches_main(self):
+        rendered = renderer.render(self.workers, self.resolved, self.pending)
+        self.assertEqual(MAIN_WORKER_TEMPLATE_KEYS, set(self.workers))
+        self.assertEqual(MAIN_WORKER_TEMPLATE_KEYS, set(rendered))
 
     def test_render_with_resolved_decisions_produces_only_template_keys(self):
         rendered = renderer.render(self.workers, self.resolved, self.pending, self.overrides)
@@ -214,6 +289,20 @@ class RenderTests(unittest.TestCase):
         payload = renderer.load_rollback()
         self.assertEqual({*renderer.WORKER_ENABLE_KEYS, renderer.HEALTH_MONITOR_KEY}, {entry["name"] for entry in payload})
         self.assertTrue(all(entry["value"] == "false" for entry in payload))
+        self.assertNotIn("Provisioning__WorkerEnabled", {entry["name"] for entry in payload})
+
+    def test_staging_rollback_turns_the_pulumi_worker_off_and_keeps_msi(self):
+        payload = renderer.load_rollback(environment="staging")
+        names = {entry["name"]: entry["value"] for entry in payload}
+        self.assertEqual("false", names["Provisioning__WorkerEnabled"])
+        self.assertEqual("true", names["ARM_USE_MSI"])
+        self.assertEqual("d57a6279-2806-4289-9442-d862b53451a1", names["ARM_CLIENT_ID"])
+        self.assertNotIn("ARM_USE_CLI", names)
+        self.assertTrue(set(renderer.ROLLBACK_KEYS).issubset(names))
+        self.assertTrue(set(renderer.PULUMI_ROLLBACK_KEYS).issubset(names))
+        self.assertIn("Provisioning__WorkerEnabled", renderer.PULUMI_ROLLBACK_KEYS)
+        self.assertIn("ARM_USE_MSI", renderer.PULUMI_ROLLBACK_KEYS)
+        self.assertIn("Provisioning__SeedVaultUri", renderer.PULUMI_ROLLBACK_KEYS)
 
     def test_rollback_that_leaves_the_health_monitor_on_is_refused(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -272,9 +361,18 @@ class RenderTests(unittest.TestCase):
     def test_cli_status_and_pending_exit_code(self):
         self.assertEqual(0, renderer.main(["status"]))
         with tempfile.TemporaryDirectory() as directory:
-            self.assertEqual(0, renderer.main(["workers", "--output", str(Path(directory) / "w.json")]))
+            production_workers = Path(directory) / "w.json"
+            self.assertEqual(0, renderer.main(["workers", "--output", str(production_workers)]))
+            self.assertEqual(
+                MAIN_WORKER_TEMPLATE_KEYS,
+                {entry["name"] for entry in json.loads(production_workers.read_text())})
             self.assertEqual(0, renderer.main(["release-verification", "--output", str(Path(directory) / "v.json")]))
             self.assertEqual(0, renderer.main(["rollback", "--output", str(Path(directory) / "r.json")]))
+            staging_rollback = Path(directory) / "sr.json"
+            self.assertEqual(0, renderer.main(["rollback", "--environment", "staging", "--output", str(staging_rollback)]))
+            staging_names = {entry["name"]: entry["value"] for entry in json.loads(staging_rollback.read_text())}
+            self.assertEqual("false", staging_names["Provisioning__WorkerEnabled"])
+            self.assertEqual("true", staging_names["ARM_USE_MSI"])
             handoff = Path(directory) / "h.json"
             self.assertEqual(0, renderer.main(["handoff", "--output", str(handoff)]))
             self.assertEqual(0, renderer.main(["handoff-rollback", "--output", str(Path(directory) / "hr.json")]))
@@ -288,6 +386,36 @@ class RenderTests(unittest.TestCase):
             settings = {entry["name"]: entry["value"] for entry in json.loads(output.read_text())}
         self.assertEqual("1", settings["Deployment__AzureProvider__BatchSize"])
         self.assertEqual("00:45:00", settings["Deployment__AzureProvider__Runner__CommandTimeout"])
+        self.assertEqual("true", settings["Provisioning__WorkerEnabled"])
+        self.assertEqual("staging", settings["Provisioning__EnvironmentName"])
+        self.assertEqual("82a63610-2874-4b18-ad8f-7f57b9b8ca0f", settings["ARM_SUBSCRIPTION_ID"])
+        self.assertEqual("f35bcd45-7991-4e24-84f1-e964394501ad", settings["ARM_TENANT_ID"])
+        self.assertEqual("true", settings["ARM_USE_MSI"])
+        self.assertEqual("d57a6279-2806-4289-9442-d862b53451a1", settings["ARM_CLIENT_ID"])
+        self.assertNotIn("ARM_USE_CLI", settings)
+        self.assertEqual("d57a6279-2806-4289-9442-d862b53451a1", settings["Provisioning__CredentialLocator"])
+        self.assertEqual("2b9e04ce-ccf6-4931-9f34-862c374fcf78", settings["Provisioning__SqlBootstrapObjectId"])
+        self.assertEqual("mi-elsa-cloud-provisioner-staging-weu", settings["Provisioning__SqlBootstrapLogin"])
+        self.assertEqual("stpulumitud53zotij43k/pulumi-state", settings["Provisioning__StateBackendLocator"])
+        self.assertEqual(
+            "azurekeyvault://ecseedkvtud53zotij43k.vault.azure.net/keys/pulumi-secrets",
+            settings["Provisioning__SecretsProviderLocator"])
+        self.assertEqual("https://ecseedkvtud53zotij43k.vault.azure.net/", settings["Provisioning__SeedVaultUri"])
+        self.assertNotRegex(settings["Provisioning__StateBackendLocator"], r"(?i)key|sas|sig=")
+        self.assertNotRegex(settings["Provisioning__SecretsProviderLocator"], r"(?i)sas|sig=")
+
+    def test_pulumi_overlay_is_refused_when_it_would_use_the_azure_cli(self):
+        template = dict(self.workers)
+        template.update(renderer.PULUMI_WORKER_SETTINGS)
+        template["ARM_USE_MSI"] = "false"
+        with self.assertRaises(renderer.CompositionError) as raised:
+            renderer.render(template, self.resolved, self.pending)
+        self.assertIn("ARM_USE_MSI", str(raised.exception))
+        template["ARM_USE_MSI"] = "true"
+        template["ARM_USE_CLI"] = "true"
+        with self.assertRaises(renderer.CompositionError) as cli:
+            renderer.render(template, self.resolved, self.pending)
+        self.assertIn("Azure CLI", str(cli.exception))
 
     def test_cli_has_no_value_override_so_only_the_checked_in_parameters_reach_production(self):
         for argv in (["workers", "--output", "x.json", "--set", "SqlBootstrapIp=203.0.113.10"],

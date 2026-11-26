@@ -21,8 +21,11 @@ Contributor has both; Reader lacks the list action). It lists the app setting
 names to find plain values; the CLI fetches the values but the script keeps
 only the names, and it prints names and status only.
 
-No other identity receives a data-plane role. An operator writes each secret
-value after the vault exists. CI never writes a secret value to the vault.
+This module grants a data-plane role only to the API identity. The staging
+Pulumi proof (#1034) uses a dedicated seed vault in
+`infra/control-pulumi-provisioning` and must not grant the provisioner any
+role on this vault. An operator writes each secret value after the vault
+exists. CI never writes a secret value to the vault.
 Before the reference switch (pre-cutover mode, #865), a production `--reapply`
 puts back the plain App Service values it captured, as it did before #863.
 

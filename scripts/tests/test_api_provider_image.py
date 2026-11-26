@@ -47,6 +47,15 @@ class ApiProviderImageTests(unittest.TestCase):
         self.assertIn("icu tzdata libstdc++ openssl-libs", self.source)
         self.assertNotIn("DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=true", self.source)
 
+    def test_pulumi_cli_is_version_and_checksum_pinned_for_supported_platforms(self) -> None:
+        self.assertIn("ARG PULUMI_VERSION=3.278.0", self.source)
+        self.assertRegex(self.source, r"ARG PULUMI_AMD64_SHA256=[0-9a-f]{64}")
+        self.assertRegex(self.source, r"ARG PULUMI_ARM64_SHA256=[0-9a-f]{64}")
+        self.assertIn("pulumi-v${PULUMI_VERSION}-linux-${pulumi_arch}.tar.gz", self.source)
+        self.assertIn('echo "${pulumi_sha256}  /tmp/pulumi.tar.gz" | sha256sum --check --status', self.source)
+        self.assertIn("/usr/local/bin/pulumi version >/dev/null", self.source)
+        self.assertEqual(1, self.source.count("ARG PULUMI_VERSION="))
+
     def test_pulumi_plugins_are_checksum_pinned_and_baked(self) -> None:
         self.assertIn("ARG PULUMI_AZURE_NATIVE_VERSION=3.11.0", self.source)
         self.assertIn("ARG PULUMI_RANDOM_VERSION=4.18.5", self.source)
@@ -64,6 +73,7 @@ class ApiProviderImageTests(unittest.TestCase):
             "Deployment__AzureProvider__Runner__Enabled=true",
             "Deployment__AzureProvider__InstanceLifecycle__Enabled=true",
             "Deployment__ElsaInstanceLifecycle__Enabled=true",
+            "Provisioning__WorkerEnabled=true",
         ):
             self.assertNotIn(forbidden, self.source)
 

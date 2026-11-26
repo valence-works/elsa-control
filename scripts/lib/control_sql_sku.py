@@ -61,6 +61,15 @@ def staging_parameters_document() -> dict[str, object]:
             "environmentName": {"value": STAGING_ENVIRONMENT_NAME},
             "location": {"value": STAGING_LOCATION},
             "principalId": {"value": ""},
+            "enablePulumiProvisioning": {"value": True},
+            "pulumiProvisionerPrincipalId": {"value": "2b9e04ce-ccf6-4931-9f34-862c374fcf78"},
+            "pulumiApiEgressSubnetId": {
+                "value": (
+                    "/subscriptions/8e23037a-420f-4ad0-9594-9d194de29e84/resourceGroups/"
+                    "rg-valence-control-staging/providers/Microsoft.Network/virtualNetworks/"
+                    "vnet-valence-control-staging-weu/subnets/snet-api-egress"
+                )
+            },
             **_parameter_values(STAGING_SKU),
         },
     }
