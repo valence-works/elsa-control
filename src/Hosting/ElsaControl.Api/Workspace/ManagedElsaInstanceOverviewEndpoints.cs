@@ -169,8 +169,10 @@ public static class ManagedElsaInstanceOverviewEndpoints
             if (instance is null)
                 return Results.NotFound();
 
-            var canOpen = (await permissions.GetEffectivePermissionsAsync(workspaceId, access.AccountId, cancellationToken))
-                .Has(ManagedElsaInstancePermissions.Open);
+            var effectivePermissions = await permissions.GetEffectivePermissionsAsync(
+                workspaceId, access.AccountId, cancellationToken);
+            var canOpen = effectivePermissions.Has(ManagedElsaInstancePermissions.Open);
+            var canDelete = effectivePermissions.Has(ManagedElsaInstancePermissions.Delete);
             var activeOperations = await queries.GetActiveOperationsAsync(workspaceId, [instance.Id], cancellationToken);
             var activeOperation = activeOperations.GetValueOrDefault(instance.Id);
             var lastPage = await queries.ListOperationsAsync(
@@ -191,17 +193,21 @@ public static class ManagedElsaInstanceOverviewEndpoints
                 access.OrganizationId, ElsaInstanceOperationAction.Restart, cancellationToken: cancellationToken);
             var applyGate = await commercialGate.EvaluateAsync(
                 access.OrganizationId, ElsaInstanceOperationAction.UpdateIntent, cancellationToken: cancellationToken);
+            var deleteGate = await commercialGate.EvaluateAsync(
+                access.OrganizationId, ElsaInstanceOperationAction.Delete, cancellationToken: cancellationToken);
             var response = ManagedElsaInstanceOverviewProjection.ToOverview(
                 instance,
                 workspaceId,
                 access.Role,
                 canOpen,
+                canDelete,
                 identity,
                 activeOperation,
                 lastOperation,
                 health,
                 restartGate,
-                applyGate);
+                applyGate,
+                deleteGate);
             context.Response.Headers.ETag = StrongETag(instance.Version);
             return Results.Ok(response);
         }).RequireWorkspaceAccess().AllowCloudBff().AllowHubBff();
@@ -695,6 +701,35 @@ public static class ManagedElsaInstanceOverviewEndpoints
         return ElsaInstanceStateMachine.CanRestart(instance) ? null : InstanceNotReadyCode;
     }
 
+    // Delete is a safe exit: Failed/provisioning stay allowed. A tombstone is
+    // denied. Deleting intent is denied unless POST …/delete can resume a
+    // RecoveryRequired Delete with a fresh confirmation. Active non-Delete
+    // work is not a denial because that route waits behind or supersedes the
+    // predecessor.
+    internal static string? CustomerDeleteDenialCode(
+        ElsaInstance instance,
+        ElsaInstanceOperationSummary? activeOperation)
+    {
+        if (instance.ObservedLifecycle == ElsaObservedLifecycle.Deleted)
+            return InstanceDeletingCode;
+        if (instance.Intent.DesiredLifecycle == ElsaDesiredLifecycle.Deleting &&
+            !IsResumableCustomerDelete(activeOperation))
+            return InstanceDeletingCode;
+        return null;
+    }
+
+    internal static bool IsResumableCustomerDelete(ElsaInstanceOperationSummary? activeOperation) =>
+        activeOperation is
+        {
+            Action: ElsaInstanceOperationAction.Delete,
+            State: ElsaInstanceOperationState.RecoveryRequired
+        };
+
+    internal static bool HasBlockingCustomerDelete(ElsaInstanceOperationSummary? activeOperation) =>
+        activeOperation is { Action: ElsaInstanceOperationAction.Delete } &&
+        ElsaInstanceOperationGuard.IsBlocking(activeOperation.State) &&
+        !IsResumableCustomerDelete(activeOperation);
+
     internal static bool TryReadMajor(string releaseLine, out int major)
     {
         var firstPart = releaseLine.Split('.', 2)[0];
@@ -709,12 +744,14 @@ internal static class ManagedElsaInstanceOverviewProjection
         Guid workspaceId,
         WorkspaceRole role,
         bool canOpenPermission,
+        bool canDeletePermission,
         ManagedElsaInstanceIdentity? identity,
         ElsaInstanceOperationSummary? activeOperation,
         ElsaInstanceOperationSummary? lastOperation,
         ManagedLifecycleOperationalHealthResult health,
         ElsaInstanceCommercialGateDecision restartGate,
-        ElsaInstanceCommercialGateDecision applyGate)
+        ElsaInstanceCommercialGateDecision applyGate,
+        ElsaInstanceCommercialGateDecision deleteGate)
     {
         var observed = ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(instance, activeOperation);
         var healthy = ManagedElsaInstanceCustomerProjection.IsCustomerHealthy(
@@ -730,9 +767,12 @@ internal static class ManagedElsaInstanceOverviewProjection
         var unavailableReason = ManagedElsaInstanceCustomerProjection.UnavailableReasonCode(
             canOpenPermission, healthy, handoffConfigured, currentIdentity is not null, observed, activeOperation);
         var canMutate = role is WorkspaceRole.Owner or WorkspaceRole.SourceAdmin;
+        var canDelete = canMutate && canDeletePermission;
         var hasActiveOperation = activeOperation is not null &&
                                  ElsaInstanceOperationGuard.IsBlocking(activeOperation.State);
         var mutationDenial = ManagedElsaInstanceOverviewEndpoints.CustomerMutationDenialCode(instance);
+        var deleteDenial = ManagedElsaInstanceOverviewEndpoints.CustomerDeleteDenialCode(instance, activeOperation);
+        var hasBlockingDelete = ManagedElsaInstanceOverviewEndpoints.HasBlockingCustomerDelete(activeOperation);
 
         return new ManagedElsaInstanceOverviewResponse(
             new ManagedElsaInstanceOverviewSummaryResponse(
@@ -787,7 +827,8 @@ internal static class ManagedElsaInstanceOverviewProjection
             new ManagedElsaInstanceOverviewAllowedActionsResponse(
                 ActionDecision(canMutate, hasActiveOperation, mutationDenial, restartGate),
                 ActionDecision(canMutate, hasActiveOperation, mutationDenial, applyGate),
-                new ManagedElsaInstanceOverviewActionDecisionResponse(canOpen, canOpen ? null : unavailableReason)));
+                new ManagedElsaInstanceOverviewActionDecisionResponse(canOpen, canOpen ? null : unavailableReason),
+                ActionDecision(canDelete, hasBlockingDelete, deleteDenial, deleteGate)));
     }
 
     internal static ManagedElsaInstanceActivityItemResponse ToActivityItem(
@@ -984,7 +1025,8 @@ public sealed record ManagedElsaInstanceOverviewLastOperationResponse(
 public sealed record ManagedElsaInstanceOverviewAllowedActionsResponse(
     ManagedElsaInstanceOverviewActionDecisionResponse Restart,
     ManagedElsaInstanceOverviewActionDecisionResponse ApplyRelease,
-    ManagedElsaInstanceOverviewActionDecisionResponse Open);
+    ManagedElsaInstanceOverviewActionDecisionResponse Open,
+    ManagedElsaInstanceOverviewActionDecisionResponse Delete);
 
 public sealed record ManagedElsaInstanceOverviewActionDecisionResponse(bool Allowed, string? ReasonCode);
 

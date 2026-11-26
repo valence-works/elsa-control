@@ -5245,6 +5245,7 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
             instance.WorkspaceId,
             WorkspaceRole.Owner,
             canOpenPermission: true,
+            canDeletePermission: true,
             identity,
             operation,
             lastOperation: null,
@@ -5255,7 +5256,8 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
                 DateTimeOffset.UtcNow,
                 []),
             new ElsaInstanceCommercialGateDecision(true, "commercial.allowed", "allowed"),
-            new ElsaInstanceCommercialGateDecision(true, "commercial.allowed", "allowed"));
+            new ElsaInstanceCommercialGateDecision(true, "commercial.allowed", "allowed"),
+            ElsaInstanceCommercialGateDecision.Allow());
 
     private static ElsaInstanceIntent Intent() => new(
         new ElsaReleaseIntent("valence-runtime", "3.8", channel: "stable"),
