@@ -152,8 +152,13 @@ public sealed class InMemoryProvisioningStore :
 
             var completed = ProvisioningOperationStateMachine.Transition(operation, state, now, failureCode);
             _operations[operationId] = completed;
-            if (_locks.TryGetValue(operation.StackName, out var holder) && holder == operationId)
+            if (ProvisioningOperationStateMachine.IsTerminal(completed.State)
+                && _locks.TryGetValue(operation.StackName, out var holder)
+                && holder == operationId)
+            {
                 _locks.Remove(operation.StackName);
+            }
+
             return Task.FromResult<ProvisioningOperation?>(completed);
         }
     }

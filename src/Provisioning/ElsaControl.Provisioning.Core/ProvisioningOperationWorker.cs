@@ -70,12 +70,26 @@ public sealed class ProvisioningOperationWorker(
 
             try
             {
+                if (claimed.Command == ProvisioningCommand.Cancel)
+                {
+                    var cancelling = await operations.CompleteAsync(
+                        claimed.Id,
+                        ProvisioningOperationState.Cancelling,
+                        _timeProvider.GetUtcNow(),
+                        failureCode: null,
+                        cancellationToken).ConfigureAwait(false);
+                    if (cancelling is not null)
+                        claimed = cancelling;
+                }
+
                 var result = await RunProviderAsync(claimed, request, cancellationToken).ConfigureAwait(false);
                 await events.AppendAsync(result.Events, cancellationToken).ConfigureAwait(false);
-                var terminal = result.Succeeded
-                    ? ProvisioningOperationState.Succeeded
-                    : claimed.Command == ProvisioningCommand.Cancel
+                var terminal = claimed.Command == ProvisioningCommand.Cancel
+                    ? result.Succeeded
                         ? ProvisioningOperationState.Cancelled
+                        : ProvisioningOperationState.Failed
+                    : result.Succeeded
+                        ? ProvisioningOperationState.Succeeded
                         : ProvisioningOperationState.Failed;
                 var completed = await operations.CompleteAsync(
                     claimed.Id,

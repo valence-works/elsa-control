@@ -92,8 +92,10 @@ public sealed class ProvisioningService(
         var hash = InMemoryProvisioningStore.HashRequest(request);
         var result = await operations.CreateOrGetAsync(request, hash, _timeProvider.GetUtcNow(), cancellationToken)
             .ConfigureAwait(false);
-        if (!result.Replayed)
-            ProvisioningRequestBuffer.Put(result.OperationId, request);
+        if (result.Replayed)
+            return result;
+
+        ProvisioningRequestBuffer.Put(result.OperationId, request);
         var kind = result.LockConflict
             ? ProvisioningEventKind.LockConflicted
             : ProvisioningEventKind.OperationQueued;

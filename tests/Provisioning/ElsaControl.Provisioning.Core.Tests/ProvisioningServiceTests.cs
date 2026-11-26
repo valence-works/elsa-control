@@ -146,8 +146,79 @@ public sealed class ProvisioningServiceTests
             ProvisioningFixtures.PlatformSpec(),
             "replay-key");
         var first = await service.ProvisionAsync(request);
+        var eventsAfterFirst = await service.ListEventsAsync(first.OperationId);
         var second = await service.ProvisionAsync(request);
         Assert.True(second.Replayed);
         Assert.Equal(first.OperationId, second.OperationId);
+        Assert.Equal(eventsAfterFirst.Count, (await service.ListEventsAsync(first.OperationId)).Count);
+    }
+
+    [Fact]
+    public async Task Cancel_through_the_worker_destroys_the_stack_and_marks_cancelled()
+    {
+        var store = new InMemoryProvisioningStore();
+        var provider = new FakeInfrastructureProvider();
+        var service = new ProvisioningService(store, store);
+        var worker = new ProvisioningOperationWorker(store, store, provider);
+
+        await service.ProvisionAsync(ProvisioningFixtures.Request(
+            ProvisioningCommand.Provision,
+            ProvisioningFixtures.PlatformTarget(),
+            ProvisioningFixtures.PlatformSpec(),
+            "cancel-platform"));
+        await worker.ProcessOnceAsync();
+        await service.ProvisionAsync(ProvisioningFixtures.Request(
+            ProvisioningCommand.Provision,
+            ProvisioningFixtures.EngineTarget("cancel-engine"),
+            ProvisioningFixtures.EngineSpec(),
+            "cancel-provision",
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["engineName"] = "cancel-engine" }));
+        await worker.ProcessOnceAsync();
+        Assert.True(provider.StackExists("cancel-engine"));
+
+        var cancel = await service.CancelAsync(ProvisioningFixtures.Request(
+            ProvisioningCommand.Cancel,
+            ProvisioningFixtures.EngineTarget("cancel-engine"),
+            ProvisioningFixtures.EngineSpec(),
+            "cancel-run"));
+        Assert.Equal(ProvisioningOperationState.Queued, cancel.State);
+        Assert.Equal(1, await worker.ProcessOnceAsync());
+
+        var completed = await service.GetOperationAsync(cancel.OperationId);
+        Assert.Equal(ProvisioningOperationState.Cancelled, completed!.State);
+        Assert.False(provider.StackExists("cancel-engine"));
+        var cancelEvents = await service.ListEventsAsync(cancel.OperationId);
+        Assert.Contains(cancelEvents, value => value.Kind == ProvisioningEventKind.OperationCancelled);
+        foreach (var value in cancelEvents)
+            Assert.False(ProvisioningEventSanitizer.ContainsSensitiveToken(value.Message));
+    }
+
+    [Fact]
+    public async Task Cancelling_keeps_the_stack_lock()
+    {
+        var store = new InMemoryProvisioningStore();
+        var service = new ProvisioningService(store, store);
+        var first = await service.ProvisionAsync(ProvisioningFixtures.Request(
+            ProvisioningCommand.Provision,
+            ProvisioningFixtures.PlatformTarget("lock-cancel"),
+            ProvisioningFixtures.PlatformSpec("lock-cancel"),
+            "lock-cancel-first"));
+        var claimed = await store.ClaimAsync(first.OperationId, DateTimeOffset.UtcNow);
+        Assert.Equal(ProvisioningOperationState.Running, claimed!.State);
+        var cancelling = await store.CompleteAsync(
+            first.OperationId,
+            ProvisioningOperationState.Cancelling,
+            DateTimeOffset.UtcNow,
+            failureCode: null);
+        Assert.Equal(ProvisioningOperationState.Cancelling, cancelling!.State);
+        Assert.Equal(first.OperationId, await store.GetHolderAsync("lock-cancel"));
+
+        var second = await service.ProvisionAsync(ProvisioningFixtures.Request(
+            ProvisioningCommand.Provision,
+            ProvisioningFixtures.PlatformTarget("lock-cancel"),
+            ProvisioningFixtures.PlatformSpec("lock-cancel"),
+            "lock-cancel-second"));
+        Assert.True(second.LockConflict);
+        Assert.Equal(ProvisioningOperationState.LockConflict, second.State);
     }
 }
