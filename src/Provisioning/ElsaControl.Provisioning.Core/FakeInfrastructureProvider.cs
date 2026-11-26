@@ -37,6 +37,12 @@ public sealed class FakeInfrastructureProvider : IInfrastructureProvider, ICrede
     /// </summary>
     public bool CancelFails { get; set; }
 
+    /// <summary>
+    /// Returns a failed run with no engine events so tests can cover a
+    /// terminal ledger write that is not driven by Pulumi.
+    /// </summary>
+    public bool FailWithoutEvents { get; set; }
+
     public TaskCompletionSource Started { get; } = new();
 
     public int CancelCalls { get; private set; }
@@ -179,6 +185,9 @@ public sealed class FakeInfrastructureProvider : IInfrastructureProvider, ICrede
         ArgumentNullException.ThrowIfNull(operation);
         ArgumentNullException.ThrowIfNull(request);
         cancellationToken.ThrowIfCancellationRequested();
+        if (FailWithoutEvents)
+            return ProviderRunResult.Fail([], ProvisioningFailureCodes.ProviderFailed);
+
         if (Stall > TimeSpan.Zero)
         {
             Started.TrySetResult();

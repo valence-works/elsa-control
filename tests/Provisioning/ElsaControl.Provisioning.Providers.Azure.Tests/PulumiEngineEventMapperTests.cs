@@ -13,7 +13,6 @@ public sealed class PulumiEngineEventMapperTests
             operationId,
             new PulumiEngineEventFacts(
                 Sequence: 1,
-                Cancelled: false,
                 PreResourceType: "azure-native:resources:ResourceGroup",
                 OutputsResourceType: null,
                 FailedResourceType: null,
@@ -49,7 +48,6 @@ public sealed class PulumiEngineEventMapperTests
             Guid.NewGuid(),
             new PulumiEngineEventFacts(
                 Sequence: 9,
-                Cancelled: false,
                 PreResourceType: null,
                 OutputsResourceType: null,
                 FailedResourceType: null,
@@ -72,7 +70,6 @@ public sealed class PulumiEngineEventMapperTests
             Guid.NewGuid(),
             new PulumiEngineEventFacts(
                 Sequence: 8,
-                Cancelled: false,
                 PreResourceType: null,
                 OutputsResourceType: null,
                 FailedResourceType: "azure-native:sql:Server",
@@ -96,43 +93,61 @@ public sealed class PulumiEngineEventMapperTests
     }
 
     [Fact]
-    public void Cancel_and_summary_are_ordered_by_engine_sequence()
+    public void Started_and_summary_are_ordered_by_engine_sequence()
     {
         var operationId = Guid.NewGuid();
         var now = DateTimeOffset.UtcNow;
         var events = new[]
         {
-            PulumiEngineEventMapper.Map(operationId, new PulumiEngineEventFacts(3, false, null, null, null, false, true), now),
+            PulumiEngineEventMapper.Map(operationId, new PulumiEngineEventFacts(3, null, null, null, false, true), now),
             PulumiEngineEventMapper.Map(
                 operationId,
-                new PulumiEngineEventFacts(1, false, "azure-native:resources:ResourceGroup", null, null, false, false),
+                new PulumiEngineEventFacts(1, "azure-native:resources:ResourceGroup", null, null, false, false),
                 now),
-            PulumiEngineEventMapper.Map(operationId, new PulumiEngineEventFacts(2, true, null, null, null, false, false), now)
+            PulumiEngineEventMapper.Map(operationId, new PulumiEngineEventFacts(2, null, null, null, false, false), now)
         }.SelectMany(item => item).OrderBy(item => item.EngineSequence).ToArray();
 
-        Assert.Equal(new int?[] { 1, 2, 3 }, events.Select(item => item.EngineSequence).ToArray());
+        Assert.Equal(new int?[] { 1, 3 }, events.Select(item => item.EngineSequence).ToArray());
         Assert.Equal(ProvisioningEventKind.ResourceStarted, events[0].Kind);
-        Assert.Equal(ProvisioningEventKind.OperationCancelled, events[1].Kind);
-        Assert.Equal(PulumiEngineEventMapper.ApplyCompletedMessage, events[2].Message);
+        Assert.Equal(PulumiEngineEventMapper.ApplyCompletedMessage, events[1].Message);
+        Assert.DoesNotContain(events, item => item.Kind == ProvisioningEventKind.OperationCancelled);
     }
 
     [Fact]
-    public void Cancel_does_not_also_emit_resource_events_from_the_same_engine_event()
+    public void Pulumi_cancel_event_is_ignored()
     {
         var mapped = PulumiEngineEventMapper.Map(
             Guid.NewGuid(),
-            new PulumiEngineEventFacts(
-                Sequence: 4,
-                Cancelled: true,
-                PreResourceType: "azure-native:app:ContainerApp",
-                OutputsResourceType: "azure-native:app:ContainerApp",
-                FailedResourceType: "azure-native:app:ContainerApp",
-                DiagnosticError: true,
-                Summary: true),
+            new PulumiEngineEventFacts(4, null, null, null, false, false),
             DateTimeOffset.UtcNow).ToArray();
 
-        Assert.Single(mapped);
-        Assert.Equal(ProvisioningEventKind.OperationCancelled, mapped[0].Kind);
-        Assert.Equal(PulumiEngineEventMapper.UpdateCancelledMessage, mapped[0].Message);
+        Assert.Empty(mapped);
+    }
+
+    [Fact]
+    public void A_successful_update_stream_does_not_emit_cancelled()
+    {
+        var operationId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        var events = new[]
+        {
+            PulumiEngineEventMapper.Map(
+                operationId,
+                new PulumiEngineEventFacts(1, "azure-native:resources:ResourceGroup", null, null, false, false),
+                now),
+            PulumiEngineEventMapper.Map(
+                operationId,
+                new PulumiEngineEventFacts(2, null, "azure-native:resources:ResourceGroup", null, false, false),
+                now),
+            PulumiEngineEventMapper.Map(operationId, new PulumiEngineEventFacts(3, null, null, null, false, true), now),
+            PulumiEngineEventMapper.Map(operationId, new PulumiEngineEventFacts(4, null, null, null, false, false), now)
+        }.SelectMany(item => item).ToArray();
+
+        Assert.Equal(3, events.Length);
+        Assert.Equal(ProvisioningEventKind.ResourceStarted, events[0].Kind);
+        Assert.Equal(ProvisioningEventKind.ResourceSucceeded, events[1].Kind);
+        Assert.Equal(PulumiEngineEventMapper.ApplyCompletedMessage, events[2].Message);
+        Assert.DoesNotContain(events, item => item.Kind == ProvisioningEventKind.OperationCancelled);
+        Assert.DoesNotContain(events, item => item.Kind == ProvisioningEventKind.OperationFailed);
     }
 }

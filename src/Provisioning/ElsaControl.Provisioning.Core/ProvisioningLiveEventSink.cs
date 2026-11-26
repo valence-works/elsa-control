@@ -6,7 +6,8 @@ namespace ElsaControl.Provisioning.Core;
 
 /// <summary>
 /// Appends sanitised events to the module store and, when the fence is still
-/// held, to Control's existing step ledger. A stale run cannot write.
+/// held, to Control's existing step ledger. Live appends are one conditional
+/// write on owner plus token. A stale run cannot write.
 /// </summary>
 public sealed class ProvisioningLiveEventSink(
     IProvisioningOperationStore operations,
@@ -40,21 +41,37 @@ public sealed class ProvisioningLiveEventSink(
             return;
         }
 
-        if (!await operations
-                .HoldsFenceAsync(bound.Operation.Id, bound.Operation.FencingToken, cancellationToken)
+        if (!await eventStore
+                .TryAppendIfFenceHeldAsync(
+                    bound.Operation.Id,
+                    bound.Operation.FencingToken,
+                    events,
+                    cancellationToken)
                 .ConfigureAwait(false))
         {
             _runs.TryRemove(operationId, out _);
             return;
         }
 
+        await WriteLedgerAsync(bound.Operation, bound.Request, events, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public async Task PublishTerminalAsync(
+        ProvisioningOperation operation,
+        ProvisioningRequest? request,
+        IReadOnlyList<ProvisioningEvent> events,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ArgumentNullException.ThrowIfNull(operation);
+        ArgumentNullException.ThrowIfNull(events);
+        if (events.Count == 0)
+            return;
+
         await eventStore.AppendAsync(events, cancellationToken).ConfigureAwait(false);
-        var ordered = events
-            .OrderBy(item => item.EngineSequence ?? int.MaxValue)
-            .ThenBy(item => item.OccurredAt)
-            .ToArray();
-        await _ledger
-            .TryWriteAsync(bound.Operation, bound.Request, ordered, cancellationToken)
+        var bound = _runs.TryGetValue(operation.Id, out var live) ? live : new BoundRun(operation, request);
+        await WriteLedgerAsync(bound.Operation, bound.Request ?? request, events, cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -74,7 +91,22 @@ public sealed class ProvisioningLiveEventSink(
         await _ledger.HeartbeatAsync(bound.Operation, bound.Request, cancellationToken).ConfigureAwait(false);
     }
 
-    private sealed record BoundRun(ProvisioningOperation Operation, ProvisioningRequest Request)
+    private async Task WriteLedgerAsync(
+        ProvisioningOperation operation,
+        ProvisioningRequest? request,
+        IReadOnlyList<ProvisioningEvent> events,
+        CancellationToken cancellationToken)
+    {
+        var ordered = events
+            .OrderBy(item => item.EngineSequence ?? int.MaxValue)
+            .ThenBy(item => item.OccurredAt)
+            .ToArray();
+        await _ledger
+            .TryWriteAsync(operation, request, ordered, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private sealed record BoundRun(ProvisioningOperation Operation, ProvisioningRequest? Request)
     {
         public IDisposable DisposeAction(Action release) => new Binder(release);
 

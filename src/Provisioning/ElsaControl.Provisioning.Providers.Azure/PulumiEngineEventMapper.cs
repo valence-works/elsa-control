@@ -8,13 +8,15 @@ namespace ElsaControl.Provisioning.Providers.Azure;
 /// Maps Pulumi engine events to sanitised provider-neutral events. Resource
 /// identifiers, endpoints, secrets, and raw diagnostic text never leave this
 /// mapper. Hub-facing step names are applied later by the step ledger.
+/// Pulumi emits <c>CancelEvent</c> when an update completes successfully as
+/// well as when the user cancels; that event is ignored here. Cancelled is
+/// derived only from Control's own terminal state.
 /// </summary>
 public static class PulumiEngineEventMapper
 {
     public const string ResourceStartedMessage = "Resource started.";
     public const string ResourceSucceededMessage = "Resource succeeded.";
     public const string ResourceFailedMessage = "Resource failed.";
-    public const string UpdateCancelledMessage = "Update cancelled.";
     public const string ApplyCompletedMessage = "Apply completed.";
 
     public static IEnumerable<ProvisioningEvent> Map(
@@ -27,7 +29,6 @@ public static class PulumiEngineEventMapper
             operationId,
             new PulumiEngineEventFacts(
                 engineEvent.Sequence,
-                engineEvent.CancelEvent is not null,
                 engineEvent.ResourcePreEvent?.Metadata?.Type,
                 engineEvent.ResourceOutputsEvent?.Metadata?.Type,
                 engineEvent.ResourceOperationFailedEvent?.Metadata?.Type,
@@ -44,18 +45,6 @@ public static class PulumiEngineEventMapper
     {
         if (facts.Sequence < 0)
             throw new ArgumentOutOfRangeException(nameof(facts));
-
-        if (facts.Cancelled)
-        {
-            yield return Event(
-                operationId,
-                ProvisioningEventKind.OperationCancelled,
-                ProvisioningCapability.ContainerRuntime,
-                UpdateCancelledMessage,
-                now,
-                facts.Sequence);
-            yield break;
-        }
 
         if (!string.IsNullOrWhiteSpace(facts.PreResourceType))
         {
@@ -143,11 +132,11 @@ public static class PulumiEngineEventMapper
 
 /// <summary>
 /// The customer-safe facts extracted from one Pulumi engine event. Tests use
-/// this instead of constructing Automation API types.
+/// this instead of constructing Automation API types. Pulumi's cancel event is
+/// not a fact: it fires on successful completion as well as user cancel.
 /// </summary>
 public readonly record struct PulumiEngineEventFacts(
     int Sequence,
-    bool Cancelled,
     string? PreResourceType,
     string? OutputsResourceType,
     string? FailedResourceType,

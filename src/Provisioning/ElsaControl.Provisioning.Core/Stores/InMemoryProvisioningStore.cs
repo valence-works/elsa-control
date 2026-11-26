@@ -252,6 +252,34 @@ public sealed class InMemoryProvisioningStore :
         return Task.CompletedTask;
     }
 
+    public Task<bool> TryAppendIfFenceHeldAsync(
+        Guid operationId,
+        long fencingToken,
+        IReadOnlyList<ProvisioningEvent> events,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ArgumentNullException.ThrowIfNull(events);
+        lock (_gate)
+        {
+            if (!_operations.TryGetValue(operationId, out var operation))
+                return Task.FromResult(false);
+            var lockKey = ProvisioningStackLockKey.Format(operation.StackKind, operation.StackName);
+            if (!HoldsFence(lockKey, operationId, fencingToken))
+                return Task.FromResult(false);
+
+            foreach (var value in events)
+            {
+                var sanitised = ProvisioningEventSanitizer.Sanitize(value);
+                var list = _events.GetOrAdd(sanitised.OperationId, _ => []);
+                lock (list)
+                    list.Add(sanitised);
+            }
+
+            return Task.FromResult(true);
+        }
+    }
+
     public Task<IReadOnlyList<ProvisioningEvent>> ListAsync(Guid operationId, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();

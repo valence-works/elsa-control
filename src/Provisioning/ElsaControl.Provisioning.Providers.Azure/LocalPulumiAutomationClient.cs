@@ -59,18 +59,31 @@ public sealed class LocalPulumiAutomationClient(
             }
 
             var events = new List<ProvisioningEvent>();
+            await using var pump = liveEvents is null
+                ? null
+                : new ProvisioningLiveEventPump(operation.Id, liveEvents, _logger);
             void OnEvent(Pulumi.Automation.Events.EngineEvent engineEvent)
             {
-                var mapped = PulumiEngineEventMapper.Map(operation.Id, engineEvent, DateTimeOffset.UtcNow).ToList();
-                if (mapped.Count == 0)
-                    return;
-                if (liveEvents is null)
+                try
                 {
-                    events.AddRange(mapped);
-                    return;
-                }
+                    var mapped = PulumiEngineEventMapper.Map(operation.Id, engineEvent, DateTimeOffset.UtcNow).ToList();
+                    if (mapped.Count == 0)
+                        return;
+                    if (pump is null)
+                    {
+                        events.AddRange(mapped);
+                        return;
+                    }
 
-                liveEvents.PublishAsync(operation.Id, mapped, cancellationToken).GetAwaiter().GetResult();
+                    pump.TryEnqueue(mapped);
+                }
+                catch (Exception exception)
+                {
+                    _logger.LogError(
+                        "Provisioning live event mapping failed. OperationId={OperationId} ExceptionType={ExceptionType}",
+                        operation.Id,
+                        exception.GetType().FullName);
+                }
             }
 
             Dictionary<string, string>? outputs = null;
@@ -101,6 +114,9 @@ public sealed class LocalPulumiAutomationClient(
                     return ProviderRunResult.Fail([], ProvisioningFailureCodes.NotImplemented);
             }
 
+            if (pump is not null)
+                await pump.CompleteAsync().ConfigureAwait(false);
+
             if (command == ProvisioningCommand.Cancel)
             {
                 var cancelled = new ProvisioningEvent(
@@ -111,6 +127,9 @@ public sealed class LocalPulumiAutomationClient(
                     DateTimeOffset.UtcNow);
                 return ProviderRunResult.Ok([cancelled]);
             }
+
+            if (pump is not null)
+                return ProviderRunResult.Ok([], outputs);
 
             if (events.Count == 0)
             {

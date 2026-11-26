@@ -721,9 +721,6 @@ if (provisioningWorkerEnabled && !provisioningTesting)
     builder.Services.AddProvisioningPersistence(builder.Configuration, requireSqlServer);
     builder.Services.AddAzureProvisioning(builder.Configuration);
     builder.Services.Replace(ServiceDescriptor.Singleton<IProvisioningStepLedger, AzureProviderOperationStepLedger>());
-    builder.Services.Configure<AzurePulumiDispatchOptions>(
-        builder.Configuration.GetSection(AzurePulumiDispatchOptions.ConfigurationSection));
-    builder.Services.AddSingleton<IAzurePulumiProvisioningDispatcher, AzurePulumiProvisioningDispatcher>();
 }
 var webhookDispatchEnabled = builder.Configuration.GetValue("Deployment:WebhookDispatch:Enabled", false);
 if (webhookDispatchEnabled && !builder.Environment.IsEnvironment("Testing"))

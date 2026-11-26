@@ -104,6 +104,48 @@ public sealed class AzureProviderOperationStepLedgerTests
     }
 
     [Fact]
+    public async Task Operation_succeeded_marks_the_step_succeeded()
+    {
+        var providerOperation = Operation();
+        var store = new LedgerStore(providerOperation);
+        var ledger = new AzureProviderOperationStepLedger(store);
+        var (operation, request) = Bound(providerOperation.WorkspaceId, providerOperation.Id);
+
+        var result = await ledger.TryWriteAsync(
+            operation,
+            request,
+            [
+                Event(operation.Id, 1, ProvisioningEventKind.ResourceStarted, "resource-group"),
+                Event(operation.Id, 2, ProvisioningEventKind.ResourceSucceeded, "resource-group"),
+                Event(operation.Id, 3, ProvisioningEventKind.ResourceSucceeded, ProvisioningCapability.ContainerRuntime),
+                Event(operation.Id, 4, ProvisioningEventKind.OperationSucceeded, ProvisioningCapability.ContainerRuntime)
+            ]);
+
+        Assert.Equal(ProvisioningStepLedgerResult.Written, result);
+        Assert.Equal(AzureProviderOperationStatus.Succeeded, store.Operation.Status);
+        Assert.Equal(AzureProviderOperationPhase.WorkloadReady, store.Operation.Phase);
+        Assert.Contains(store.Transitions, item => item.Code == PulumiStepLedgerMapper.RuntimeDeployedCode);
+    }
+
+    [Fact]
+    public async Task Operation_failed_with_no_pulumi_events_finalizes_the_ledger()
+    {
+        var providerOperation = Operation();
+        var store = new LedgerStore(providerOperation);
+        var ledger = new AzureProviderOperationStepLedger(store);
+        var (operation, request) = Bound(providerOperation.WorkspaceId, providerOperation.Id);
+
+        var result = await ledger.TryWriteAsync(
+            operation,
+            request,
+            [Event(operation.Id, 1, ProvisioningEventKind.OperationFailed, ProvisioningCapability.ContainerRuntime)]);
+
+        Assert.Equal(ProvisioningStepLedgerResult.Written, result);
+        Assert.Equal(AzureProviderOperationStatus.Failed, store.Operation.Status);
+        Assert.Contains(store.Transitions, item => item.Code == ManagedElsaReasonCodeCatalog.AzureDeploymentFailed);
+    }
+
+    [Fact]
     public async Task A_failure_finalizes_the_ledger_with_the_phase_zero_reason()
     {
         var providerOperation = Operation();
@@ -179,8 +221,9 @@ public sealed class AzureProviderOperationStepLedgerTests
             resourceKind,
             kind switch
             {
-                ProvisioningEventKind.ResourceFailed => "Resource failed.",
-                ProvisioningEventKind.ResourceSucceeded => "Resource succeeded.",
+                ProvisioningEventKind.ResourceFailed or ProvisioningEventKind.OperationFailed => "Resource failed.",
+                ProvisioningEventKind.ResourceSucceeded or ProvisioningEventKind.OperationSucceeded => "Resource succeeded.",
+                ProvisioningEventKind.OperationCancelled => "Operation cancelled.",
                 _ => "Resource started."
             },
             DateTimeOffset.UtcNow,

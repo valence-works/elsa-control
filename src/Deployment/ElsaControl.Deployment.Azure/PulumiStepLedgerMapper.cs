@@ -66,6 +66,18 @@ public static class PulumiStepLedgerMapper
                 Finalize: false);
         }
 
+        if (value.Kind == ProvisioningEventKind.OperationSucceeded)
+        {
+            var phase = Max(currentPhase, AzureProviderOperationPhase.WorkloadReady);
+            return new PulumiLedgerCheckpoint(
+                phase,
+                AzureProviderRunnerStep.Workload,
+                AzureProviderOperationStatus.Succeeded,
+                RuntimeDeployedCode,
+                RuntimeDeployedMessage,
+                Finalize: true);
+        }
+
         if (value.Kind == ProvisioningEventKind.OperationCancelled)
         {
             return new PulumiLedgerCheckpoint(

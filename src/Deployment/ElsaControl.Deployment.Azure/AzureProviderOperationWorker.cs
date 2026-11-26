@@ -11,8 +11,7 @@ public sealed class AzureProviderOperationWorker(
     IAzureProviderOperationStore store,
     AzureProviderExecutor executor,
     IAzureProviderPlanSource planSource,
-    TimeProvider? timeProvider = null,
-    IAzurePulumiProvisioningDispatcher? pulumi = null)
+    TimeProvider? timeProvider = null)
 {
     // Keep the executor-only construction seam available to hosts that predate the persisted
     // plan source; the default source still enforces the same admission checks.
@@ -89,13 +88,6 @@ public sealed class AzureProviderOperationWorker(
                     now,
                     operation.Version,
                     cancellationToken);
-                continue;
-            }
-
-            if (pulumi is not null
-                && await pulumi.TryDispatchAsync(operation, plan, cancellationToken).ConfigureAwait(false))
-            {
-                processed++;
                 continue;
             }
 

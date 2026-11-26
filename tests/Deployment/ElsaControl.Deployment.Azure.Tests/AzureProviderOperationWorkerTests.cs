@@ -172,33 +172,7 @@ public sealed class AzureProviderOperationWorkerTests
     }
 
     [Fact]
-    public async Task Pulumi_dispatch_skips_the_bicep_executor()
-    {
-        var digest = "sha256:" + new string('f', 64);
-        var operation = WithComputedMetadata(Operation() with
-        {
-            ReleaseManifestDigest = digest,
-            ReleaseManifestSignatureDigest = digest,
-            ReleaseManifestReference = "oci://evidence.example/manifest",
-            ReleaseManifestSignatureReference = "oci://evidence.example/signature"
-        });
-        var store = new WorkerStore(operation);
-        var executor = new AzureProviderExecutor(store, new NeverCalledRunner());
-        var worker = new AzureProviderOperationWorker(
-            store,
-            executor,
-            new PersistedAzureProviderPlanSource(),
-            new FixedTimeProvider(),
-            new RecordingDispatcher());
-
-        var processed = await worker.ProcessOnceAsync();
-
-        Assert.Equal(1, processed);
-        Assert.Equal(AzureProviderOperationStatus.Accepted, store.Operation.Status);
-    }
-
-    [Fact]
-    public async Task Missing_pulumi_dispatch_keeps_the_bicep_path()
+    public async Task Accepted_operations_still_run_the_bicep_executor()
     {
         var digest = "sha256:" + new string('f', 64);
         var operation = WithComputedMetadata(Operation() with
@@ -307,15 +281,6 @@ public sealed class AzureProviderOperationWorkerTests
     private sealed class FixedTimeProvider : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => DateTimeOffset.UtcNow;
-    }
-
-    private sealed class RecordingDispatcher : IAzurePulumiProvisioningDispatcher
-    {
-        public Task<bool> TryDispatchAsync(
-            AzureProviderOperation operation,
-            AzureWorkloadPlan plan,
-            CancellationToken cancellationToken = default) =>
-            Task.FromResult(true);
     }
 
     private sealed class NeverCalledRunner : IAzureProviderRunner

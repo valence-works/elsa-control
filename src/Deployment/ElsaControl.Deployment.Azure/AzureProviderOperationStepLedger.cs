@@ -8,6 +8,8 @@ namespace ElsaControl.Deployment.Azure;
 /// Writes sanitised Pulumi events onto the existing Azure provider step ledger
 /// so Hub can poll live progress. Correlation comes from stack config. A lost
 /// Azure lease or a duplicate engine sequence does not write a new row.
+/// Sequence dedupe and Azure lease tokens are process-local; a second replica
+/// or a restart cannot reuse them. Durable uniqueness is a follow-up.
 /// </summary>
 public sealed class AzureProviderOperationStepLedger : IProvisioningStepLedger
 {
@@ -64,7 +66,7 @@ public sealed class AzureProviderOperationStepLedger : IProvisioningStepLedger
         foreach (var value in events.OrderBy(item => item.EngineSequence ?? int.MaxValue).ThenBy(item => item.OccurredAt))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var current = await EnsureClaimedAsync(store, operation.Id, workspaceId, providerOperationId, cancellationToken)
+            var current = await store.GetAsync(workspaceId, providerOperationId, cancellationToken)
                 .ConfigureAwait(false);
             if (current is null)
                 return ProvisioningStepLedgerResult.StaleFence;
@@ -72,6 +74,26 @@ public sealed class AzureProviderOperationStepLedger : IProvisioningStepLedger
             var checkpoint = PulumiStepLedgerMapper.TryMap(value, current.Phase);
             if (checkpoint is null || !PulumiStepLedgerMapper.IsCustomerSafe(checkpoint))
                 continue;
+
+            if (current.Status is AzureProviderOperationStatus.Failed
+                or AzureProviderOperationStatus.Cancelled
+                or AzureProviderOperationStatus.Succeeded)
+            {
+                if (checkpoint.Finalize && checkpoint.Status == current.Status)
+                {
+                    written = ProvisioningStepLedgerResult.Duplicate;
+                    continue;
+                }
+
+                return checkpoint.Finalize
+                    ? ProvisioningStepLedgerResult.StaleFence
+                    : written;
+            }
+
+            current = await EnsureClaimedAsync(store, operation.Id, workspaceId, providerOperationId, cancellationToken)
+                .ConfigureAwait(false);
+            if (current is null)
+                return ProvisioningStepLedgerResult.StaleFence;
 
             if (value.EngineSequence is { } sequence
                 && !_seen.TryAdd((operation.Id, sequence, value.Kind, value.ResourceKind), 0))
@@ -84,6 +106,40 @@ public sealed class AzureProviderOperationStepLedger : IProvisioningStepLedger
             var now = _timeProvider.GetUtcNow();
             if (checkpoint.Finalize)
             {
+                if (AzureProviderOperationPhaseOrdering.Compare(checkpoint.Phase, current.Phase) > 0)
+                {
+                    AzureProviderOperation? advanced;
+                    try
+                    {
+                        advanced = await store.CheckpointAsync(
+                                workspaceId,
+                                providerOperationId,
+                                lease.Token,
+                                new AzureProviderCheckpoint(
+                                    checkpoint.Phase,
+                                    checkpoint.Code,
+                                    checkpoint.Message,
+                                    current.Resources,
+                                    current.Endpoint,
+                                    current.Health,
+                                    [],
+                                    AttemptedStep: checkpoint.AttemptedStep),
+                                now,
+                                current.Version,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        advanced = current;
+                    }
+
+                    if (advanced is null)
+                        return ProvisioningStepLedgerResult.StaleFence;
+                    current = advanced;
+                    now = _timeProvider.GetUtcNow();
+                }
+
                 var finalized = await store.FinalizeAsync(
                         workspaceId,
                         providerOperationId,

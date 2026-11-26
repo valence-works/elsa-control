@@ -32,7 +32,7 @@ public sealed class ProvisioningLiveEventSinkTests
     public async Task A_stale_fence_cannot_write_ledger_rows_or_events()
     {
         var operations = new FenceStore { HoldsFence = false };
-        var events = new RecordingEventStore();
+        var events = new RecordingEventStore { FenceHeld = false };
         var ledger = new RecordingLedger();
         var sink = new ProvisioningLiveEventSink(operations, events, ledger);
         var operation = Operation();
@@ -61,7 +61,7 @@ public sealed class ProvisioningLiveEventSinkTests
             new FakeInfrastructureProvider(),
             liveEvents: sink);
         var service = new ProvisioningService(store, store);
-        await service.ProvisionAsync(ProvisioningFixtures.Request(
+        var enqueued = await service.ProvisionAsync(ProvisioningFixtures.Request(
             ProvisioningCommand.Provision,
             ProvisioningFixtures.PlatformTarget(),
             ProvisioningFixtures.PlatformSpec(),
@@ -71,6 +71,86 @@ public sealed class ProvisioningLiveEventSinkTests
         var published = ledger.Writes.SelectMany(item => item).ToArray();
         Assert.Contains(published, item => item.Kind == ProvisioningEventKind.OperationStarted);
         Assert.Contains(published, item => item.Kind == ProvisioningEventKind.ResourceSucceeded);
+        Assert.Contains(published, item => item.Kind == ProvisioningEventKind.OperationSucceeded);
+        Assert.DoesNotContain(published, item => item.Kind == ProvisioningEventKind.OperationCancelled);
+        Assert.Equal(ProvisioningOperationState.Succeeded, (await store.GetAsync(enqueued.OperationId))!.State);
+    }
+
+    [Fact]
+    public async Task A_failure_with_no_pulumi_events_still_writes_a_terminal_ledger_entry()
+    {
+        var store = new InMemoryProvisioningStore();
+        var ledger = new RecordingLedger();
+        var sink = new ProvisioningLiveEventSink(store, store, ledger);
+        var worker = new ProvisioningOperationWorker(
+            store,
+            store,
+            new FakeInfrastructureProvider { FailWithoutEvents = true },
+            liveEvents: sink);
+        var service = new ProvisioningService(store, store);
+        var enqueued = await service.ProvisionAsync(ProvisioningFixtures.Request(
+            ProvisioningCommand.Provision,
+            ProvisioningFixtures.PlatformTarget(),
+            ProvisioningFixtures.PlatformSpec(),
+            "sink-fail-empty"));
+
+        Assert.Equal(1, await worker.ProcessOnceAsync());
+        var published = ledger.Writes.SelectMany(item => item).ToArray();
+        Assert.Contains(published, item => item.Kind == ProvisioningEventKind.OperationFailed);
+        Assert.DoesNotContain(published, item => item.Kind == ProvisioningEventKind.ResourceFailed);
+        Assert.Equal(ProvisioningOperationState.Failed, (await store.GetAsync(enqueued.OperationId))!.State);
+    }
+
+    [Fact]
+    public async Task A_reclaimed_run_writes_a_terminal_ledger_entry()
+    {
+        var time = new MutableTimeProvider();
+        var store = new InMemoryProvisioningStore(new ProvisioningReplicaIdentity("dead", TimeSpan.FromSeconds(1)));
+        var ledger = new RecordingLedger();
+        var sink = new ProvisioningLiveEventSink(store, store, ledger);
+        var worker = new ProvisioningOperationWorker(
+            store,
+            store,
+            new FakeInfrastructureProvider(time),
+            timeProvider: time,
+            liveEvents: sink);
+        var request = ProvisioningFixtures.Request(
+            ProvisioningCommand.Provision,
+            ProvisioningFixtures.PlatformTarget("reclaim-ledger"),
+            ProvisioningFixtures.PlatformSpec("reclaim-ledger"),
+            "reclaim-ledger");
+        var enqueued = await store.CreateOrGetAsync(request, ProvisioningRequestHash.Compute(request), time.GetUtcNow());
+        var claimed = await store.ClaimAsync(enqueued.OperationId, time.GetUtcNow());
+        Assert.NotNull(claimed);
+
+        time.Advance(TimeSpan.FromSeconds(2));
+        await worker.ReconcileInterruptedAsync();
+
+        var published = ledger.Writes.SelectMany(item => item).ToArray();
+        Assert.Contains(published, item => item.Kind == ProvisioningEventKind.OperationFailed);
+        Assert.Equal("Operation interrupted.", Assert.Single(published, item => item.Kind == ProvisioningEventKind.OperationFailed).Message);
+        Assert.Equal(ProvisioningOperationState.Failed, (await store.GetAsync(claimed.Id))!.State);
+    }
+
+    [Fact]
+    public async Task Terminal_publish_still_writes_after_the_fence_is_released()
+    {
+        var operations = new FenceStore { HoldsFence = false };
+        var events = new RecordingEventStore { FenceHeld = false };
+        var ledger = new RecordingLedger();
+        var sink = new ProvisioningLiveEventSink(operations, events, ledger);
+        var operation = Operation();
+        var request = ProvisioningFixtures.Request(
+            ProvisioningCommand.Provision,
+            ProvisioningFixtures.EngineTarget(),
+            ProvisioningFixtures.EngineSpec(),
+            "sink-terminal");
+        var failed = Event(operation.Id, 1, ProvisioningEventKind.OperationFailed, ProvisioningCapability.ContainerRuntime);
+
+        await sink.PublishTerminalAsync(operation, request, [failed]);
+
+        Assert.Equal(failed, Assert.Single(events.Items));
+        Assert.Equal(failed, Assert.Single(Assert.Single(ledger.Writes)));
     }
 
     [Fact]
@@ -152,6 +232,7 @@ public sealed class ProvisioningLiveEventSinkTests
     private sealed class RecordingEventStore : IProvisioningEventStore
     {
         public List<ProvisioningEvent> Items { get; } = [];
+        public bool FenceHeld { get; init; } = true;
 
         public Task AppendAsync(IReadOnlyList<ProvisioningEvent> events, CancellationToken cancellationToken = default)
         {
@@ -159,8 +240,29 @@ public sealed class ProvisioningLiveEventSinkTests
             return Task.CompletedTask;
         }
 
+        public Task<bool> TryAppendIfFenceHeldAsync(
+            Guid operationId,
+            long fencingToken,
+            IReadOnlyList<ProvisioningEvent> events,
+            CancellationToken cancellationToken = default)
+        {
+            if (!FenceHeld)
+                return Task.FromResult(false);
+            Items.AddRange(events);
+            return Task.FromResult(true);
+        }
+
         public Task<IReadOnlyList<ProvisioningEvent>> ListAsync(Guid operationId, CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<ProvisioningEvent>>(Items.Where(item => item.OperationId == operationId).ToArray());
+    }
+
+    private sealed class MutableTimeProvider : TimeProvider
+    {
+        private DateTimeOffset _utcNow = DateTimeOffset.UtcNow;
+
+        public override DateTimeOffset GetUtcNow() => _utcNow;
+
+        public void Advance(TimeSpan delta) => _utcNow += delta;
     }
 
     private sealed class FenceStore : IProvisioningOperationStore

@@ -128,6 +128,74 @@ public sealed class PulumiStepLedgerMapperTests
     }
 
     [Fact]
+    public void Operation_succeeded_finalizes_the_runtime_stage()
+    {
+        var mapped = PulumiStepLedgerMapper.TryMap(
+            Event(ProvisioningEventKind.OperationSucceeded, ProvisioningCapability.ContainerRuntime, "Operation succeeded."),
+            AzureProviderOperationPhase.WorkloadReady);
+        Assert.NotNull(mapped);
+        Assert.True(mapped.Finalize);
+        Assert.Equal(AzureProviderOperationStatus.Succeeded, mapped.Status);
+        Assert.Equal(AzureProviderOperationPhase.WorkloadReady, mapped.Phase);
+        Assert.Equal(PulumiStepLedgerMapper.RuntimeDeployedCode, mapped.Code);
+        Assert.Equal(PulumiStepLedgerMapper.RuntimeDeployedMessage, mapped.Message);
+        Assert.True(PulumiStepLedgerMapper.IsCustomerSafe(mapped));
+    }
+
+    [Fact]
+    public void A_successful_update_stream_ends_succeeded()
+    {
+        var phase = AzureProviderOperationPhase.Planned;
+        PulumiLedgerCheckpoint? last = null;
+        foreach (var value in new[]
+                 {
+                     Event(ProvisioningEventKind.ResourceStarted, "resource-group", "Resource started."),
+                     Event(ProvisioningEventKind.ResourceSucceeded, "resource-group", "Resource succeeded."),
+                     Event(ProvisioningEventKind.ResourceSucceeded, ProvisioningCapability.ContainerRuntime, PulumiStepLedgerMapper.ApplyCompletedMessage),
+                     Event(ProvisioningEventKind.OperationSucceeded, ProvisioningCapability.ContainerRuntime, "Operation succeeded.")
+                 })
+        {
+            var mapped = PulumiStepLedgerMapper.TryMap(value, phase);
+            Assert.NotNull(mapped);
+            last = mapped;
+            phase = mapped.Phase;
+        }
+
+        Assert.NotNull(last);
+        Assert.True(last.Finalize);
+        Assert.Equal(AzureProviderOperationStatus.Succeeded, last.Status);
+        Assert.Equal(PulumiStepLedgerMapper.RuntimeDeployedCode, last.Code);
+    }
+
+    [Fact]
+    public void Control_cancel_still_finalizes_cancelled()
+    {
+        var mapped = PulumiStepLedgerMapper.TryMap(
+            Event(ProvisioningEventKind.OperationCancelled, ProvisioningCapability.ContainerRuntime, "Operation cancelled."),
+            AzureProviderOperationPhase.WorkloadSubmitted);
+        Assert.NotNull(mapped);
+        Assert.True(mapped.Finalize);
+        Assert.Equal(AzureProviderOperationStatus.Cancelled, mapped.Status);
+        Assert.Equal(ManagedElsaReasonCodeCatalog.AzureDeploymentCanceled, mapped.Code);
+        Assert.Equal(PulumiStepLedgerMapper.UpdateCancelledMessage, mapped.Message);
+        Assert.True(PulumiStepLedgerMapper.IsCustomerSafe(mapped));
+    }
+
+    [Fact]
+    public void Operation_failed_with_no_resource_events_finalizes_failed()
+    {
+        var mapped = PulumiStepLedgerMapper.TryMap(
+            Event(ProvisioningEventKind.OperationFailed, ProvisioningCapability.ContainerRuntime, "Operation failed."),
+            AzureProviderOperationPhase.Planned);
+        Assert.NotNull(mapped);
+        Assert.True(mapped.Finalize);
+        Assert.Equal(AzureProviderOperationStatus.Failed, mapped.Status);
+        Assert.Equal(ManagedElsaReasonCodeCatalog.AzureDeploymentFailed, mapped.Code);
+        Assert.Equal(PulumiStepLedgerMapper.ResourceFailedMessage, mapped.Message);
+        Assert.True(PulumiStepLedgerMapper.IsCustomerSafe(mapped));
+    }
+
+    [Fact]
     public void Phase_regression_is_ignored()
     {
         var mapped = PulumiStepLedgerMapper.TryMap(
