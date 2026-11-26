@@ -5,6 +5,7 @@ using ElsaControl.Deployment.Azure;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace ElsaControl.Api.Workspace;
 
@@ -98,12 +99,18 @@ internal static class AzureProviderRunnerComposition
         var stripe = configuration.GetSection(StripeBillingOptions.ConfigurationSection)
             .Get<StripeBillingOptions>() ?? new();
         var lateSuccessLever = StagingLateSuccessLeverFactory.Create(lateSuccessOptions, stripe);
+        services.TryAddSingleton(_ =>
+            StagingProvisioningHealthLeverFactory.Create(
+                configuration.GetSection(StagingProvisioningHealthLeverOptions.ConfigurationSection)
+                    .Get<StagingProvisioningHealthLeverOptions>() ?? new(),
+                stripe));
         services.AddScoped<AzureBicepProviderRunner>(provider =>
             new AzureBicepProviderRunner(
                 options,
                 scope,
                 provider.GetRequiredService<IAzureSecretResolver>(),
-                lateSuccessLever));
+                lateSuccessLever,
+                provider.GetRequiredService<StagingProvisioningHealthLever>()));
         services.AddScoped<IAzureProviderRunner>(provider =>
             provider.GetRequiredService<AzureBicepProviderRunner>());
         services.AddScoped<IAzureProviderRecoveryObserver>(provider =>

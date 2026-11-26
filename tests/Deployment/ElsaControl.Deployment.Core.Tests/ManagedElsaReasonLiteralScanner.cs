@@ -17,6 +17,8 @@ internal static class ManagedElsaReasonLiteralScanner
         "provider.identity-binding",
         "azure.deployment.",
         "azure.recovery.",
+        "provisioning.timeout.",
+        "provisioning.health.",
         "staging.lever.",
         "deletion.",
         "lifecycle.deletion.",

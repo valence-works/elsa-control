@@ -345,6 +345,13 @@ builder.Services.AddHostedService<StagingRecoveryLifecycleLeverConfigurationVali
 builder.Services.Configure<StagingLateSuccessLeverOptions>(
     builder.Configuration.GetSection(StagingLateSuccessLeverOptions.ConfigurationSection));
 builder.Services.AddHostedService<StagingLateSuccessLeverConfigurationValidator>();
+builder.Services.Configure<StagingProvisioningHealthLeverOptions>(
+    builder.Configuration.GetSection(StagingProvisioningHealthLeverOptions.ConfigurationSection));
+builder.Services.AddHostedService<StagingProvisioningHealthLeverConfigurationValidator>();
+builder.Services.AddSingleton(services =>
+    StagingProvisioningHealthLeverFactory.Create(
+        services.GetRequiredService<IOptions<StagingProvisioningHealthLeverOptions>>().Value,
+        services.GetRequiredService<IOptions<StripeBillingOptions>>().Value));
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<AdminApiKeyValidator>();
 builder.Services.AddSingleton<BuilderClientApiKeyValidator>();
@@ -868,6 +875,7 @@ app.MapAdminOrganizationInternalEntitlementEndpoints();
 app.MapAdminOrganizationAzureBoundEntitlementEndpoints();
 app.MapAdminOrganizationBillingLifecycleLeverEndpoints();
 app.MapStagingRecoveryLifecycleLeverEndpoints();
+app.MapStagingProvisioningHealthLeverEndpoints();
 app.MapAdminReleaseCatalogEndpoints();
 app.MapConsoleLogStreaming();
 if (adminConsoleAssetsExist)

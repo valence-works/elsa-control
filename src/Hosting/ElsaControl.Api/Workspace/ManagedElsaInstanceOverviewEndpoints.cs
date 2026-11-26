@@ -817,14 +817,21 @@ internal static class ManagedElsaInstanceOverviewProjection
                 Progress = new ManagedElsaInstanceOverviewProgressResponse
                 {
                     AttemptNumber = activeOperation.AttemptNumber,
-                    AttemptStartedAt = activeOperation.AttemptStartedAt ?? activeOperation.StartedAt
+                    AttemptStartedAt = activeOperation.AttemptStartedAt ?? activeOperation.StartedAt,
+                    ReasonCode = ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(activeOperation)
                 }
             },
             lastOperation is null ? null : new ManagedElsaInstanceOverviewLastOperationResponse(
                 lastOperation.Action,
                 lastOperation.State,
                 lastOperation.CompletedAt,
-                CustomerFailureCode(lastOperation)),
+                CustomerFailureCode(lastOperation))
+            {
+                ReasonCode = lastOperation.State is ElsaInstanceOperationState.Failed
+                    or ElsaInstanceOperationState.RecoveryRequired
+                    ? ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(lastOperation)
+                    : null
+            },
             new ManagedElsaInstanceOverviewAllowedActionsResponse(
                 ActionDecision(canMutate, hasActiveOperation, mutationDenial, restartGate),
                 ActionDecision(canMutate, hasActiveOperation, mutationDenial, applyGate),
@@ -1015,13 +1022,19 @@ public sealed record ManagedElsaInstanceOverviewProgressResponse
     public string? AttemptedStep { get; init; }
     public int? AttemptNumber { get; init; }
     public DateTimeOffset? AttemptStartedAt { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ReasonCode { get; init; }
 }
 
 public sealed record ManagedElsaInstanceOverviewLastOperationResponse(
     ElsaInstanceOperationAction Action,
     ElsaInstanceOperationState State,
     DateTimeOffset? CompletedAt,
-    string? FailureCode);
+    string? FailureCode)
+{
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ReasonCode { get; init; }
+}
 
 public sealed record ManagedElsaInstanceOverviewAllowedActionsResponse(
     ManagedElsaInstanceOverviewActionDecisionResponse Restart,

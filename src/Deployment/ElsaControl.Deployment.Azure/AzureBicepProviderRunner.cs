@@ -49,13 +49,15 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
     private readonly IAzureSecretResolver _secretResolver;
     private readonly TimeProvider _timeProvider;
     private readonly StagingLateSuccessLever _lateSuccessLever;
+    private readonly StagingProvisioningHealthLever _provisioningHealthLever;
 
     public AzureBicepProviderRunner(
         AzureProviderRunnerOptions options,
         AzureProviderTargetScope scope,
         IAzureSecretResolver? secretResolver = null,
-        StagingLateSuccessLever? lateSuccessLever = null)
-        : this(options, scope, new AzureCommandProcess(options.CommandTimeout, options.MaximumOutputCharacters), secretResolver, timeProvider: null, lateSuccessLever)
+        StagingLateSuccessLever? lateSuccessLever = null,
+        StagingProvisioningHealthLever? provisioningHealthLever = null)
+        : this(options, scope, new AzureCommandProcess(options.CommandTimeout, options.MaximumOutputCharacters), secretResolver, timeProvider: null, lateSuccessLever, provisioningHealthLever)
     {
     }
 
@@ -65,7 +67,8 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         IAzureCommandProcess process,
         IAzureSecretResolver? secretResolver = null,
         TimeProvider? timeProvider = null,
-        StagingLateSuccessLever? lateSuccessLever = null)
+        StagingLateSuccessLever? lateSuccessLever = null,
+        StagingProvisioningHealthLever? provisioningHealthLever = null)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _scope = scope ?? throw new ArgumentNullException(nameof(scope));
@@ -73,6 +76,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         _secretResolver = secretResolver ?? new UnconfiguredAzureSecretResolver();
         _timeProvider = timeProvider ?? TimeProvider.System;
         _lateSuccessLever = lateSuccessLever ?? StagingLateSuccessLever.Disabled;
+        _provisioningHealthLever = provisioningHealthLever ?? StagingProvisioningHealthLever.Disabled;
         _options.Validate();
         _scope.Validate();
     }
@@ -1807,7 +1811,25 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         if (!endpointResult.Succeeded || string.IsNullOrWhiteSpace(endpointResult.Value?.Value))
             return ProcessFailure(command, AzureProviderOperationPhase.HealthVerified, endpointResult, command.Resources, mutation: false);
         var endpoint = endpointResult.Value!.Value;
+        if (_provisioningHealthLever.TryGetArmedFailure(command.Context.InstanceId, out var injectedFailure))
+        {
+            return injectedFailure switch
+            {
+                StagingProvisioningHealthFailureMode.CrashLoop => WithProvisioningHealthLeverApplied(
+                    HealthFailed(
+                        command,
+                        ManagedElsaProvisioningFailureReason.AzureHealthCrashLoop,
+                        "The candidate runtime kept restarting instead of becoming healthy.")),
+                StagingProvisioningHealthFailureMode.Timeout => WithProvisioningHealthLeverApplied(
+                    HealthFailed(
+                        command,
+                        ManagedElsaProvisioningFailureReason.AzureHealthTimeout,
+                        "The candidate did not become healthy within the bounded observation window.")),
+                _ => throw new InvalidOperationException("Unsupported staging provisioning health lever mode.")
+            };
+        }
 
+        var sawCrashLoopEvidence = false;
         for (var attempt = 0; attempt < _options.ObservationAttempts; attempt++)
         {
             var state = await ExecuteAzAsync(command,
@@ -1823,20 +1845,57 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             }
             if (state.Status == AzureCommandProcessStatus.Cancelled || cancellationToken.IsCancellationRequested)
                 return Uncertain(command, AzureProviderOperationPhase.HealthVerified, "azure.health.cancelled", "Candidate health verification was interrupted.");
+            if (await ObserveReplicaCrashLoopAsync(command, cancellationToken))
+                sawCrashLoopEvidence = true;
             if (attempt + 1 < _options.ObservationAttempts)
                 await Task.Delay(_options.ObservationDelay, cancellationToken);
         }
 
-        return new AzureProviderRunnerResult(
+        return sawCrashLoopEvidence
+            ? HealthFailed(command, ManagedElsaProvisioningFailureReason.AzureHealthCrashLoop,
+                "The candidate runtime kept restarting instead of becoming healthy.")
+            : HealthFailed(command, ManagedElsaProvisioningFailureReason.AzureHealthTimeout,
+                "The candidate did not become healthy within the bounded observation window.");
+    }
+
+    private async Task<bool> ObserveReplicaCrashLoopAsync(
+        AzureProviderRunnerCommand command,
+        CancellationToken cancellationToken)
+    {
+        var replicas = await ExecuteAzAsync(command,
+            ["containerapp", "replica", "list", "--subscription", _scope.SubscriptionId, "--resource-group", ResourceGroupName(command),
+                "--name", AppName(command), "--revision", command.Resources.WorkloadRevisionName!,
+                "--query", "[].{runningState:properties.runningState,runningStateDetails:properties.runningStateDetails,restartCounts:properties.containers[].restartCount,containers:properties.containers[].{restartCount:restartCount,runningState:runningState,runningStateDetails:runningStateDetails}}",
+                "--output", "json", "--only-show-errors"],
+            ParseStringAsync,
+            cancellationToken);
+        return replicas.Succeeded &&
+               replicas.Value is not null &&
+               AzureContainerAppReplicaCrashLoop.Detected(replicas.Value.Value.AsMemory());
+    }
+
+    private static AzureProviderRunnerResult WithProvisioningHealthLeverApplied(AzureProviderRunnerResult result)
+    {
+        var extra = new AzureProviderDiagnostic(
+            StagingProvisioningHealthLeverDefaults.AppliedCode,
+            StagingProvisioningHealthLeverDefaults.AppliedCode);
+        IReadOnlyList<AzureProviderDiagnostic> combined = [..result.Diagnostics, extra];
+        return result with { Diagnostics = AzureProviderSafeDiagnostics.Normalize(combined) };
+    }
+
+    private static AzureProviderRunnerResult HealthFailed(
+        AzureProviderRunnerCommand command,
+        string code,
+        string message) =>
+        new(
             AzureProviderRunnerOutcome.Failed,
             AzureProviderOperationPhase.HealthVerified,
             command.Resources,
             AzureProviderHealth.Failed,
             null,
-            AzureProviderSafeDiagnostics.Failure(command.Step, AzureProviderRunnerOutcome.Failed, "azure.health.unhealthy"),
-            "azure.health.unhealthy",
-            "The candidate did not become healthy within the bounded observation window.");
-    }
+            AzureProviderSafeDiagnostics.Failure(command.Step, AzureProviderRunnerOutcome.Failed, code),
+            code,
+            message);
 
     private async Task<AzureProviderRunnerResult> RunPromotionAsync(
         AzureProviderRunnerCommand command,
@@ -3973,11 +4032,11 @@ public sealed class AzureProviderRunner : IAzureProviderRunner, IAzureProviderRe
 {
     private readonly AzureBicepProviderRunner _inner;
 
-    public AzureProviderRunner(AzureProviderRunnerOptions options, AzureProviderTargetScope scope, IAzureSecretResolver? secretResolver = null, StagingLateSuccessLever? lateSuccessLever = null) =>
-        _inner = new AzureBicepProviderRunner(options, scope, secretResolver, lateSuccessLever);
+    public AzureProviderRunner(AzureProviderRunnerOptions options, AzureProviderTargetScope scope, IAzureSecretResolver? secretResolver = null, StagingLateSuccessLever? lateSuccessLever = null, StagingProvisioningHealthLever? provisioningHealthLever = null) =>
+        _inner = new AzureBicepProviderRunner(options, scope, secretResolver, lateSuccessLever, provisioningHealthLever);
 
-    internal AzureProviderRunner(AzureProviderRunnerOptions options, AzureProviderTargetScope scope, IAzureCommandProcess process, IAzureSecretResolver? secretResolver = null, StagingLateSuccessLever? lateSuccessLever = null) =>
-        _inner = new AzureBicepProviderRunner(options, scope, process, secretResolver, lateSuccessLever: lateSuccessLever);
+    internal AzureProviderRunner(AzureProviderRunnerOptions options, AzureProviderTargetScope scope, IAzureCommandProcess process, IAzureSecretResolver? secretResolver = null, StagingLateSuccessLever? lateSuccessLever = null, StagingProvisioningHealthLever? provisioningHealthLever = null) =>
+        _inner = new AzureBicepProviderRunner(options, scope, process, secretResolver, lateSuccessLever: lateSuccessLever, provisioningHealthLever: provisioningHealthLever);
 
     public Task<AzureProviderRunnerResult> RunAsync(AzureProviderRunnerCommand command, CancellationToken cancellationToken = default) =>
         _inner.RunAsync(command, cancellationToken);

@@ -46,6 +46,13 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
             ["accepted"] = Frozen(["operationId", "action", "state", "acceptedAt"])
         }.ToFrozenDictionary(StringComparer.Ordinal);
 
+    private static readonly FrozenDictionary<string, FrozenSet<string>> OptionalCustomerDtoProperties =
+        new Dictionary<string, FrozenSet<string>>(StringComparer.Ordinal)
+        {
+            ["overview.lastOperation"] = Frozen(["reasonCode"]),
+            ["overview.activeOperation.progress"] = Frozen(["reasonCode"])
+        }.ToFrozenDictionary(StringComparer.Ordinal);
+
     private readonly Fixture _fixture;
 
     public ManagedElsaInstanceOverviewApiTests(Fixture fixture) => _fixture = fixture;
@@ -1959,8 +1966,15 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
         }
 
         Assert.Equal(JsonValueKind.Object, element.ValueKind);
-        var actual = element.EnumerateObject().Select(property => property.Name).Order(StringComparer.Ordinal).ToArray();
-        Assert.Equal(expected.Order(StringComparer.Ordinal), actual);
+        var optional = OptionalCustomerDtoProperties.GetValueOrDefault(path) ?? FrozenSet<string>.Empty;
+        var actual = element.EnumerateObject().Select(property => property.Name).ToArray();
+        Assert.Equal(
+            expected.Order(StringComparer.Ordinal),
+            actual.Where(name => !optional.Contains(name)).Order(StringComparer.Ordinal));
+        Assert.All(actual, name =>
+            Assert.True(
+                expected.Contains(name) || optional.Contains(name),
+                $"{path} serialized unexpected '{name}'."));
         foreach (var property in element.EnumerateObject())
         {
             var childPath = $"{path}.{property.Name}";

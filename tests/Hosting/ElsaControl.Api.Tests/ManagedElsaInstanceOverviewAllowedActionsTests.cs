@@ -193,6 +193,53 @@ public sealed class ManagedElsaInstanceOverviewAllowedActionsTests
         Assert.Equal(typeof(ManagedElsaInstanceOverviewActionDecisionResponse), restart.GetType());
     }
 
+    [Fact]
+    public void Last_operation_exposes_a_mapped_crash_loop_reason_without_replacing_failure_code()
+    {
+        var instance = Instance(ElsaObservedLifecycle.Failed, ElsaInstanceHealth.Unreachable);
+        var lastOperation = new ElsaInstanceOperationSummary(
+            Guid.Parse("40000000-0000-0000-0000-000000000002"),
+            instance.Id,
+            ElsaInstanceOperationAction.Create,
+            ElsaInstanceOperationState.Failed,
+            1, 1, Now, Now, Now, null, null, null,
+            "azure.step.failed",
+            ElsaObservedLifecycle.Failed,
+            ElsaInstanceHealth.Unreachable,
+            ReasonCode: ManagedElsaProvisioningFailureReason.AzureHealthCrashLoop);
+        var overview = Overview(instance, lastOperation: lastOperation);
+
+        Assert.Equal(ManagedElsaReasonCodeCatalog.ProvisioningHealthCrashLoop, overview.LastOperation!.ReasonCode);
+        Assert.NotEqual(overview.LastOperation.ReasonCode, overview.LastOperation.FailureCode);
+        Assert.False(overview.AllowedActions.Restart.Allowed);
+        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.InstanceFailedCode, overview.AllowedActions.Restart.ReasonCode);
+        Assert.True(overview.AllowedActions.Delete.Allowed);
+        Assert.Null(overview.AllowedActions.Delete.ReasonCode);
+    }
+
+    [Fact]
+    public void Active_operation_progress_exposes_a_mapped_timeout_reason()
+    {
+        var instance = Instance(ElsaObservedLifecycle.Provisioning);
+        var active = new ElsaInstanceOperationSummary(
+            Guid.Parse("40000000-0000-0000-0000-000000000003"),
+            instance.Id,
+            ElsaInstanceOperationAction.Create,
+            ElsaInstanceOperationState.RecoveryRequired,
+            1, 1, Now, Now, null, null, null, null,
+            ManagedElsaReasonCodeCatalog.ProvisioningTimeoutFoundation,
+            ElsaObservedLifecycle.Provisioning,
+            ElsaInstanceHealth.Unknown,
+            ReasonCode: ManagedElsaReasonCodeCatalog.ProvisioningTimeoutFoundation,
+            AttemptStartedAt: Now);
+        var overview = Overview(instance, active);
+
+        Assert.Equal(
+            ManagedElsaReasonCodeCatalog.ProvisioningTimeoutFoundation,
+            overview.ActiveOperation!.Progress!.ReasonCode);
+        Assert.Null(overview.LastOperation);
+    }
+
     private static ManagedElsaInstanceOverviewResponse Overview(
         ElsaInstance instance,
         ElsaInstanceOperationSummary? activeOperation = null,

@@ -136,8 +136,14 @@ internal static class AzureProviderSafeDiagnostics
         "azure.handoff.configuration-required",
         "azure.handoff.replicas-unsupported",
         "azure.health.cancelled",
-        "azure.health.unhealthy",
+        ManagedElsaProvisioningFailureReason.AzureHealthCrashLoop,
+        ManagedElsaProvisioningFailureReason.AzureHealthTimeout,
+        ManagedElsaProvisioningFailureReason.AzureHealthUnhealthy,
         "azure.health.workload-missing",
+        ManagedElsaReasonCodeCatalog.ProvisioningHealthCrashLoop,
+        ManagedElsaReasonCodeCatalog.ProvisioningTimeoutHealth,
+        ManagedElsaReasonCodeCatalog.ProvisioningTimeoutFoundation,
+        ManagedElsaReasonCodeCatalog.ProvisioningTimeoutWorkload,
         "azure.promotion.candidate-endpoint-invalid",
         "azure.promotion.candidate-not-ready",
         "azure.promotion.candidate-readiness-invalid",
@@ -178,7 +184,8 @@ internal static class AzureProviderSafeDiagnostics
         "azure.traffic.unhealthy",
         "azure.workload.foundation-missing",
         "azure.workload.output-invalid",
-        StagingLateSuccessLeverDefaults.AppliedCode
+        StagingLateSuccessLeverDefaults.AppliedCode,
+        StagingProvisioningHealthLeverDefaults.AppliedCode
     ];
 
     private static readonly HashSet<string> KnownCodes = CreateKnownCodes();

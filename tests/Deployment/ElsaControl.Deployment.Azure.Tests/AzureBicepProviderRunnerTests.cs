@@ -4,6 +4,7 @@ using System.Text.Json;
 
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Azure;
+using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.RuntimeBuilder.Abstractions.Plans;
 
 namespace ElsaControl.Deployment.Azure.Tests;
@@ -2843,25 +2844,124 @@ public sealed partial class AzureBicepProviderRunnerTests : IDisposable
     {
         var process = new FakeCommandProcess();
         process.Success(args => args.Contains("containerapp") && args.Contains("show") && args.Any(x => x.Contains("fqdn", StringComparison.Ordinal)), "proof-app.hash.azurecontainerapps.io");
-        process.Success(args => args.Contains("containerapp") && args.Contains("revision") && args.Contains("show"), "{\"active\":true,\"health\":\"Unhealthy\"}");
-        var resources = _fixture.FoundationResources with
-        {
-            RegistryResourceId = _fixture.RegistryId,
-            AcrPullDeploymentId = _fixture.RegistryDeploymentId,
-            AcrPullRoleAssignmentId = _fixture.RegistryRoleAssignmentId,
-            WorkloadResourceId = _fixture.AppId,
-            WorkloadDeploymentId = _fixture.WorkloadDeploymentId,
-            WorkloadRevisionName = "proof-app--candidate"
-        };
+        process.Success(args => args.Contains("containerapp") && args.Contains("revision") && args.Contains("show"), "Unhealthy");
+        process.Success(IsReplicaList, """[{"runningState":"Running","restartCounts":[0]}]""");
+        var resources = HealthResources();
 
         var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Health, resources));
 
         Assert.Equal(AzureProviderRunnerOutcome.Failed, result.Outcome);
         Assert.Equal(AzureProviderHealth.Failed, result.Health);
-        Assert.Equal("azure.health.unhealthy", result.Code);
+        Assert.Equal(ManagedElsaProvisioningFailureReason.AzureHealthTimeout, result.Code);
         Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "azure.step.health.failed");
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == ManagedElsaProvisioningFailureReason.AzureHealthTimeout);
+        Assert.DoesNotContain(process.Calls, call => call.Contains("traffic"));
+        Assert.DoesNotContain("subscriptions/", result.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("proof-app--candidate", result.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Reports_a_crash_loop_when_the_candidate_keeps_restarting()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("containerapp") && args.Contains("show") && args.Any(x => x.Contains("fqdn", StringComparison.Ordinal)), "proof-app.hash.azurecontainerapps.io");
+        process.Success(args => args.Contains("containerapp") && args.Contains("revision") && args.Contains("show"), "Unhealthy");
+        process.Success(IsReplicaList, """[{"runningState":"Running","restartCounts":[2]}]""");
+        process.Success(args => args.Contains("containerapp") && args.Contains("revision") && args.Contains("show"), "Unhealthy");
+        process.Success(IsReplicaList, """[{"runningState":"Running","restartCounts":[3]}]""");
+        var options = _fixture.Options with { ObservationAttempts = 2 };
+
+        var result = await new AzureBicepProviderRunner(options, _fixture.Scope, process)
+            .RunAsync(_fixture.Command(AzureProviderRunnerStep.Health, HealthResources()));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Failed, result.Outcome);
+        Assert.Equal(AzureProviderHealth.Failed, result.Health);
+        Assert.Equal(ManagedElsaProvisioningFailureReason.AzureHealthCrashLoop, result.Code);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == ManagedElsaProvisioningFailureReason.AzureHealthCrashLoop);
+        Assert.All(result.Diagnostics, diagnostic => Assert.Equal(diagnostic.Code, diagnostic.Message));
+        Assert.DoesNotContain("139", result.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("subscriptions/", result.Message, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(process.Calls, call => call.Contains("traffic"));
     }
+
+    [Fact]
+    public async Task Reports_a_crash_loop_for_a_non_zero_exit_including_139()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("containerapp") && args.Contains("show") && args.Any(x => x.Contains("fqdn", StringComparison.Ordinal)), "proof-app.hash.azurecontainerapps.io");
+        process.Success(args => args.Contains("containerapp") && args.Contains("revision") && args.Contains("show"), "Unhealthy");
+        process.Success(IsReplicaList, """[{"runningState":"Failed","runningStateDetails":"Container terminated with exit code 139"}]""");
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Health, HealthResources()));
+
+        Assert.Equal(ManagedElsaProvisioningFailureReason.AzureHealthCrashLoop, result.Code);
+        Assert.DoesNotContain("139", result.Code, StringComparison.Ordinal);
+        Assert.DoesNotContain("exit code", result.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Restarts_then_a_healthy_revision_completes_health()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("containerapp") && args.Contains("show") && args.Any(x => x.Contains("fqdn", StringComparison.Ordinal)), "proof-app.hash.azurecontainerapps.io");
+        process.Success(args => args.Contains("containerapp") && args.Contains("revision") && args.Contains("show"), "Unhealthy");
+        process.Success(IsReplicaList, """[{"runningState":"Running","restartCounts":[2]}]""");
+        process.Success(args => args.Contains("containerapp") && args.Contains("revision") && args.Contains("show"), "Healthy");
+        var options = _fixture.Options with { ObservationAttempts = 2 };
+
+        var result = await new AzureBicepProviderRunner(options, _fixture.Scope, process)
+            .RunAsync(_fixture.Command(AzureProviderRunnerStep.Health, HealthResources()));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Completed, result.Outcome);
+        Assert.Equal(AzureProviderHealth.Healthy, result.Health);
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Code == ManagedElsaProvisioningFailureReason.AzureHealthCrashLoop);
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Code == ManagedElsaProvisioningFailureReason.AzureHealthTimeout);
+    }
+
+    [Fact]
+    public async Task A_single_exit_or_back_off_then_a_healthy_revision_completes_health()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("containerapp") && args.Contains("show") && args.Any(x => x.Contains("fqdn", StringComparison.Ordinal)), "proof-app.hash.azurecontainerapps.io");
+        process.Success(args => args.Contains("containerapp") && args.Contains("revision") && args.Contains("show"), "Unhealthy");
+        process.Success(IsReplicaList, """[{"runningState":"Running","runningStateDetails":"Back-off restarting failed container, exit code '1'"}]""");
+        process.Success(args => args.Contains("containerapp") && args.Contains("revision") && args.Contains("show"), "Healthy");
+        var options = _fixture.Options with { ObservationAttempts = 2 };
+
+        var result = await new AzureBicepProviderRunner(options, _fixture.Scope, process)
+            .RunAsync(_fixture.Command(AzureProviderRunnerStep.Health, HealthResources()));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Completed, result.Outcome);
+        Assert.Equal(AzureProviderHealth.Healthy, result.Health);
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Code == ManagedElsaProvisioningFailureReason.AzureHealthCrashLoop);
+    }
+
+    [Fact]
+    public async Task Replica_observation_failure_is_not_treated_as_a_crash_loop()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("containerapp") && args.Contains("show") && args.Any(x => x.Contains("fqdn", StringComparison.Ordinal)), "proof-app.hash.azurecontainerapps.io");
+        process.Success(args => args.Contains("containerapp") && args.Contains("revision") && args.Contains("show"), "Unhealthy");
+        process.Failure(IsReplicaList);
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Health, HealthResources()));
+
+        Assert.Equal(ManagedElsaProvisioningFailureReason.AzureHealthTimeout, result.Code);
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Code == ManagedElsaProvisioningFailureReason.AzureHealthCrashLoop);
+    }
+
+    private static bool IsReplicaList(string[] args) =>
+        args.Contains("containerapp") && args.Contains("replica") && args.Contains("list");
+
+    private AzureProviderResourceReferences HealthResources() => _fixture.FoundationResources with
+    {
+        RegistryResourceId = _fixture.RegistryId,
+        AcrPullDeploymentId = _fixture.RegistryDeploymentId,
+        AcrPullRoleAssignmentId = _fixture.RegistryRoleAssignmentId,
+        WorkloadResourceId = _fixture.AppId,
+        WorkloadDeploymentId = _fixture.WorkloadDeploymentId,
+        WorkloadRevisionName = "proof-app--candidate"
+    };
 
     [Fact]
     public async Task Cleanup_refuses_to_delete_when_inventory_contains_a_foreign_resource()

@@ -42,6 +42,10 @@ public static class ManagedElsaInstanceCustomerProjection
         ManagedElsaReasonCodeCatalog.AzureRecoveryRetrying,
         ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeExhausted,
         ManagedElsaReasonCodeCatalog.AzureRecoveryNeedsOperator,
+        ManagedElsaReasonCodeCatalog.ProvisioningTimeoutFoundation,
+        ManagedElsaReasonCodeCatalog.ProvisioningTimeoutWorkload,
+        ManagedElsaReasonCodeCatalog.ProvisioningTimeoutHealth,
+        ManagedElsaReasonCodeCatalog.ProvisioningHealthCrashLoop,
         ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected,
         ProvisioningUnavailableReasonCode,
         FailedUnavailableReasonCode,
@@ -261,12 +265,16 @@ public static class ManagedElsaInstanceCustomerProjection
     /// Unknown provider diagnostics, Azure inventory, and resource identifiers
     /// are discarded. Generic operation and Delete DTOs share this boundary.
     /// </summary>
-    public static string? CustomerSafeOperationReason(string? reasonCode) =>
-        !string.IsNullOrWhiteSpace(reasonCode) &&
-        (CustomerSafeOperationReasonCodes.Contains(reasonCode) ||
-         ManagedElsaReasonCodeCatalog.IsSafeTranslatorFinding(reasonCode))
+    public static string? CustomerSafeOperationReason(string? reasonCode)
+    {
+        if (ManagedElsaProvisioningFailureReason.TryMap(reasonCode, out var mapped))
+            return mapped;
+        return !string.IsNullOrWhiteSpace(reasonCode) &&
+               (CustomerSafeOperationReasonCodes.Contains(reasonCode) ||
+                ManagedElsaReasonCodeCatalog.IsSafeTranslatorFinding(reasonCode))
             ? reasonCode
             : null;
+    }
 
     public static string? CustomerSafeOperationReason(ElsaInstanceOperationSummary? operation) =>
         CustomerSafeOperationReason(ManagedElsaReasonCodeCatalog.SelectCurrentReason(

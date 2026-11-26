@@ -60,6 +60,10 @@ public static class ManagedElsaReasonCodeCatalog
     public const string AzureDeploymentFailed = "azure.deployment.failed";
     public const string AzureDeploymentWaitExceeded = "azure.deployment.wait-exceeded";
     public const string AzureDeploymentCanceled = "azure.deployment.canceled";
+    public const string ProvisioningTimeoutFoundation = "provisioning.timeout.foundation";
+    public const string ProvisioningTimeoutWorkload = "provisioning.timeout.workload";
+    public const string ProvisioningTimeoutHealth = "provisioning.timeout.health";
+    public const string ProvisioningHealthCrashLoop = "provisioning.health.crash-loop";
     public const string AzureRecoveryAutoResumeExhausted = "azure.recovery.auto-resume-exhausted";
     public const string AzureRecoveryAutoResumeClaimConflict = "azure.recovery.auto-resume.claim-conflict";
     public const string AzureRecoveryAutoResumeAccepted = "azure.recovery.auto-resume.accepted";
@@ -159,6 +163,10 @@ public static class ManagedElsaReasonCodeCatalog
             new(AzureDeploymentFailed, ManagedElsaReasonClass.AutoResuming),
             new(AzureDeploymentWaitExceeded, ManagedElsaReasonClass.AutoResuming),
             new(AzureDeploymentCanceled, ManagedElsaReasonClass.AutoResuming),
+            new(ProvisioningTimeoutFoundation, ManagedElsaReasonClass.AutoResuming),
+            new(ProvisioningTimeoutWorkload, ManagedElsaReasonClass.AutoResuming),
+            new(ProvisioningTimeoutHealth, ManagedElsaReasonClass.NeedsPerson),
+            new(ProvisioningHealthCrashLoop, ManagedElsaReasonClass.NeedsPerson),
             new(AzureRecoveryRetrying, ManagedElsaReasonClass.AutoResuming),
             new(AzureRecoveryAutoResumeAccepted, ManagedElsaReasonClass.AutoResuming),
             new(AzureRecoveryFoundationObserved, ManagedElsaReasonClass.AutoResuming),

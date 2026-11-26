@@ -224,8 +224,7 @@ public static class AzureManagedElsaProvisioningProgressProjector
                     StringComparison.Ordinal)
                     ? ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected
                     : ManagedElsaProvisioningProgressDiagnostics.Failed;
-            if (ManagedElsaReasonCodeCatalog.IsSafeTranslatorFinding(lifecycle?.ReconciliationDiagnosticCode))
-                reasonCode = lifecycle!.ReconciliationDiagnosticCode;
+            reasonCode = ResolveCustomerReasonCode(lifecycle, provider, providerStage);
             blocked = true;
         }
         else if (lifecycleState == ElsaInstanceOperationState.Succeeded && observedReady)
@@ -247,6 +246,7 @@ public static class AzureManagedElsaProvisioningProgressProjector
             diagnosticCode = provider.Status == AzureProviderOperationStatus.Cancelled
                 ? ManagedElsaProvisioningProgressDiagnostics.Cancelled
                 : ManagedElsaProvisioningProgressDiagnostics.Failed;
+            reasonCode = ResolveCustomerReasonCode(lifecycle, provider, providerStage);
             blocked = true;
             completedAt ??= provider.CompletedAt?.ToUniversalTime();
         }
@@ -264,6 +264,7 @@ public static class AzureManagedElsaProvisioningProgressProjector
             // and EntitlementHeld. Applies to any Accepted/Queued operation kind.
             state = ManagedElsaProvisioningProgressStates.Stale;
             diagnosticCode = ManagedElsaProvisioningProgressDiagnostics.RequiresAttention;
+            reasonCode = ResolveCustomerReasonCode(lifecycle, provider, providerStage);
             blocked = true;
         }
         else if (lifecycle is null && provider is null)
@@ -587,6 +588,17 @@ public static class AzureManagedElsaProvisioningProgressProjector
         provider.AttemptedStep is { } attemptedStep
             ? Enum.IsDefined(attemptedStep) ? MapStage(attemptedStep) : null
             : MapStage(provider.Phase);
+
+    private static string? ResolveCustomerReasonCode(
+        ElsaInstanceLifecycleTopologyOperation? lifecycle,
+        AzureProviderOperation? provider,
+        string? providerStage) =>
+        ManagedElsaProvisioningFailureReason.Resolve(
+            lifecycle?.ReconciliationDiagnosticCode,
+            lifecycle?.FailureCode,
+            provider?.LastObservationReasonCode,
+            provider?.Diagnostics.Select(diagnostic => diagnostic.Code),
+            providerStage ?? (provider is null ? null : MapCurrentStage(provider)));
 
     private static string? MapStage(AzureProviderRunnerStep step) => step switch
     {

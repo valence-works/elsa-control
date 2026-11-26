@@ -824,6 +824,10 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
     [InlineData(ElsaInstanceCommercialOperation.EntitlementRequired)]
     [InlineData(ElsaInstanceCommercialOperation.EntitlementSafeExitSuperseded)]
     [InlineData(ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected)]
+    [InlineData(ManagedElsaReasonCodeCatalog.ProvisioningHealthCrashLoop)]
+    [InlineData(ManagedElsaReasonCodeCatalog.ProvisioningTimeoutHealth)]
+    [InlineData(ManagedElsaReasonCodeCatalog.ProvisioningTimeoutFoundation)]
+    [InlineData(ManagedElsaReasonCodeCatalog.ProvisioningTimeoutWorkload)]
     [InlineData("azure.imageRegistry.unsupported")]
     public void Customer_safe_operation_reason_keeps_allowlisted_failure_and_reason_codes(string reasonCode)
     {
@@ -865,6 +869,18 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
         Assert.Equal(
             ManagedElsaReasonCodeCatalog.DeletionProviderCleanupPending,
             ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(operation));
+    }
+
+    [Theory]
+    [InlineData(ManagedElsaProvisioningFailureReason.AzureHealthCrashLoop, ManagedElsaReasonCodeCatalog.ProvisioningHealthCrashLoop)]
+    [InlineData(ManagedElsaProvisioningFailureReason.AzureHealthTimeout, ManagedElsaReasonCodeCatalog.ProvisioningTimeoutHealth)]
+    [InlineData(ManagedElsaProvisioningFailureReason.AzureHealthUnhealthy, ManagedElsaReasonCodeCatalog.ProvisioningTimeoutHealth)]
+    public void Customer_safe_operation_reason_maps_internal_health_failures(string providerCode, string customerCode)
+    {
+        Assert.Equal(customerCode, ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(providerCode));
+        Assert.DoesNotContain("subscriptions/", customerCode, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("resourceGroups", customerCode, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("139", customerCode, StringComparison.Ordinal);
     }
 
     [Fact]

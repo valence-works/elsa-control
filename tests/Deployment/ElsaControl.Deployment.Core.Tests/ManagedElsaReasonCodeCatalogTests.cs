@@ -31,6 +31,8 @@ public sealed class ManagedElsaReasonCodeCatalogTests
         Assert.Contains("deletion.", ManagedElsaReasonLiteralScanner.ReasonFamilyPrefixes, StringComparer.Ordinal);
         Assert.Contains("lifecycle.deletion.", ManagedElsaReasonLiteralScanner.ReasonFamilyPrefixes, StringComparer.Ordinal);
         Assert.Contains("assignment.rebind.", ManagedElsaReasonLiteralScanner.ReasonFamilyPrefixes, StringComparer.Ordinal);
+        Assert.Contains("provisioning.timeout.", ManagedElsaReasonLiteralScanner.ReasonFamilyPrefixes, StringComparer.Ordinal);
+        Assert.Contains("provisioning.health.", ManagedElsaReasonLiteralScanner.ReasonFamilyPrefixes, StringComparer.Ordinal);
         Assert.Equal(ManagedElsaReasonCodeCatalog.DefinedCodes.Count, ManagedElsaReasonCodeCatalog.ByCode.Count);
     }
 
@@ -76,6 +78,10 @@ public sealed class ManagedElsaReasonCodeCatalogTests
     [InlineData(ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeClaimConflict, ManagedElsaReasonClass.Temporary)]
     [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentFailed, ManagedElsaReasonClass.AutoResuming)]
     [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentWaitExceeded, ManagedElsaReasonClass.AutoResuming)]
+    [InlineData(ManagedElsaReasonCodeCatalog.ProvisioningTimeoutFoundation, ManagedElsaReasonClass.AutoResuming)]
+    [InlineData(ManagedElsaReasonCodeCatalog.ProvisioningTimeoutWorkload, ManagedElsaReasonClass.AutoResuming)]
+    [InlineData(ManagedElsaReasonCodeCatalog.ProvisioningTimeoutHealth, ManagedElsaReasonClass.NeedsPerson)]
+    [InlineData(ManagedElsaReasonCodeCatalog.ProvisioningHealthCrashLoop, ManagedElsaReasonClass.NeedsPerson)]
     [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentCanceled, ManagedElsaReasonClass.AutoResuming)]
     [InlineData(ManagedElsaReasonCodeCatalog.AzureRecoveryRetrying, ManagedElsaReasonClass.AutoResuming)]
     [InlineData(ManagedElsaReasonCodeCatalog.AzureRecoveryNeedsOperator, ManagedElsaReasonClass.NeedsPerson)]

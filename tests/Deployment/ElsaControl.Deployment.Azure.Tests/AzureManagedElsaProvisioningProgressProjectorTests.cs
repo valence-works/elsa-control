@@ -599,6 +599,122 @@ public sealed class AzureManagedElsaProvisioningProgressProjectorTests
         Assert.Contains(result.Activity, entry => entry.Status == ManagedElsaProvisioningProgressActivityStatuses.Blocked);
     }
 
+    [Fact]
+    public void Generic_failed_step_diagnostics_do_not_project_a_reason_code()
+    {
+        var result = Project(
+            lifecycleState: ElsaInstanceOperationState.Failed,
+            failureCode: "azure.step.failed",
+            completedAt: AcceptedAt.AddMinutes(8),
+            provider: Provider(
+                AzureProviderOperationStatus.Failed,
+                AzureProviderOperationPhase.WorkloadSubmitted,
+                attemptedStep: AzureProviderRunnerStep.Workload) with
+            {
+                Diagnostics =
+                [
+                    new AzureProviderDiagnostic("azure.step.workload.failed", "azure.step.workload.failed")
+                ],
+                LastObservationReasonCode = "azure.step.workload.failed"
+            });
+
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Failed, result.State);
+        Assert.Null(result.ReasonCode);
+        Assert.DoesNotContain("azure.step.", result.ReasonCode ?? "", StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Health_crash_loop_projects_a_distinct_reason_code_at_health_verification()
+    {
+        var result = Project(
+            lifecycleState: ElsaInstanceOperationState.Failed,
+            failureCode: "azure.step.failed",
+            reconciliationDiagnosticCode: ManagedElsaProvisioningFailureReason.AzureHealthCrashLoop,
+            completedAt: AcceptedAt.AddMinutes(8),
+            provider: Provider(
+                AzureProviderOperationStatus.Failed,
+                AzureProviderOperationPhase.HealthVerified,
+                AcceptedAt.AddMinutes(8),
+                attemptedStep: AzureProviderRunnerStep.Health) with
+            {
+                Diagnostics =
+                [
+                    new AzureProviderDiagnostic("azure.step.health.failed", "azure.step.health.failed"),
+                    new AzureProviderDiagnostic(
+                        ManagedElsaProvisioningFailureReason.AzureHealthCrashLoop,
+                        ManagedElsaProvisioningFailureReason.AzureHealthCrashLoop)
+                ],
+                LastObservationReasonCode = ManagedElsaProvisioningFailureReason.AzureHealthCrashLoop
+            });
+
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Failed, result.State);
+        Assert.Equal(ManagedElsaProvisioningProgressStages.HealthVerification, result.CurrentStage);
+        Assert.Equal(ManagedElsaReasonCodeCatalog.ProvisioningHealthCrashLoop, result.ReasonCode);
+        Assert.Equal(ManagedElsaProvisioningProgressDiagnostics.Failed, result.DiagnosticCode);
+        Assert.Equal(ManagedElsaProvisioningProgressStageStatuses.Blocked, result.Stages[4].Status);
+        AssertGoldenReasonContract(result, ManagedElsaReasonCodeCatalog.ProvisioningHealthCrashLoop);
+    }
+
+    [Fact]
+    public void Health_timeout_projects_a_distinct_timeout_reason()
+    {
+        var result = Project(
+            lifecycleState: ElsaInstanceOperationState.Failed,
+            failureCode: "azure.step.failed",
+            reconciliationDiagnosticCode: ManagedElsaProvisioningFailureReason.AzureHealthTimeout,
+            completedAt: AcceptedAt.AddMinutes(8),
+            provider: Provider(
+                AzureProviderOperationStatus.Failed,
+                AzureProviderOperationPhase.HealthVerified,
+                attemptedStep: AzureProviderRunnerStep.Health) with
+            {
+                Diagnostics =
+                [
+                    new AzureProviderDiagnostic(
+                        ManagedElsaProvisioningFailureReason.AzureHealthTimeout,
+                        ManagedElsaProvisioningFailureReason.AzureHealthTimeout)
+                ],
+                LastObservationReasonCode = ManagedElsaProvisioningFailureReason.AzureHealthTimeout
+            });
+
+        Assert.Equal(ManagedElsaReasonCodeCatalog.ProvisioningTimeoutHealth, result.ReasonCode);
+        Assert.Equal(ManagedElsaProvisioningProgressStages.HealthVerification, result.CurrentStage);
+        AssertGoldenReasonContract(result, ManagedElsaReasonCodeCatalog.ProvisioningTimeoutHealth);
+    }
+
+    [Theory]
+    [InlineData(AzureProviderRunnerStep.Foundation, AzureProviderOperationPhase.FoundationSubmitted, ManagedElsaProvisioningProgressStages.HostingFoundation, ManagedElsaReasonCodeCatalog.ProvisioningTimeoutFoundation)]
+    [InlineData(AzureProviderRunnerStep.Workload, AzureProviderOperationPhase.WorkloadSubmitted, ManagedElsaProvisioningProgressStages.RuntimeDeployment, ManagedElsaReasonCodeCatalog.ProvisioningTimeoutWorkload)]
+    public void Wait_exceeded_projects_a_distinct_timeout_for_the_attempted_stage(
+        AzureProviderRunnerStep attemptedStep,
+        AzureProviderOperationPhase phase,
+        string expectedStage,
+        string expectedReason)
+    {
+        var result = Project(
+            lifecycleState: ElsaInstanceOperationState.RecoveryRequired,
+            failureCode: null,
+            provider: Provider(
+                AzureProviderOperationStatus.RecoveryRequired,
+                phase,
+                attemptedStep: attemptedStep) with
+            {
+                Diagnostics =
+                [
+                    new AzureProviderDiagnostic(
+                        ManagedElsaReasonCodeCatalog.AzureDeploymentWaitExceeded,
+                        ManagedElsaReasonCodeCatalog.AzureDeploymentWaitExceeded)
+                ],
+                LastObservationReasonCode = ManagedElsaReasonCodeCatalog.AzureDeploymentWaitExceeded
+            });
+
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Stale, result.State);
+        Assert.Equal(expectedStage, result.CurrentStage);
+        Assert.Equal(expectedReason, result.ReasonCode);
+        Assert.DoesNotContain("wait-exceeded", result.ReasonCode, StringComparison.Ordinal);
+        AssertGoldenReasonContract(result, expectedReason);
+    }
+
     [Theory]
     [InlineData(ElsaInstanceOperationState.Failed, "provisioning.failed")]
     [InlineData(ElsaInstanceOperationState.Cancelled, "provisioning.cancelled")]
@@ -1105,6 +1221,25 @@ public sealed class AzureManagedElsaProvisioningProgressProjectorTests
         Assert.DoesNotContain("resource-group", json, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("target-secret", json, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("provider.internal.failure", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(Provider().Id.ToString("D"), json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("reasonCode", json, StringComparison.Ordinal);
+    }
+
+    private static void AssertGoldenReasonContract(ManagedElsaProvisioningProgress result, string reasonCode)
+    {
+        var json = JsonSerializer.Serialize(result, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        using var document = JsonDocument.Parse(json);
+        var root = document.RootElement;
+        Assert.Equal(reasonCode, root.GetProperty("reasonCode").GetString());
+        Assert.True(root.TryGetProperty("state", out _));
+        Assert.True(root.TryGetProperty("currentStage", out _));
+        Assert.True(root.TryGetProperty("stages", out _));
+        Assert.True(root.TryGetProperty("activity", out _));
+        Assert.DoesNotContain("subscriptions/", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("resourceGroups", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("provider.internal", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("exit code", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("139", json, StringComparison.Ordinal);
         Assert.DoesNotContain(Provider().Id.ToString("D"), json, StringComparison.OrdinalIgnoreCase);
     }
 

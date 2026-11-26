@@ -1390,7 +1390,8 @@ lever stays off unless all of these are true:
   owner workspace.
 
 This lever has its own flag and workspace allowlist. The billing lever, the
-recovery lever and this lever never enable each other. Only the Workload
+recovery lever, the provisioning-health lever and this lever never enable
+each other. Only the Workload
 step wait changes (`min` of the configured Workload timeout and
 `WorkloadWait`, default 00:00:30, range 00:00:15–00:05:00). Foundation,
 AcrPull, SeedSecrets, Sql*, Health, Promotion, Delete and `CommandTimeout`
@@ -1416,6 +1417,52 @@ the allowlist. Leave a workspace on the allowlist only for the
 QA run. Turn the lever off afterwards: reset the four variables to
 empty/`false` and dispatch `azure-api-deploy` (app) again so the
 `Staging__LateSuccessLever__*` app settings are gone.
+
+### Staging provisioning health lever
+
+Control can fail Health verification on a staging allowlisted instance as a
+crash-loop or a readiness timeout so QA can prove the honest provisioning
+reasons without a hand Azure edit. This is a sibling of the recovery
+lifecycle lever, not an extension of it: it has its own flag, instance
+allowlist, apply script, and admin routes. Recovery inject endpoints stay
+on `Staging:RecoveryLifecycleLever`.
+
+The lever stays off unless both of these are true:
+
+- The deploy pipeline set `Staging:ProvisioningHealthLever:Enabled` and
+  `Staging:ProvisioningHealthLever:AllowedInstanceIds`. Those settings come
+  only from the app-mode apply helper; Bicep and committed appsettings keep
+  the lever off.
+- Control's configured Stripe secret key starts with `sk_test_`. The prefix
+  is compared only; the key is never logged.
+
+The Hosted smoke owner instance (`STAGING_SMOKE_OWNER_INSTANCE_ID`) must not
+appear on the allowlist. Armed modes are process-local: a POST selects
+crash-loop vs timeout without another deploy, and a process recycle clears
+them.
+
+Trigger each state in one line after the instance id is on the allowlist:
+
+- Crash-loop: `POST /api/staging/provisioning-health-lever/{id}/crash-loop`, then Create retry or ApplyRelease so Health runs (`provisioning.health.crash-loop`).
+- Health timeout: `POST /api/staging/provisioning-health-lever/{id}/health-timeout`, then Create retry or ApplyRelease so Health runs (`provisioning.timeout.health`).
+
+`POST /api/staging/provisioning-health-lever/{id}/reset` clears the inject.
+The Health runner records one allow-listed diagnostic
+`staging.provisioning-health-lever.applied` with no instance, workspace, or
+subscription identifiers. Customer-facing copy stays on the existing
+reason catalog.
+
+Set the **`test` GitHub environment** variables
+`STAGING_PROVISIONING_HEALTH_LEVER_ENABLED`,
+`STAGING_PROVISIONING_HEALTH_LEVER_ALLOWED_INSTANCE_IDS`, and
+`STAGING_SMOKE_OWNER_INSTANCE_ID`. The Azure Control API Deploy workflow
+passes them only for `test` and fails if any of those variables is set for
+any other target. When the allowlist is non-empty, the smoke-owner instance
+id is required and the deploy fails closed if it is missing or on the
+allowlist. Leave an instance on the allowlist only for the QA run. Turn the
+lever off afterwards: reset the variables to empty/`false` and dispatch
+`azure-api-deploy` (app) again so the
+`Staging__ProvisioningHealthLever__*` app settings are gone.
 
 ### Multi-tenant Microsoft Entra sign-in (guided design partners)
 
