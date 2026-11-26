@@ -12,17 +12,19 @@ namespace ElsaControl.Deployment.Azure;
 internal sealed class AzureCommandProcess : IAzureCommandProcess
 {
     public static readonly TimeSpan DefaultTimeout = TimeSpan.FromMinutes(5);
-    private static readonly TimeSpan CaptureDrainTimeout = TimeSpan.FromMilliseconds(250);
+    public static readonly TimeSpan DefaultCaptureDrainTimeout = TimeSpan.FromMilliseconds(250);
     public const int DefaultOutputLimit = 64 * 1024;
 
     private readonly TimeSpan _timeout;
+    private readonly TimeSpan _captureDrainTimeout;
     private readonly int _outputCharacterLimit;
     private readonly Func<Process, bool> _terminateProcessTree;
 
     public AzureCommandProcess(
         TimeSpan? timeout = null,
         int outputCharacterLimit = DefaultOutputLimit,
-        Func<Process, bool>? terminateProcessTree = null)
+        Func<Process, bool>? terminateProcessTree = null,
+        TimeSpan? captureDrainTimeout = null)
     {
         _timeout = timeout ?? DefaultTimeout;
         if (_timeout <= TimeSpan.Zero || _timeout == Timeout.InfiniteTimeSpan)
@@ -30,6 +32,10 @@ internal sealed class AzureCommandProcess : IAzureCommandProcess
 
         if (outputCharacterLimit < 1)
             throw new ArgumentOutOfRangeException(nameof(outputCharacterLimit), "The command output limit must be positive.");
+
+        _captureDrainTimeout = captureDrainTimeout ?? DefaultCaptureDrainTimeout;
+        if (_captureDrainTimeout <= TimeSpan.Zero || _captureDrainTimeout == Timeout.InfiniteTimeSpan)
+            throw new ArgumentOutOfRangeException(nameof(captureDrainTimeout), "The capture drain timeout must be positive and finite.");
 
         _outputCharacterLimit = outputCharacterLimit;
         _terminateProcessTree = terminateProcessTree ?? KillProcessTree;
@@ -74,12 +80,12 @@ internal sealed class AzureCommandProcess : IAzureCommandProcess
         var outputLimitReached = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var outputBudget = new OutputBudget(_outputCharacterLimit);
         var standardOutputTask = ReadBoundedAsync(
-            process.StandardOutput,
+            process.StandardOutput.BaseStream,
             outputBudget,
             outputLimitReached,
             captureCancellation.Token);
         var standardErrorTask = ReadBoundedAsync(
-            process.StandardError,
+            process.StandardError.BaseStream,
             outputBudget,
             outputLimitReached,
             captureCancellation.Token);
@@ -133,7 +139,7 @@ internal sealed class AzureCommandProcess : IAzureCommandProcess
             standardOutputTask,
             standardErrorTask,
             captureCancellation).ConfigureAwait(false);
-        if (!captures.Complete)
+        if (!captures.Complete && standardOutputTask.Status != TaskStatus.RanToCompletion)
             return InvalidOutputResult<T>();
         if (outputLimitReached.Task.IsCompleted)
             return OutputLimitExceededResult<T>();
@@ -201,50 +207,116 @@ internal sealed class AzureCommandProcess : IAzureCommandProcess
         return startInfo;
     }
 
-    private static async Task<BoundedCapture> ReadBoundedAsync(
-        StreamReader reader,
+    /// <summary>
+    /// Drain redirected output on I/O completion threads. Bytes are committed before the next
+    /// read is armed, and cancellation completes the task immediately so a descendant-held pipe
+    /// cannot hang the caller. A busy worker pool therefore cannot drop a short successful
+    /// payload by winning the capture-drain timer.
+    /// </summary>
+    private static Task<BoundedCapture> ReadBoundedAsync(
+        Stream stream,
         OutputBudget outputBudget,
         TaskCompletionSource<bool> outputLimitReached,
         CancellationToken cancellationToken)
     {
+        var tcs = new TaskCompletionSource<BoundedCapture>(TaskCreationOptions.RunContinuationsAsynchronously);
         var builder = new StringBuilder(Math.Min(outputBudget.Capacity, 4096));
-        var buffer = new char[4096];
+        var gate = new object();
+        var buffer = new byte[4096];
+        var chars = new char[4096];
+        var decoder = Encoding.UTF8.GetDecoder();
+        var completed = 0;
+
+        void Complete()
+        {
+            if (Interlocked.Exchange(ref completed, 1) != 0)
+                return;
+            string value;
+            lock (gate)
+                value = builder.ToString();
+            tcs.TrySetResult(new BoundedCapture(value));
+        }
+
+        void ReadCallback(IAsyncResult asyncResult)
+        {
+            try
+            {
+                int read;
+                try
+                {
+                    read = stream.EndRead(asyncResult);
+                }
+                catch (Exception) when (Volatile.Read(ref completed) == 1)
+                {
+                    return;
+                }
+                catch (ObjectDisposedException)
+                {
+                    Complete();
+                    return;
+                }
+                catch (IOException)
+                {
+                    Complete();
+                    return;
+                }
+
+                if (Volatile.Read(ref completed) == 1)
+                    return;
+                if (read == 0)
+                {
+                    Complete();
+                    return;
+                }
+
+                var decoded = decoder.GetChars(buffer, 0, read, chars, 0, flush: false);
+                var accepted = outputBudget.Take(decoded);
+                if (accepted > 0)
+                {
+                    lock (gate)
+                        builder.Append(chars, 0, accepted);
+                }
+                if (accepted < decoded)
+                {
+                    outputLimitReached.TrySetResult(true);
+                    Complete();
+                    return;
+                }
+
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    Complete();
+                    return;
+                }
+
+                stream.BeginRead(buffer, 0, buffer.Length, ReadCallback, null);
+            }
+            catch (Exception)
+            {
+                Complete();
+            }
+        }
 
         try
         {
-            while (true)
+            cancellationToken.Register(Complete);
+            if (cancellationToken.IsCancellationRequested)
             {
-                var read = await reader.ReadAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false);
-                if (read == 0)
-                    return new BoundedCapture(builder.ToString());
-
-                var accepted = outputBudget.Take(read);
-                if (accepted < read)
-                {
-                    if (accepted > 0)
-                        builder.Append(buffer, 0, accepted);
-                    outputLimitReached.TrySetResult(true);
-                    return new BoundedCapture(builder.ToString());
-                }
-
-                builder.Append(buffer, 0, read);
+                Complete();
+                return tcs.Task;
             }
+
+            stream.BeginRead(buffer, 0, buffer.Length, ReadCallback, null);
         }
-        catch (ObjectDisposedException)
+        catch (Exception)
         {
-            return new BoundedCapture(builder.ToString());
+            Complete();
         }
-        catch (IOException)
-        {
-            return new BoundedCapture(builder.ToString());
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            return new BoundedCapture(builder.ToString());
-        }
+
+        return tcs.Task;
     }
 
-    private static async Task<BoundedCaptures> ObserveCaptureTasksAsync(
+    private async Task<BoundedCaptures> ObserveCaptureTasksAsync(
         Task<BoundedCapture> standardOutputTask,
         Task<BoundedCapture> standardErrorTask,
         CancellationTokenSource captureCancellation)
@@ -252,24 +324,24 @@ internal sealed class AzureCommandProcess : IAzureCommandProcess
         var capturesTask = Task.WhenAll(standardOutputTask, standardErrorTask);
         try
         {
-            if (await Task.WhenAny(capturesTask, Task.Delay(CaptureDrainTimeout)).ConfigureAwait(false) != capturesTask)
+            if (await Task.WhenAny(capturesTask, Task.Delay(_captureDrainTimeout)).ConfigureAwait(false) != capturesTask)
             {
                 // A descendant can inherit redirected handles after the direct child exits.
                 // Cancel the reads so those inherited handles cannot hold this invocation open.
                 captureCancellation.Cancel();
             }
 
-            if (await Task.WhenAny(capturesTask, Task.Delay(CaptureDrainTimeout)).ConfigureAwait(false) != capturesTask)
+            if (await Task.WhenAny(capturesTask, Task.Delay(_captureDrainTimeout)).ConfigureAwait(false) != capturesTask)
             {
                 _ = capturesTask.ContinueWith(
                     static task => _ = task.Exception,
                     CancellationToken.None,
                     TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
                     TaskScheduler.Default);
-                return new BoundedCaptures(string.Empty, string.Empty, Complete: false);
+                // Prefer a stream that already finished over discarding both captures.
             }
-
-            await capturesTask.ConfigureAwait(false);
+            else
+                await capturesTask.ConfigureAwait(false);
         }
         catch (Exception)
         {
@@ -283,7 +355,8 @@ internal sealed class AzureCommandProcess : IAzureCommandProcess
         var standardError = standardErrorTask.Status == TaskStatus.RanToCompletion
             ? standardErrorTask.Result
             : new BoundedCapture(string.Empty);
-        return new BoundedCaptures(standardOutput.Value, standardError.Value, Complete: true);
+        var complete = standardOutputTask.IsCompleted && standardErrorTask.IsCompleted;
+        return new BoundedCaptures(standardOutput.Value, standardError.Value, complete);
     }
 
     private static async Task<bool> WaitForExitAfterTerminationAsync(Task exitTask)

@@ -48,6 +48,56 @@ public sealed class AzureCommandProcessTests
     }
 
     [Fact]
+    public async Task Captures_a_short_success_payload_before_a_tight_drain_deadline()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        for (var attempt = 0; attempt < 20; attempt++)
+        {
+            var observed = string.Empty;
+            var result = await new AzureCommandProcess(
+                    TimeSpan.FromSeconds(5),
+                    4096,
+                    captureDrainTimeout: TimeSpan.FromMilliseconds(1))
+                .ExecuteAsync(
+                    Shell("printf '%s' true"),
+                    output =>
+                    {
+                        observed = output.ToString();
+                        return AzureCommandNoOutput.Instance;
+                    });
+
+            Assert.True(result.Succeeded, $"Attempt {attempt} classified a successful short payload as {result.Status}/{result.FailureKind}.");
+            Assert.Equal("true", observed);
+        }
+    }
+
+    [Fact]
+    public async Task Captures_stdout_when_a_descendant_keeps_stderr_open()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var observed = string.Empty;
+        var result = await new AzureCommandProcess(
+                TimeSpan.FromSeconds(5),
+                4096,
+                captureDrainTimeout: TimeSpan.FromMilliseconds(50))
+            .ExecuteAsync(
+                Shell("printf '%s' true; sleep 5 >&2 &"),
+                output =>
+                {
+                    observed = output.ToString();
+                    return AzureCommandNoOutput.Instance;
+                });
+
+        Assert.True(result.Succeeded);
+        Assert.Equal("true", observed);
+        Assert.True(result.ExitCode == 0);
+    }
+
+    [Fact]
     public async Task Does_not_wait_for_a_descendant_that_inherits_redirected_output_handles()
     {
         if (OperatingSystem.IsWindows())
