@@ -594,10 +594,23 @@ public static class ManagedElsaInstanceEndpoints
                         access.Role,
                         retryGate);
                     if (!retryDecision.Allowed)
-                        return Problem(
-                            retryDecision.ReasonCode!,
-                            "The requested operation is not valid for the current instance state.",
-                            StatusCodes.Status409Conflict);
+                    {
+                        // A concurrent identical Retry can commit after the first
+                        // key miss. Re-check so this request replays instead of
+                        // 409ing the client's own accepted operation.
+                        var racedRetry = await lifecycleStore.FindOperationByKeyAsync(
+                            workspaceId,
+                            key,
+                            instanceId,
+                            action: null,
+                            idempotencyScope: ManagedElsaInstanceOverviewEndpoints.CustomerOverviewScope(instanceId),
+                            cancellationToken: cancellationToken);
+                        if (racedRetry is null)
+                            return Problem(
+                                retryDecision.ReasonCode!,
+                                "The requested operation is not valid for the current instance state.",
+                                StatusCodes.Status409Conflict);
+                    }
                 }
             }
             else
