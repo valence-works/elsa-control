@@ -586,6 +586,14 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
             "POST /api/staging/lifecycle-lever/instances/{instanceId:guid}/reset",
             allowed,
             StringComparer.Ordinal);
+        Assert.DoesNotContain(
+            "POST /api/staging/lifecycle-lever/instances/{instanceId:guid}/terminal-failed-create",
+            allowed,
+            StringComparer.Ordinal);
+        Assert.DoesNotContain(
+            "POST /api/staging/lifecycle-lever/instances/{instanceId:guid}/terminal-failed-delete",
+            allowed,
+            StringComparer.Ordinal);
     }
 
     [Fact]
