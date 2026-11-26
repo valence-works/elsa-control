@@ -1,6 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup>
     <ProjectReference Include="..\ElsaControl.Deployment.Core\ElsaControl.Deployment.Core.csproj" />
+    <ProjectReference Include="..\..\Provisioning\ElsaControl.Provisioning.Abstractions\ElsaControl.Provisioning.Abstractions.csproj" />
+    <ProjectReference Include="..\..\Provisioning\ElsaControl.Provisioning.Core\ElsaControl.Provisioning.Core.csproj" />
     <ProjectReference Include="..\..\RuntimeBuilder\ElsaControl.RuntimeBuilder.Abstractions\ElsaControl.RuntimeBuilder.Abstractions.csproj" />
   </ItemGroup>
 

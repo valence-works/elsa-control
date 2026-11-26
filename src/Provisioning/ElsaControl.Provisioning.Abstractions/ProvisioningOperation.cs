@@ -60,6 +60,11 @@ public sealed record ProvisioningOperation
     public DateTimeOffset? StartedAt { get; init; }
     public DateTimeOffset? CompletedAt { get; init; }
     public string? FailureCode { get; init; }
+    public bool CancelRequested { get; init; }
+    public bool StateLockMayBeHeld { get; init; }
+    public string? LeaseOwner { get; init; }
+    public DateTimeOffset? LeaseExpiresAt { get; init; }
+    public long FencingToken { get; init; }
 
     public bool IsTerminal =>
         State is ProvisioningOperationState.Succeeded

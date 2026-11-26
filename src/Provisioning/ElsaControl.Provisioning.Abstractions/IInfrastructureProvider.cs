@@ -30,8 +30,9 @@ public interface IInfrastructureProvider
         ProvisioningRequest request,
         CancellationToken cancellationToken = default);
 
-    Task CancelAsync(
+    Task<ProviderRunResult> CancelAsync(
         ProvisioningOperation operation,
+        ProvisioningRequest request,
         CancellationToken cancellationToken = default);
 
     Task<ProviderRunResult> DestroyAsync(

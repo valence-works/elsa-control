@@ -28,11 +28,14 @@ public sealed class ProvisioningOperationHostedService(
         var batchSize = configured.BatchSize is >= 1 and <= 100 ? configured.BatchSize : 10;
         using var timer = new PeriodicTimer(interval);
 
+        await worker.ReconcileInterruptedAsync(stoppingToken).ConfigureAwait(false);
+
         while (true)
         {
             try
             {
                 await worker.ProcessOnceAsync(batchSize, stoppingToken).ConfigureAwait(false);
+                await worker.ReconcileInterruptedAsync(stoppingToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -40,7 +43,9 @@ public sealed class ProvisioningOperationHostedService(
             }
             catch (Exception exception)
             {
-                logger.LogError(exception, "Provisioning operation processing failed.");
+                logger.LogError(
+                    "Provisioning operation processing failed. ExceptionType={ExceptionType}",
+                    exception.GetType().FullName);
             }
 
             try

@@ -10,9 +10,11 @@ namespace ElsaControl.Provisioning.Core;
 public sealed class ProvisioningService(
     IProvisioningOperationStore operations,
     IProvisioningEventStore events,
+    ProvisioningRunRegistry? runs = null,
     TimeProvider? timeProvider = null) : IProvisioningService
 {
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
+    private readonly ProvisioningRunRegistry _runs = runs ?? new ProvisioningRunRegistry();
 
     public Task<ProvisioningEnqueueResult> PreviewAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
         EnqueueAsync(request, ProvisioningCommand.Preview, cancellationToken);
@@ -80,26 +82,57 @@ public sealed class ProvisioningService(
                 request.StackConfig);
         }
 
+        if (request.Target.StackKind == ProvisioningStackKind.Engine
+            && !ProvisioningStackName.TryParseEngineInstanceId(request.Target.StackName, out _))
+        {
+            throw new InvalidOperationException("Engine stack names must be engine-{instanceId}.");
+        }
+
         foreach (var pair in request.StackConfig)
         {
-            if (ProvisioningEventSanitizer.ContainsSensitiveToken(pair.Key)
-                || ProvisioningEventSanitizer.ContainsSensitiveToken(pair.Value))
+            if (ProvisioningEventSanitizer.IsAdmittedSecretConfigKey(pair.Key))
+            {
+                if (!ProvisioningEventSanitizer.IsSecretLocator(pair.Value))
+                {
+                    throw new InvalidOperationException(
+                        "Admin password override must be a secret locator.");
+                }
+
+                continue;
+            }
+
+            if (ProvisioningEventSanitizer.ContainsSecretOrResourceIdentifier(pair.Key)
+                || ProvisioningEventSanitizer.ContainsSecretOrResourceIdentifier(pair.Value))
             {
                 throw new InvalidOperationException("Stack config must not contain secrets or cloud identifiers.");
             }
         }
 
-        var hash = InMemoryProvisioningStore.HashRequest(request);
+        var hash = ProvisioningRequestHash.Compute(request);
         var result = await operations.CreateOrGetAsync(request, hash, _timeProvider.GetUtcNow(), cancellationToken)
             .ConfigureAwait(false);
         if (result.Replayed)
             return result;
 
-        ProvisioningRequestBuffer.Put(result.OperationId, request);
+        if (command == ProvisioningCommand.Cancel)
+        {
+            _runs.TryCancel(request.Target.StackKind, ProvisioningStackName.Canonicalize(request.Target.StackName));
+        }
+
         var kind = result.LockConflict
             ? ProvisioningEventKind.LockConflicted
-            : ProvisioningEventKind.OperationQueued;
-        var message = result.LockConflict ? "Stack lock conflict." : "Operation queued.";
+            : result.State == ProvisioningOperationState.Succeeded
+                ? result.Code == ProvisioningFailureCodes.NothingToCancel
+                    ? ProvisioningEventKind.OperationSucceeded
+                    : ProvisioningEventKind.OperationCancelled
+                : ProvisioningEventKind.OperationQueued;
+        var message = result.LockConflict
+            ? "Stack lock conflict."
+            : result.Code == ProvisioningFailureCodes.NothingToCancel
+                ? "Nothing to cancel."
+                : result.State == ProvisioningOperationState.Succeeded
+                    ? "Cancel requested."
+                    : "Operation queued.";
         await events.AppendAsync(
             [
                 new ProvisioningEvent(

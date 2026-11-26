@@ -4,6 +4,12 @@ namespace ElsaControl.Provisioning.Core.Tests;
 
 internal static class ProvisioningFixtures
 {
+    public static readonly Guid EngineA = Guid.Parse("aaaaaaaa-bbbb-cccc-dddd-111111111111");
+    public static readonly Guid EngineB = Guid.Parse("aaaaaaaa-bbbb-cccc-dddd-222222222222");
+
+    public static string EngineName(Guid? instanceId = null) =>
+        ProvisioningStackName.ForEngine(instanceId ?? EngineA);
+
     public static EngineSpec EngineSpec() =>
         new(
             "elsa-server:test",
@@ -32,11 +38,11 @@ internal static class ProvisioningFixtures
             new StateBackendReference(StateBackendReference.InMemoryKind, "memory://provisioning"),
             new SecretsProviderReference(SecretsProviderReference.InMemoryKind, "memory://secrets"));
 
-    public static ProvisioningTarget EngineTarget(string stackName, string platformStackName = "staging") =>
+    public static ProvisioningTarget EngineTarget(string? stackName = null, string platformStackName = "staging") =>
         new(
             FakeInfrastructureProvider.Id,
             ProvisioningStackKind.Engine,
-            stackName,
+            stackName ?? EngineName(),
             new CredentialReference(CredentialReference.InMemoryKind),
             new StateBackendReference(StateBackendReference.InMemoryKind, "memory://provisioning"),
             new SecretsProviderReference(SecretsProviderReference.InMemoryKind, "memory://secrets"),

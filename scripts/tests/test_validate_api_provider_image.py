@@ -68,7 +68,10 @@ esac
                          "--env Authentication__ApiKey", "docker exec",
                          "curl --fail --silent --max-time 2", "deadline=$((SECONDS + 60))",
                          'docker stop --time 30 "$container_id"', "Application is shutting down...",
-                         'docker rm --force "$container_id"'):
+                         'docker rm --force "$container_id"',
+                         'test "$PULUMI_DISABLE_AUTOMATIC_PLUGIN_ACQUISITION" = true',
+                         "test -x /opt/pulumi/plugins/resource-azure-native-v3.11.0/pulumi-resource-azure-native",
+                         "test -x /opt/pulumi/plugins/resource-random-v4.18.5/pulumi-resource-random"):
             self.assertIn(required, source)
         for forbidden in ("--publish", "--volume"):
             self.assertNotIn(forbidden, source)
@@ -116,7 +119,7 @@ esac
     def test_failed_payload_probe_fails_closed_before_health_and_cleans(self) -> None:
         result = self.run_smoke(FAKE_PAYLOAD_EXIT="1")
         self.assertNotEqual(0, result.returncode)
-        self.assertIn("application payload is missing the console or contains npm development artifacts", result.stderr)
+        self.assertIn("application payload is missing the console, Pulumi CLI, or contains npm development artifacts", result.stderr)
         self.assertNotIn("untrusted application payload detail", result.stdout + result.stderr)
         calls = self.log.read_text()
         self.assertNotIn("curl --fail", calls)

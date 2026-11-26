@@ -7,4 +7,5 @@ public sealed record ProvisioningEnqueueResult(
     Guid OperationId,
     ProvisioningOperationState State,
     bool Replayed,
-    bool LockConflict);
+    bool LockConflict,
+    string? Code = null);

@@ -11,6 +11,7 @@ public static partial class ProvisioningEventSanitizer
 {
     public const string DefaultResourceKind = "resource";
     public const string DefaultMessage = "Resource update.";
+    public const string AdminPasswordOverrideKey = "adminPasswordOverride";
 
     public static ProvisioningEvent Sanitize(ProvisioningEvent value)
     {
@@ -40,10 +41,37 @@ public static partial class ProvisioningEventSanitizer
     }
 
     public static bool ContainsSensitiveToken(string value) =>
-        SubscriptionPath().IsMatch(value)
-        || ResourceIdentifier().IsMatch(value)
-        || Endpoint().IsMatch(value)
-        || SecretToken().IsMatch(value);
+        ContainsSecretOrResourceIdentifier(value)
+        || Endpoint().IsMatch(value);
+
+    /// <summary>
+    /// Stack config may include an admitted image repository host. It must
+    /// never include secret values, subscription paths, or resource IDs.
+    /// </summary>
+    public static bool ContainsSecretOrResourceIdentifier(string value)
+    {
+        if (IsSecretLocator(value))
+            return false;
+        return SubscriptionPath().IsMatch(value)
+               || ResourceIdentifier().IsMatch(value)
+               || SecretToken().IsMatch(value)
+               || UrlCredential().IsMatch(value);
+    }
+
+    /// <summary>
+    /// <c>secret://name/secret</c> locators are not secret values.
+    /// </summary>
+    public static bool IsSecretLocator(string value) =>
+        value.StartsWith("secret://", StringComparison.OrdinalIgnoreCase)
+        && !value.Contains('=', StringComparison.Ordinal)
+        && !UrlCredential().IsMatch(value);
+
+    /// <summary>
+    /// Allowlisted stack-config keys whose names match a secret token. Values
+    /// must still be locators, never plaintext.
+    /// </summary>
+    public static bool IsAdmittedSecretConfigKey(string key) =>
+        string.Equals(key, AdminPasswordOverrideKey, StringComparison.Ordinal);
 
     [GeneratedRegex(@"subscriptions[/\\]", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex SubscriptionPath();
@@ -54,6 +82,9 @@ public static partial class ProvisioningEventSanitizer
     [GeneratedRegex(@"https?://|[\w.-]+\.(azurewebsites|blob\.core|vault\.azure|azurecr)\.", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex Endpoint();
 
-    [GeneratedRegex(@"password|connection string|accountkey|sharedaccesssignature|secret=|secret:", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"password|connection string|accountkey|sharedaccesssignature|secret=", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex SecretToken();
+
+    [GeneratedRegex(@"[?&]sig=|://[^/\s?#]+@", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex UrlCredential();
 }

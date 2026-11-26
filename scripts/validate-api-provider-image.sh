@@ -61,8 +61,16 @@ if ! docker exec "$container_id" sh -ec '
   test -z "$modules"
   locks="$(find /app \( -name package-lock.json -o -name npm-shrinkwrap.json \) -print -quit)" || exit 1
   test -z "$locks"
+  command -v pulumi >/dev/null
+  pulumi version >/dev/null
+  test -x /usr/local/bin/pulumi-language-dotnet
+  test ! -e /usr/local/bin/pulumi-language-nodejs
+  test ! -e /usr/local/bin/pulumi-language-python
+  test -x /opt/pulumi/plugins/resource-azure-native-v3.11.0/pulumi-resource-azure-native
+  test -x /opt/pulumi/plugins/resource-random-v4.18.5/pulumi-resource-random
+  test "$PULUMI_DISABLE_AUTOMATIC_PLUGIN_ACQUISITION" = true
 ' >/dev/null 2>&1; then
-  fail "application payload is missing the console or contains npm development artifacts"
+  fail "application payload is missing the console, Pulumi CLI, or contains npm development artifacts"
 fi
 
 healthy=false

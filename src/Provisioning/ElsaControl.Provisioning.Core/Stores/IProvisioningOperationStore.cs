@@ -24,5 +24,48 @@ public interface IProvisioningOperationStore
         ProvisioningOperationState state,
         DateTimeOffset now,
         string? failureCode,
+        CancellationToken cancellationToken = default,
+        bool stateLockMayBeHeld = false,
+        long? fencingToken = null);
+
+    Task<ProvisioningRequest?> GetRequestAsync(Guid operationId, CancellationToken cancellationToken = default);
+
+    Task<ProvisioningOperation?> FindRunningAsync(
+        ProvisioningStackKind kind,
+        string stackName,
+        CancellationToken cancellationToken = default);
+
+    Task<ProvisioningOperation?> FindQueuedAsync(
+        ProvisioningStackKind kind,
+        string stackName,
+        CancellationToken cancellationToken = default);
+
+    Task<bool> RenewLeaseAsync(Guid operationId, DateTimeOffset now, CancellationToken cancellationToken = default);
+
+    Task RequestCancelAsync(Guid operationId, CancellationToken cancellationToken = default);
+
+    Task<bool> IsCancelRequestedAsync(Guid operationId, CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<ProvisioningOperation>> ListStateLockPendingAsync(
+        CancellationToken cancellationToken = default);
+
+    Task<bool> HoldsFenceAsync(
+        Guid operationId,
+        long fencingToken,
+        CancellationToken cancellationToken = default);
+
+    Task<bool> MarkStateLockClearedAsync(
+        Guid operationId,
+        CancellationToken cancellationToken = default,
+        long? fencingToken = null);
+
+    /// <summary>
+    /// Reclaims expired leases on running operations and on finished
+    /// operations that still hold the stack lock. Live replicas are left
+    /// alone. Returned rows keep the module lock until the Pulumi state lock
+    /// is cleared.
+    /// </summary>
+    Task<IReadOnlyList<ProvisioningOperation>> FailInterruptedAsync(
+        DateTimeOffset now,
         CancellationToken cancellationToken = default);
 }

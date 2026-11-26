@@ -1,3 +1,5 @@
+using ElsaControl.Provisioning.Abstractions;
+
 namespace ElsaControl.Provisioning.Core.Stores;
 
 /// <summary>
@@ -5,9 +7,22 @@ namespace ElsaControl.Provisioning.Core.Stores;
 /// </summary>
 public interface IProvisioningStackLockStore
 {
-    Task<bool> TryAcquireAsync(string stackName, Guid operationId, DateTimeOffset now, CancellationToken cancellationToken = default);
+    Task<bool> TryAcquireAsync(
+        ProvisioningStackKind kind,
+        string stackName,
+        Guid operationId,
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default);
 
-    Task ReleaseAsync(string stackName, Guid operationId, CancellationToken cancellationToken = default);
+    Task<bool> ReleaseAsync(
+        ProvisioningStackKind kind,
+        string stackName,
+        Guid operationId,
+        CancellationToken cancellationToken = default,
+        long? fencingToken = null);
 
-    Task<Guid?> GetHolderAsync(string stackName, CancellationToken cancellationToken = default);
+    Task<Guid?> GetHolderAsync(
+        ProvisioningStackKind kind,
+        string stackName,
+        CancellationToken cancellationToken = default);
 }

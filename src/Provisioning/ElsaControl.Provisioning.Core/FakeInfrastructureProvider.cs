@@ -29,6 +29,18 @@ public sealed class FakeInfrastructureProvider : IInfrastructureProvider, ICrede
     public IReadOnlyDictionary<string, string> EnvironmentVariables { get; } =
         new Dictionary<string, string>(StringComparer.Ordinal);
 
+    public TimeSpan Stall { get; set; }
+
+    /// <summary>
+    /// When true, CancelAsync returns a failed result without throwing, the
+    /// same way the Azure client reports a backend cancel that did not run.
+    /// </summary>
+    public bool CancelFails { get; set; }
+
+    public TaskCompletionSource Started { get; } = new();
+
+    public int CancelCalls { get; private set; }
+
     public IReadOnlySet<string> Capabilities { get; } = new HashSet<string>(StringComparer.Ordinal)
     {
         ProvisioningCapability.ContainerRuntime,
@@ -79,13 +91,44 @@ public sealed class FakeInfrastructureProvider : IInfrastructureProvider, ICrede
         CancellationToken cancellationToken = default) =>
         RunAsync(operation, request, mutate: false, cancellationToken);
 
-    public Task CancelAsync(ProvisioningOperation operation, CancellationToken cancellationToken = default)
+    public Task<ProviderRunResult> CancelAsync(
+        ProvisioningOperation operation,
+        ProvisioningRequest request,
+        CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         ArgumentNullException.ThrowIfNull(operation);
+        ArgumentNullException.ThrowIfNull(request);
+        var now = _timeProvider.GetUtcNow();
         lock (_gate)
+        {
+            CancelCalls++;
+            if (CancelFails)
+            {
+                var failed = Event(
+                    operation.Id,
+                    ProvisioningEventKind.LockConflicted,
+                    ResourceKind(request),
+                    "Stack lock conflict.",
+                    now);
+                return Task.FromResult(ProviderRunResult.Fail([failed], ProvisioningFailureCodes.StackLocked));
+            }
+
             _cancelled.Add(operation.Id);
-        return Task.CompletedTask;
+        }
+
+        // Cancel never destroys. Idle and post-success stacks both return
+        // a value-free nothing-to-cancel result.
+        var nothing = Event(
+            operation.Id,
+            ProvisioningEventKind.OperationCancelled,
+            ResourceKind(request),
+            "Nothing to cancel.",
+            now);
+        return Task.FromResult(new ProviderRunResult(
+            true,
+            [nothing],
+            failureCode: ProvisioningFailureCodes.NothingToCancel));
     }
 
     public Task<ProviderRunResult> DestroyAsync(
@@ -100,13 +143,13 @@ public sealed class FakeInfrastructureProvider : IInfrastructureProvider, ICrede
         var now = _timeProvider.GetUtcNow();
         lock (_gate)
         {
-            _stacks.Remove(operation.StackName);
+            _stacks.Remove(StackKey(operation.StackKind, operation.StackName));
             var events = new[]
             {
                 Event(operation.Id, ProvisioningEventKind.ResourceStarted, ResourceKind(request), "Destroy started.", now),
                 Event(operation.Id, ProvisioningEventKind.ResourceSucceeded, ResourceKind(request), "Destroy completed.", now)
             };
-            return Task.FromResult(ProviderRunResult.Ok(events));
+            return Task.FromResult(ProviderRunResult.Ok(events, ownedResourcesAbsent: true));
         }
     }
 
@@ -114,17 +157,20 @@ public sealed class FakeInfrastructureProvider : IInfrastructureProvider, ICrede
     {
         var canonical = ProvisioningStackName.Canonicalize(stackName);
         lock (_gate)
-            return _stacks.ContainsKey(canonical);
+            return _stacks.Keys.Any(key => key.EndsWith("/" + canonical, StringComparison.Ordinal));
     }
 
     public IReadOnlyDictionary<string, string>? GetOutputs(string stackName)
     {
         var canonical = ProvisioningStackName.Canonicalize(stackName);
         lock (_gate)
-            return _stacks.TryGetValue(canonical, out var stack) ? stack.Outputs : null;
+        {
+            var match = _stacks.FirstOrDefault(pair => pair.Key.EndsWith("/" + canonical, StringComparison.Ordinal));
+            return match.Value?.Outputs;
+        }
     }
 
-    private Task<ProviderRunResult> RunAsync(
+    private async Task<ProviderRunResult> RunAsync(
         ProvisioningOperation operation,
         ProvisioningRequest request,
         bool mutate,
@@ -133,6 +179,11 @@ public sealed class FakeInfrastructureProvider : IInfrastructureProvider, ICrede
         ArgumentNullException.ThrowIfNull(operation);
         ArgumentNullException.ThrowIfNull(request);
         cancellationToken.ThrowIfCancellationRequested();
+        if (Stall > TimeSpan.Zero)
+        {
+            Started.TrySetResult();
+            await Task.Delay(Stall, cancellationToken).ConfigureAwait(false);
+        }
 
         var missing = request.Spec.RequiredCapabilities.Where(capability => !Capabilities.Contains(capability)).ToArray();
         if (missing.Length > 0)
@@ -143,7 +194,7 @@ public sealed class FakeInfrastructureProvider : IInfrastructureProvider, ICrede
                 ProvisioningCapability.ContainerRuntime,
                 "Required capability is not available.",
                 _timeProvider.GetUtcNow());
-            return Task.FromResult(ProviderRunResult.Fail([failed], "provider.capability-missing"));
+            return ProviderRunResult.Fail([failed], ProvisioningFailureCodes.CapabilityMissing);
         }
 
         lock (_gate)
@@ -156,14 +207,14 @@ public sealed class FakeInfrastructureProvider : IInfrastructureProvider, ICrede
                     ResourceKind(request),
                     "Operation cancelled.",
                     _timeProvider.GetUtcNow());
-                return Task.FromResult(ProviderRunResult.Fail([cancelled], "operation.cancelled"));
+                return ProviderRunResult.Fail([cancelled], ProvisioningFailureCodes.Cancelled);
             }
 
             IReadOnlyDictionary<string, string>? platformOutputs = null;
             if (request.Target.StackKind == ProvisioningStackKind.Engine)
             {
-                var platformName = ProvisioningStackName.Canonicalize(request.Target.PlatformStackName!);
-                if (!_stacks.TryGetValue(platformName, out var platform))
+                var platformKey = StackKey(ProvisioningStackKind.Platform, request.Target.PlatformStackName!);
+                if (!_stacks.TryGetValue(platformKey, out var platform))
                 {
                     var missingPlatform = Event(
                         operation.Id,
@@ -171,7 +222,7 @@ public sealed class FakeInfrastructureProvider : IInfrastructureProvider, ICrede
                         ProvisioningCapability.SharedEnvironment,
                         "Platform stack is absent.",
                         _timeProvider.GetUtcNow());
-                    return Task.FromResult(ProviderRunResult.Fail([missingPlatform], "platform.absent"));
+                    return ProviderRunResult.Fail([missingPlatform], ProvisioningFailureCodes.PlatformAbsent);
                 }
 
                 platformOutputs = platform.Outputs;
@@ -179,7 +230,7 @@ public sealed class FakeInfrastructureProvider : IInfrastructureProvider, ICrede
 
             var outputs = BuildOutputs(request, platformOutputs);
             if (mutate)
-                _stacks[operation.StackName] = new FakeStack(operation.StackName, request.Target.StackKind, outputs);
+                _stacks[StackKey(operation.StackKind, operation.StackName)] = new FakeStack(operation.StackName, request.Target.StackKind, outputs);
 
             var now = _timeProvider.GetUtcNow();
             var events = new[]
@@ -187,7 +238,7 @@ public sealed class FakeInfrastructureProvider : IInfrastructureProvider, ICrede
                 Event(operation.Id, ProvisioningEventKind.ResourceStarted, ResourceKind(request), "Apply started.", now),
                 Event(operation.Id, ProvisioningEventKind.ResourceSucceeded, ResourceKind(request), "Apply completed.", now)
             };
-            return Task.FromResult(ProviderRunResult.Ok(events, outputs));
+            return ProviderRunResult.Ok(events, outputs);
         }
     }
 
@@ -233,6 +284,9 @@ public sealed class FakeInfrastructureProvider : IInfrastructureProvider, ICrede
         string message,
         DateTimeOffset occurredAt) =>
         new(operationId, kind, resourceKind, message, occurredAt);
+
+    private static string StackKey(ProvisioningStackKind kind, string stackName) =>
+        ProvisioningStackLockKey.Format(kind, ProvisioningStackName.Canonicalize(stackName));
 
     private const string InMemoryKind = "in-memory";
 

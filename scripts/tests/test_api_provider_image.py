@@ -47,6 +47,17 @@ class ApiProviderImageTests(unittest.TestCase):
         self.assertIn("icu tzdata libstdc++ openssl-libs", self.source)
         self.assertNotIn("DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=true", self.source)
 
+    def test_pulumi_plugins_are_checksum_pinned_and_baked(self) -> None:
+        self.assertIn("ARG PULUMI_AZURE_NATIVE_VERSION=3.11.0", self.source)
+        self.assertIn("ARG PULUMI_RANDOM_VERSION=4.18.5", self.source)
+        self.assertRegex(self.source, r"ARG PULUMI_AZURE_NATIVE_AMD64_SHA256=[0-9a-f]{64}")
+        self.assertRegex(self.source, r"ARG PULUMI_AZURE_NATIVE_ARM64_SHA256=[0-9a-f]{64}")
+        self.assertRegex(self.source, r"ARG PULUMI_RANDOM_AMD64_SHA256=[0-9a-f]{64}")
+        self.assertRegex(self.source, r"ARG PULUMI_RANDOM_ARM64_SHA256=[0-9a-f]{64}")
+        self.assertIn("PULUMI_DISABLE_AUTOMATIC_PLUGIN_ACQUISITION=true", self.source)
+        self.assertIn("pulumi-resource-azure-native", self.source)
+        self.assertIn("pulumi-resource-random", self.source)
+
     def test_image_does_not_enable_remote_mutation_by_default(self) -> None:
         for forbidden in (
             "Deployment__AzureProvider__WorkerEnabled=true",

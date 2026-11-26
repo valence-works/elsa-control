@@ -25,7 +25,8 @@ public static class ProvisioningOperationStateMachine
             [
                 ProvisioningOperationState.Succeeded,
                 ProvisioningOperationState.Failed,
-                ProvisioningOperationState.Cancelling
+                ProvisioningOperationState.Cancelling,
+                ProvisioningOperationState.Cancelled
             ],
             [ProvisioningOperationState.Cancelling] =
             [
@@ -71,4 +72,7 @@ public static class ProvisioningOperationStateMachine
 
     public static bool HoldsStackLock(ProvisioningOperationState state) =>
         state is ProvisioningOperationState.Running or ProvisioningOperationState.Cancelling;
+
+    public static bool MayReclaimExpiredLease(ProvisioningOperationState state, bool stateLockMayBeHeld) =>
+        HoldsStackLock(state) || (IsTerminal(state) && stateLockMayBeHeld);
 }
