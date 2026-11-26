@@ -87,6 +87,11 @@ Split `ElsaEngineStack` into four `ComponentResource`s under
 
 Two programs stay as in ADR-0021: `elsa-platform` and `elsa-engine`. The Shared
 shard is a **third program, `elsa-shard`**, composed from the same components.
+Isolation and SKU rules carried from #1014 (fixed, not profile options):
+- `EngineComponent` creates a **per-engine** Container Apps environment and Log Analytics workspace inside the engine's resource group for Dedicated and BYO, so destroy and the delete receipt cover everything. A shared Container Apps environment exists only inside an `elsa-shard` stack (the Shared tier).
+- `DatabaseComponent` pins engine databases to **Standard S0**, enforced by a test and by policy (§6).
+- Every run (preview, up, refresh, destroy) goes through the provisioning module's **SQL-backed queue and per-stack lock with a fencing token** (ADR-0021, #1014). The Blob state lock is a second guard only, and a conflict there ends the run as `provider.stack.locked`.
+
 Component refactoring must produce **no diff** on an existing Pulumi engine stack
 (Pulumi `aliases` where URNs move); that is a test gate.
 
@@ -117,7 +122,7 @@ Component refactoring must produce **no diff** on an existing Pulumi engine stac
 ### 4. Preview before apply
 
 - Any change to a live instance's profile runs a Pulumi `preview` with the mapped
-  config, through the module, under the stack lock, against our Blob state.
+  config, through the module's SQL-backed queue and fenced per-stack lock, against our Blob state.
 - The Hub shows a **sanitized summary** only: capability-level changes ("engine size
   medium to large", "private networking on"), flags for **replacing** or
   **data-destructive** steps, the expected downtime class, and a cost estimate. No
