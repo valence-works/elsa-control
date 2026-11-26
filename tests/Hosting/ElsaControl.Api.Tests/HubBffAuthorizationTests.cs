@@ -56,6 +56,7 @@ public sealed class HubBffAuthorizationTests
         "POST /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/apply-release",
         "POST /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/delete",
         "POST /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/delete-confirmations",
+        "POST /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/operations",
         "POST /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/restart"
     ];
 
@@ -68,7 +69,7 @@ public sealed class HubBffAuthorizationTests
         response.EnsureSuccessStatusCode();
 
         Assert.Equal(ExpectedHubBffAllowlist.Order(StringComparer.Ordinal), EnumerateHubBffAllowlist(app));
-        Assert.Equal(22, ExpectedHubBffAllowlist.Length);
+        Assert.Equal(23, ExpectedHubBffAllowlist.Length);
     }
 
     [Fact]
@@ -452,6 +453,7 @@ public sealed class HubBffAuthorizationTests
     [InlineData("POST", "/{instanceId}/apply-release")]
     [InlineData("POST", "/{instanceId}/delete-confirmations")]
     [InlineData("POST", "/{instanceId}/delete")]
+    [InlineData("POST", "/{instanceId}/operations")]
     [InlineData("GET", "/{instanceId}/delete-operations/{operationId}")]
     [InlineData("GET", "/operations/by-idempotency-key")]
     [InlineData("GET", "/{instanceId}/operations/{operationId}/cleanup-receipt")]
@@ -479,9 +481,11 @@ public sealed class HubBffAuthorizationTests
                 ? new ManagedElsaInstanceApplyReleaseRequest("3.8.5")
                 : suffix.EndsWith("/delete", StringComparison.Ordinal)
                     ? new ManagedElsaInstanceDeleteRequest(Guid.NewGuid())
-                    : method == "POST" && suffix.Length == 0
-                        ? new ManagedElsaInstanceCreateRequest("Cross", "hub-cross-create", Intent())
-                        : null);
+                    : suffix.EndsWith("/operations", StringComparison.Ordinal)
+                        ? new ManagedElsaInstanceOperationRequest(ElsaInstanceOperationAction.Retry)
+                        : method == "POST" && suffix.Length == 0
+                            ? new ManagedElsaInstanceCreateRequest("Cross", "hub-cross-create", Intent())
+                            : null);
         using var response = await outsider.SendAsync(request);
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
@@ -550,7 +554,6 @@ public sealed class HubBffAuthorizationTests
     [InlineData("GET", "/api/workspaces/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/instances/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/resolved-plans/plan-1")]
     [InlineData("GET", "/api/workspaces/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/instances/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/deployments")]
     [InlineData("GET", "/api/workspaces/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/instances/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/audit")]
-    [InlineData("POST", "/api/workspaces/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/instances/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/operations")]
     [InlineData("GET", "/api/workspaces/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/instances/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/operations")]
     [InlineData("GET", "/api/workspaces/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/instances/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/operations/dddddddd-dddd-dddd-dddd-dddddddddddd")]
     public async Task Never_marked_routes_return_hub_bff_denied_for_a_hub_session(string method, string path)

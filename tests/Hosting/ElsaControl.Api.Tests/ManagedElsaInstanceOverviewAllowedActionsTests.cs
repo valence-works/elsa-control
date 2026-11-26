@@ -29,6 +29,141 @@ public sealed class ManagedElsaInstanceOverviewAllowedActionsTests
         Assert.Equal(ManagedElsaInstanceOverviewEndpoints.InstanceFailedCode, overview.AllowedActions.Restart.ReasonCode);
         Assert.True(overview.AllowedActions.Delete.Allowed);
         Assert.Null(overview.AllowedActions.Delete.ReasonCode);
+        Assert.False(overview.AllowedActions.Retry.Allowed);
+        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.RetryNotFailedCreateCode, overview.AllowedActions.Retry.ReasonCode);
+    }
+
+    [Fact]
+    public void Owner_may_retry_a_terminal_failed_create()
+    {
+        var instance = Instance(ElsaObservedLifecycle.Failed, ElsaInstanceHealth.Unreachable);
+        var last = Operation(instance.Id, ElsaInstanceOperationAction.Create, ElsaInstanceOperationState.Failed);
+        var decision = Overview(instance, lastOperation: last).AllowedActions.Retry;
+
+        Assert.True(decision.Allowed);
+        Assert.Null(decision.ReasonCode);
+        Assert.False(Overview(instance, lastOperation: last).AllowedActions.Restart.Allowed);
+        Assert.Equal(
+            ManagedElsaInstanceOverviewEndpoints.InstanceFailedCode,
+            Overview(instance, lastOperation: last).AllowedActions.Restart.ReasonCode);
+    }
+
+    [Theory]
+    [InlineData(ElsaInstanceOperationState.Accepted)]
+    [InlineData(ElsaInstanceOperationState.Queued)]
+    [InlineData(ElsaInstanceOperationState.WaitingForPriorOperation)]
+    [InlineData(ElsaInstanceOperationState.EntitlementHeld)]
+    [InlineData(ElsaInstanceOperationState.Running)]
+    public void Failed_create_with_retry_in_flight_is_denied(ElsaInstanceOperationState retryState)
+    {
+        var instance = Instance(ElsaObservedLifecycle.Provisioning);
+        var last = Operation(instance.Id, ElsaInstanceOperationAction.Create, ElsaInstanceOperationState.Failed);
+        var retry = Operation(instance.Id, ElsaInstanceOperationAction.Retry, retryState);
+        var decision = Overview(instance, retry, lastOperation: last).AllowedActions.Retry;
+
+        Assert.True(ManagedElsaInstanceOverviewEndpoints.HasCustomerRetryInFlight(retry));
+        Assert.False(decision.Allowed);
+        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.RetryInFlightCode, decision.ReasonCode);
+    }
+
+    [Fact]
+    public void Failed_create_then_deleting_denies_retry()
+    {
+        var instance = Instance(ElsaObservedLifecycle.Deleting, desired: ElsaDesiredLifecycle.Deleting);
+        var last = Operation(instance.Id, ElsaInstanceOperationAction.Create, ElsaInstanceOperationState.Failed);
+        var delete = Operation(instance.Id, ElsaInstanceOperationAction.Delete, ElsaInstanceOperationState.Accepted);
+        var decision = Overview(instance, delete, lastOperation: last).AllowedActions.Retry;
+
+        Assert.False(decision.Allowed);
+        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.RetryDeletingCode, decision.ReasonCode);
+    }
+
+    [Fact]
+    public void Recovery_required_operation_denies_retry()
+    {
+        var instance = Instance(ElsaObservedLifecycle.Failed, ElsaInstanceHealth.Unreachable);
+        var last = Operation(instance.Id, ElsaInstanceOperationAction.Create, ElsaInstanceOperationState.Failed);
+        var recovery = Operation(instance.Id, ElsaInstanceOperationAction.Create, ElsaInstanceOperationState.RecoveryRequired);
+        var decision = Overview(instance, recovery, lastOperation: last).AllowedActions.Retry;
+
+        Assert.True(ManagedElsaInstanceOverviewEndpoints.HasCustomerRetryRecoveryRequired(recovery, last));
+        Assert.False(decision.Allowed);
+        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.RetryRecoveryRequiredCode, decision.ReasonCode);
+    }
+
+    [Fact]
+    public void Ready_engine_denies_retry_as_not_failed_create()
+    {
+        var instance = Instance(ElsaObservedLifecycle.Ready);
+        var last = Operation(instance.Id, ElsaInstanceOperationAction.Create, ElsaInstanceOperationState.Succeeded);
+        var decision = Overview(instance, lastOperation: last).AllowedActions.Retry;
+
+        Assert.False(decision.Allowed);
+        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.RetryNotFailedCreateCode, decision.ReasonCode);
+    }
+
+    [Fact]
+    public void Degraded_engine_with_failed_restart_denies_retry_as_not_failed_create()
+    {
+        var instance = Instance(ElsaObservedLifecycle.Degraded, ElsaInstanceHealth.Degraded);
+        var last = Operation(instance.Id, ElsaInstanceOperationAction.Restart, ElsaInstanceOperationState.Failed);
+        var decision = Overview(instance, lastOperation: last).AllowedActions.Retry;
+
+        Assert.False(decision.Allowed);
+        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.RetryNotFailedCreateCode, decision.ReasonCode);
+    }
+
+    [Theory]
+    [InlineData(WorkspaceRole.Reader)]
+    public void Viewer_role_denies_retry_with_permission_required(WorkspaceRole role)
+    {
+        var instance = Instance(ElsaObservedLifecycle.Failed, ElsaInstanceHealth.Unreachable);
+        var last = Operation(instance.Id, ElsaInstanceOperationAction.Create, ElsaInstanceOperationState.Failed);
+        var decision = Overview(instance, role: role, lastOperation: last).AllowedActions.Retry;
+
+        Assert.False(decision.Allowed);
+        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.RetryPermissionRequiredCode, decision.ReasonCode);
+    }
+
+    [Fact]
+    public void Source_admin_may_retry_a_terminal_failed_create()
+    {
+        var instance = Instance(ElsaObservedLifecycle.Failed, ElsaInstanceHealth.Unreachable);
+        var last = Operation(instance.Id, ElsaInstanceOperationAction.Create, ElsaInstanceOperationState.Failed);
+        var decision = Overview(instance, role: WorkspaceRole.SourceAdmin, lastOperation: last).AllowedActions.Retry;
+
+        Assert.True(decision.Allowed);
+        Assert.Null(decision.ReasonCode);
+    }
+
+    [Fact]
+    public void Commercial_gate_denial_is_surfaced_on_retry()
+    {
+        var instance = Instance(ElsaObservedLifecycle.Failed, ElsaInstanceHealth.Unreachable);
+        var last = Operation(instance.Id, ElsaInstanceOperationAction.Create, ElsaInstanceOperationState.Failed);
+        var gate = new ElsaInstanceCommercialGateDecision(
+            false, ElsaInstanceCommercialOperation.EntitlementRequired, "Managed hosting is not enabled.");
+        var decision = Overview(instance, lastOperation: last, retryGate: gate).AllowedActions.Retry;
+
+        Assert.False(decision.Allowed);
+        Assert.Equal(ElsaInstanceCommercialOperation.EntitlementRequired, decision.ReasonCode);
+    }
+
+    [Fact]
+    public void Customer_retry_decision_is_the_overview_retry_field()
+    {
+        var instance = Instance(ElsaObservedLifecycle.Failed, ElsaInstanceHealth.Unreachable);
+        var last = Operation(instance.Id, ElsaInstanceOperationAction.Create, ElsaInstanceOperationState.Failed);
+        var active = Operation(instance.Id, ElsaInstanceOperationAction.Retry, ElsaInstanceOperationState.Running);
+        var gate = ElsaInstanceCommercialGateDecision.Allow();
+
+        var decision = ManagedElsaInstanceOverviewEndpoints.CustomerRetryDecision(
+            instance, last, active, WorkspaceRole.Owner, gate);
+        var overview = Overview(instance, active, lastOperation: last, retryGate: gate).AllowedActions.Retry;
+
+        Assert.Equal(decision.Allowed, overview.Allowed);
+        Assert.Equal(decision.ReasonCode, overview.ReasonCode);
+        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.RetryInFlightCode, overview.ReasonCode);
     }
 
     [Theory]
@@ -215,6 +350,8 @@ public sealed class ManagedElsaInstanceOverviewAllowedActionsTests
         Assert.Equal(ManagedElsaInstanceOverviewEndpoints.InstanceFailedCode, overview.AllowedActions.Restart.ReasonCode);
         Assert.True(overview.AllowedActions.Delete.Allowed);
         Assert.Null(overview.AllowedActions.Delete.ReasonCode);
+        Assert.True(overview.AllowedActions.Retry.Allowed);
+        Assert.Null(overview.AllowedActions.Retry.ReasonCode);
     }
 
     [Fact]
@@ -246,7 +383,8 @@ public sealed class ManagedElsaInstanceOverviewAllowedActionsTests
         WorkspaceRole role = WorkspaceRole.Owner,
         ElsaInstanceCommercialGateDecision? deleteGate = null,
         bool? canDeletePermission = null,
-        ElsaInstanceOperationSummary? lastOperation = null) =>
+        ElsaInstanceOperationSummary? lastOperation = null,
+        ElsaInstanceCommercialGateDecision? retryGate = null) =>
         ManagedElsaInstanceOverviewProjection.ToOverview(
             instance,
             instance.WorkspaceId,
@@ -264,7 +402,8 @@ public sealed class ManagedElsaInstanceOverviewAllowedActionsTests
                 []),
             ElsaInstanceCommercialGateDecision.Allow(),
             ElsaInstanceCommercialGateDecision.Allow(),
-            deleteGate ?? ElsaInstanceCommercialGateDecision.Allow());
+            deleteGate ?? ElsaInstanceCommercialGateDecision.Allow(),
+            retryGate ?? ElsaInstanceCommercialGateDecision.Allow());
 
     private static ElsaInstance Instance(
         ElsaObservedLifecycle observed,

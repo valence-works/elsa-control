@@ -2960,7 +2960,6 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
 
     [Theory]
     [InlineData(ElsaInstanceOperationAction.Start)]
-    [InlineData(ElsaInstanceOperationAction.Retry)]
     [InlineData(ElsaInstanceOperationAction.Recover)]
     public async Task Canonical_operation_maps_invalid_request_state_to_stable_conflict(
         ElsaInstanceOperationAction action)
@@ -2977,6 +2976,27 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
 
         Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
         Assert.Contains("instance.invalid-state", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Canonical_retry_on_a_ready_engine_is_denied_as_not_failed_create()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var client = app.CreateTrustedWorkspaceClient("managed-instance-invalid-retry");
+        var workspaceId = await client.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(client, workspaceId, "invalid-retry");
+        await MarkOperationSucceededAsync(app, created.Operation.Id);
+
+        var response = await SendOperationAsync(
+            client, workspaceId, created.Instance.InstanceId,
+            created.Instance.ETag, "invalid-retry", new(ElsaInstanceOperationAction.Retry));
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Contains(
+            ManagedElsaInstanceOverviewEndpoints.RetryNotFailedCreateCode,
+            await response.Content.ReadAsStringAsync(),
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -5259,6 +5279,7 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
                 []),
             new ElsaInstanceCommercialGateDecision(true, "commercial.allowed", "allowed"),
             new ElsaInstanceCommercialGateDecision(true, "commercial.allowed", "allowed"),
+            ElsaInstanceCommercialGateDecision.Allow(),
             ElsaInstanceCommercialGateDecision.Allow());
 
     private static ElsaInstanceIntent Intent() => new(
@@ -5934,7 +5955,10 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         if (action == ElsaInstanceOperationAction.Start)
             await MarkInstanceStoppedAsync(app, instanceId);
         if (action == ElsaInstanceOperationAction.Retry)
+        {
             await MarkInstanceFailedAsync(app, instanceId);
+            await FailCreateOperationAsync(app, subject.Operation.Id);
+        }
 
         using var response = await SendOperationAsync(
             owner, workspaceId, instanceId, etag!, $"mutation-guard-ops-{action}", body);
@@ -5962,6 +5986,20 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
             SET ObservedLifecycle = {ElsaObservedLifecycle.Failed.ToString()},
                 Health = {ElsaInstanceHealth.Degraded.ToString()}
             WHERE Id = {instanceId}
+            """);
+    }
+
+    private static async Task FailCreateOperationAsync(ControlApiTestApplication app, Guid operationId)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        var completedAtTicks = DateTimeOffset.UtcNow.UtcTicks;
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE ElsaInstanceOperations
+            SET State = {ElsaInstanceOperationState.Failed.ToString()},
+                FailureCode = {ManagedElsaReasonCodeCatalog.StagingLeverFailedCreate},
+                CompletedAt = {completedAtTicks}
+            WHERE Id = {operationId}
             """);
     }
 

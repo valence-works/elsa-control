@@ -530,10 +530,15 @@ public static class ManagedElsaInstanceEndpoints
             IGovernedReleaseCatalogStore catalog,
             WorkspacePermissionService permissions,
             ElsaInstanceLifecycleService lifecycle,
+            IElsaInstanceLifecycleStore lifecycleStore,
             IManagedElsaInstanceApiStore queries,
             [FromServices] IManagedElsaInstanceIdentityStore identities,
             CancellationToken cancellationToken) =>
         {
+            if (request.Action != ElsaInstanceOperationAction.Retry &&
+                DenyBffLifecycleAction(context) is { } bffDenied)
+                return bffDenied;
+
             var keyResult = ReadIdempotencyKey(context);
             if (keyResult.State == IdempotencyKeyState.Missing)
                 return Problem("instance.idempotency-key-required", "Idempotency-Key is required for instance operations.", StatusCodes.Status400BadRequest);
@@ -561,10 +566,47 @@ public static class ManagedElsaInstanceEndpoints
 
             }
 
-            var commercialDecision = await commercialGate.EvaluateAsync(
-                access.OrganizationId, request.Action, cancellationToken: cancellationToken);
-            if (!commercialDecision.Allowed)
-                return Problem(commercialDecision.Code, commercialDecision.Summary, StatusCodes.Status422UnprocessableEntity);
+            if (request.Action == ElsaInstanceOperationAction.Retry)
+            {
+                var existingRetry = await lifecycleStore.FindOperationByKeyAsync(
+                    workspaceId,
+                    key,
+                    instanceId,
+                    action: null,
+                    idempotencyScope: ManagedElsaInstanceOverviewEndpoints.CustomerOverviewScope(instanceId),
+                    cancellationToken: cancellationToken);
+                if (existingRetry is null)
+                {
+                    var instance = await lifecycleStore.GetInstanceAsync(workspaceId, instanceId, cancellationToken);
+                    if (instance is null)
+                        return Results.NotFound();
+
+                    var retryGate = await commercialGate.EvaluateAsync(
+                        access.OrganizationId, ElsaInstanceOperationAction.Retry, cancellationToken: cancellationToken);
+                    var activeOperations = await queries.GetActiveOperationsAsync(
+                        workspaceId, [instance.Id], cancellationToken);
+                    var lastPage = await queries.ListOperationsAsync(
+                        workspaceId, instance.Id, page: 1, pageSize: 100, cancellationToken, access.OrganizationId);
+                    var retryDecision = ManagedElsaInstanceOverviewEndpoints.CustomerRetryDecision(
+                        instance,
+                        ManagedElsaInstanceOverviewEndpoints.SelectCustomerLastOperation(lastPage.Items),
+                        activeOperations.GetValueOrDefault(instance.Id),
+                        access.Role,
+                        retryGate);
+                    if (!retryDecision.Allowed)
+                        return Problem(
+                            retryDecision.ReasonCode!,
+                            "The requested operation is not valid for the current instance state.",
+                            StatusCodes.Status409Conflict);
+                }
+            }
+            else
+            {
+                var commercialDecision = await commercialGate.EvaluateAsync(
+                    access.OrganizationId, request.Action, cancellationToken: cancellationToken);
+                if (!commercialDecision.Allowed)
+                    return Problem(commercialDecision.Code, commercialDecision.Summary, StatusCodes.Status422UnprocessableEntity);
+            }
             if (request.Intent is not null &&
                 !await HasOneEligibleCatalogMatchAsync(
                     catalog, request.Intent, CallerMaySelectPreviewReleases(context), cancellationToken))
@@ -619,7 +661,7 @@ public static class ManagedElsaInstanceEndpoints
             {
                 return Problem("instance.operation-invalid", "The requested operation is invalid.", StatusCodes.Status422UnprocessableEntity);
             }
-        }).RequireWorkspaceAccess(WorkspaceOperation.MutateWorkspaceResource);
+        }).RequireWorkspaceAccess(WorkspaceOperation.MutateWorkspaceResource).AllowCloudBff().AllowHubBff();
 
         group.MapGet("/{instanceId:guid}/operations", async (
             Guid workspaceId,
@@ -922,6 +964,35 @@ public static class ManagedElsaInstanceEndpoints
         if (CloudAccountTokenSelector.IsValidatedCloudAccount(context.User, cloudAccount))
             return false;
         return CloudBffAuthorization.Classify(context.User, cloudBff) != CloudBffTokenDecision.Valid;
+    }
+
+    internal static bool IsHubBffCaller(HttpContext context) =>
+        HubAccountTokenSelector.IsValidatedHubAccount(
+            context.User,
+            context.RequestServices.GetRequiredService<IOptions<HubAccountIdentityOptions>>().Value);
+
+    internal static bool IsCloudBffCaller(HttpContext context)
+    {
+        var cloudAccount = context.RequestServices.GetRequiredService<IOptions<CloudAccountIdentityOptions>>().Value;
+        if (CloudAccountTokenSelector.IsValidatedCloudAccount(context.User, cloudAccount))
+            return true;
+        var cloudBff = context.RequestServices.GetRequiredService<IOptions<CloudBffOptions>>().Value;
+        return CloudBffAuthorization.Classify(context.User, cloudBff) == CloudBffTokenDecision.Valid;
+    }
+
+    private static IResult? DenyBffLifecycleAction(HttpContext context)
+    {
+        if (IsHubBffCaller(context))
+            return DenyBff(context, "hub-bff.denied", "The Hub BFF credential is not authorized for this endpoint.");
+        if (IsCloudBffCaller(context))
+            return DenyBff(context, "cloud-bff.denied", "The Cloud BFF credential is not authorized for this endpoint.");
+        return null;
+    }
+
+    private static IResult DenyBff(HttpContext context, string code, string title)
+    {
+        context.Response.Headers.CacheControl = "no-store";
+        return Problem(code, title, StatusCodes.Status403Forbidden);
     }
 
     private static ManagedElsaInstanceOperationalHealthResponse ToOperationalHealthResponse(
