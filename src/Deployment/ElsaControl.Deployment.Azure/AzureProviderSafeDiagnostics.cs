@@ -184,7 +184,8 @@ internal static class AzureProviderSafeDiagnostics
         "azure.traffic.unhealthy",
         "azure.workload.foundation-missing",
         "azure.workload.output-invalid",
-        StagingLateSuccessLeverDefaults.AppliedCode
+        StagingLateSuccessLeverDefaults.AppliedCode,
+        StagingProvisioningHealthLeverDefaults.AppliedCode
     ];
 
     private static readonly HashSet<string> KnownCodes = CreateKnownCodes();

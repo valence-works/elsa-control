@@ -100,6 +100,8 @@ jobs:
       STAGING_LATE_SUCCESS_LEVER_ENABLED: ${{ vars.STAGING_LATE_SUCCESS_LEVER_ENABLED }}
       STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS: ${{ vars.STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS }}
       STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT: ${{ vars.STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT }}
+      STAGING_PROVISIONING_HEALTH_LEVER_ENABLED: ${{ vars.STAGING_PROVISIONING_HEALTH_LEVER_ENABLED }}
+      STAGING_PROVISIONING_HEALTH_LEVER_ALLOWED_INSTANCE_IDS: ${{ vars.STAGING_PROVISIONING_HEALTH_LEVER_ALLOWED_INSTANCE_IDS }}
       STAGING_SMOKE_OWNER_ORGANIZATION_ID: ${{ vars.STAGING_SMOKE_OWNER_ORGANIZATION_ID }}
       STAGING_SMOKE_OWNER_INSTANCE_ID: ${{ vars.STAGING_SMOKE_OWNER_INSTANCE_ID }}
       STAGING_SMOKE_OWNER_WORKSPACE_ID: ${{ vars.STAGING_SMOKE_OWNER_WORKSPACE_ID }}
@@ -453,10 +455,83 @@ jobs:
             printf 'STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT=%s\n' "$late_success_wait" >> "$GITHUB_ENV"
           fi
 
+          health_enabled_raw="${STAGING_PROVISIONING_HEALTH_LEVER_ENABLED:-}"
+          health_allowlist_raw="${STAGING_PROVISIONING_HEALTH_LEVER_ALLOWED_INSTANCE_IDS:-}"
+          health_allowlist_count=0
+          health_normalized=""
+          health_enabled=""
+          if [ -n "$health_enabled_raw" ] || [ -n "$health_allowlist_raw" ]; then
+            if [ "$TARGET_ENVIRONMENT" != "test" ]; then
+              echo "::error::STAGING_PROVISIONING_HEALTH_LEVER_ENABLED and STAGING_PROVISIONING_HEALTH_LEVER_ALLOWED_INSTANCE_IDS must be unset for ${TARGET_ENVIRONMENT}; production ships the lever off."
+              exit 1
+            fi
+          fi
+          if [ -n "$health_enabled_raw" ]; then
+            case "${health_enabled_raw,,}" in
+              true) health_enabled=true ;;
+              false) health_enabled="" ;;
+              *)
+                echo "::error::STAGING_PROVISIONING_HEALTH_LEVER_ENABLED must be true or false."
+                exit 1
+                ;;
+            esac
+          fi
+          if [ -n "$health_allowlist_raw" ]; then
+            if [[ "$health_allowlist_raw" =~ (^|,)[[:space:]]*(,|$) ]]; then
+              echo "::error::STAGING_PROVISIONING_HEALTH_LEVER_ALLOWED_INSTANCE_IDS contains an empty instance id."
+              exit 1
+            fi
+            IFS=',' read -r -a health_entries <<< "$health_allowlist_raw"
+            for entry in "${health_entries[@]}"; do
+              trimmed="${entry#"${entry%%[![:space:]]*}"}"
+              trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+              if [ -z "$trimmed" ]; then
+                echo "::error::STAGING_PROVISIONING_HEALTH_LEVER_ALLOWED_INSTANCE_IDS contains an empty instance id."
+                exit 1
+              fi
+              if [[ ! "$trimmed" =~ $pairing_guid_pattern ]] || [ "$trimmed" = "00000000-0000-0000-0000-000000000000" ]; then
+                echo "::error::STAGING_PROVISIONING_HEALTH_LEVER_ALLOWED_INSTANCE_IDS contains an entry that is not a GUID instance id."
+                exit 1
+              fi
+              if [ -n "$health_normalized" ]; then
+                health_normalized+=","
+              fi
+              health_normalized+="$trimmed"
+              health_allowlist_count=$((health_allowlist_count + 1))
+            done
+          fi
+          if [ -n "${GITHUB_OUTPUT:-}" ]; then
+            {
+              printf 'staging_provisioning_health_lever_enabled=%s\n' "$health_enabled"
+              printf 'staging_provisioning_health_lever_allowlist_count=%s\n' "$health_allowlist_count"
+              printf 'staging_provisioning_health_lever_allowlist=%s\n' "$health_normalized"
+            } >> "$GITHUB_OUTPUT"
+          fi
+          if [ -n "${GITHUB_ENV:-}" ]; then
+            printf 'STAGING_PROVISIONING_HEALTH_LEVER_ENABLED=%s\n' "$health_enabled" >> "$GITHUB_ENV"
+            printf 'STAGING_PROVISIONING_HEALTH_LEVER_ALLOWED_INSTANCE_IDS=%s\n' "$health_normalized" >> "$GITHUB_ENV"
+          fi
+
+          if [ "$TARGET_ENVIRONMENT" = "test" ] && [ "$health_allowlist_count" -gt 0 ]; then
+            if [ -z "${smoke_owner_instance_id:-}" ]; then
+              echo "::error::STAGING_SMOKE_OWNER_INSTANCE_ID must be set on the test environment so the staging provisioning health lever allowlist can be checked against the Hosted smoke owner instance."
+              exit 1
+            fi
+            if [[ ! "$smoke_owner_instance_id" =~ $pairing_guid_pattern ]] || [ "$smoke_owner_instance_id" = "00000000-0000-0000-0000-000000000000" ]; then
+              echo "::error::STAGING_SMOKE_OWNER_INSTANCE_ID must be a GUID instance id."
+              exit 1
+            fi
+            if [[ ",${health_normalized,,}," == *",${smoke_owner_instance_id,,},"* ]]; then
+              echo "::error::STAGING_PROVISIONING_HEALTH_LEVER_ALLOWED_INSTANCE_IDS must not include the staging Hosted smoke owner instance."
+              exit 1
+            fi
+          fi
+
           echo "External-engine pairing allowlist: ${pairing_allowlist_count} organization id(s)."
           echo "Staging billing lifecycle lever: enabled=${lever_enabled}; allowlist=${lever_allowlist_count} organization id(s)."
           echo "Staging recovery lifecycle lever: enabled=${recovery_enabled}; allowlist=${recovery_allowlist_count} instance id(s)."
           echo "Staging late-success lever: enabled=${late_success_enabled}; allowlist=${late_success_allowlist_count} workspace id(s)."
+          echo "Staging provisioning health lever: enabled=${health_enabled}; allowlist=${health_allowlist_count} instance id(s)."
 
           required=(
             AZURE_CLIENT_ID
@@ -1029,6 +1104,8 @@ jobs:
           STAGING_LATE_SUCCESS_LEVER_ENABLED: ${{ steps.deployment-config.outputs.staging_late_success_lever_enabled }}
           STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS: ${{ steps.deployment-config.outputs.staging_late_success_lever_allowlist }}
           STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT: ${{ steps.deployment-config.outputs.staging_late_success_lever_wait }}
+          STAGING_PROVISIONING_HEALTH_LEVER_ENABLED: ${{ steps.deployment-config.outputs.staging_provisioning_health_lever_enabled }}
+          STAGING_PROVISIONING_HEALTH_LEVER_ALLOWED_INSTANCE_IDS: ${{ steps.deployment-config.outputs.staging_provisioning_health_lever_allowlist }}
           STAGING_SMOKE_OWNER_INSTANCE_ID: ${{ vars.STAGING_SMOKE_OWNER_INSTANCE_ID }}
           STAGING_SMOKE_OWNER_WORKSPACE_ID: ${{ vars.STAGING_SMOKE_OWNER_WORKSPACE_ID }}
           BILLING_EXPECTED_MODE: ${{ steps.deployment-config.outputs.billing_expected_mode }}
@@ -1436,6 +1513,7 @@ jobs:
           scripts/apply-staging-billing-lifecycle-lever-settings.sh
           scripts/apply-staging-recovery-lifecycle-lever-settings.sh
           scripts/apply-staging-late-success-lever-settings.sh
+          scripts/apply-staging-provisioning-health-lever-settings.sh
 
           if [ -n "$production_billing_capture_path" ]; then
             python3 scripts/production_stripe_reconcile.py --reapply "$production_billing_capture_path"

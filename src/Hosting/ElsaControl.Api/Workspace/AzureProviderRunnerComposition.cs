@@ -103,7 +103,8 @@ internal static class AzureProviderRunnerComposition
                 options,
                 scope,
                 provider.GetRequiredService<IAzureSecretResolver>(),
-                lateSuccessLever));
+                lateSuccessLever,
+                provider.GetRequiredService<StagingProvisioningHealthLever>()));
         services.AddScoped<IAzureProviderRunner>(provider =>
             provider.GetRequiredService<AzureBicepProviderRunner>());
         services.AddScoped<IAzureProviderRecoveryObserver>(provider =>

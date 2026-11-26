@@ -66,6 +66,19 @@ public sealed class StagingLifecycleLeverGateTests
     }
 
     [Fact]
+    public void Sibling_flags_never_arm_the_provisioning_health_lever()
+    {
+        var stripe = new StripeBillingOptions { Enabled = true, SecretKey = "sk_test_harness" };
+        var health = new ElsaControl.Deployment.Azure.StagingProvisioningHealthLeverOptions { Enabled = false };
+        var billingOn = StagingLifecycleLeverGate.IsArmed(true, stripe);
+        var recoveryOn = StagingLifecycleLeverGate.IsArmed(true, stripe);
+
+        Assert.True(billingOn);
+        Assert.True(recoveryOn);
+        Assert.False(StagingProvisioningHealthLeverFactory.Create(health, stripe).AppliesTo(Guid.NewGuid()));
+    }
+
+    [Fact]
     public void Stripe_test_prefix_is_shared_and_ordinal()
     {
         Assert.Equal("sk_test_", StagingLifecycleLeverGate.StripeTestSecretKeyPrefix);
