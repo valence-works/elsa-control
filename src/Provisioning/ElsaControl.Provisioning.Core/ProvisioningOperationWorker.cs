@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using ElsaControl.Provisioning.Abstractions;
 using ElsaControl.Provisioning.Core.Stores;
 using Microsoft.Extensions.Logging;
@@ -25,6 +26,9 @@ public sealed class ProvisioningOperationWorker(
     private readonly TimeSpan _heartbeat = heartbeat is { } value && value > TimeSpan.Zero
         ? value
         : TimeSpan.FromSeconds(ProvisioningReplicaIdentity.DefaultHeartbeatSeconds);
+    private readonly TimeSpan _stateLockRetryBackoff = TimeSpan.FromSeconds(
+        ProvisioningReplicaIdentity.DefaultLeaseSeconds);
+    private readonly ConcurrentDictionary<Guid, DateTimeOffset> _stateLockRetryAfter = new();
 
     public async Task<int> ProcessOnceAsync(int batchSize = 10, CancellationToken cancellationToken = default)
     {
@@ -189,8 +193,9 @@ public sealed class ProvisioningOperationWorker(
     public async Task ReconcileInterruptedAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        var now = _timeProvider.GetUtcNow();
         var expired = await operations
-            .FailInterruptedAsync(_timeProvider.GetUtcNow(), CancellationToken.None)
+            .FailInterruptedAsync(now, CancellationToken.None)
             .ConfigureAwait(false);
         var pending = await operations.ListStateLockPendingAsync(CancellationToken.None).ConfigureAwait(false);
         var seen = new HashSet<Guid>();
@@ -198,12 +203,23 @@ public sealed class ProvisioningOperationWorker(
         {
             if (!seen.Add(operation.Id))
                 continue;
+            if (_stateLockRetryAfter.TryGetValue(operation.Id, out var retryAfter) && retryAfter > now)
+                continue;
 
             var request = await operations.GetRequestAsync(operation.Id, CancellationToken.None)
                 .ConfigureAwait(false);
-            if (request is not null)
-                await TryCancelProviderAsync(operation, request).ConfigureAwait(false);
+            var pulumiReleased = request is not null
+                && await TryCancelProviderAsync(operation, request).ConfigureAwait(false);
+            if (!pulumiReleased)
+            {
+                _stateLockRetryAfter[operation.Id] = now + _stateLockRetryBackoff;
+                _logger.LogWarning(
+                    "Provisioning state-lock release deferred. OperationId={OperationId}",
+                    operation.Id);
+                continue;
+            }
 
+            _stateLockRetryAfter.TryRemove(operation.Id, out _);
             await operations.MarkStateLockClearedAsync(
                     operation.Id,
                     CancellationToken.None,
@@ -223,7 +239,7 @@ public sealed class ProvisioningOperationWorker(
                                 ? ProvisioningCapability.SharedEnvironment
                                 : ProvisioningCapability.ContainerRuntime,
                             "Operation interrupted.",
-                            _timeProvider.GetUtcNow())
+                            now)
                     ],
                     CancellationToken.None).ConfigureAwait(false);
             }

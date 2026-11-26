@@ -459,6 +459,51 @@ public sealed class ProvisioningServiceTests
     }
 
     [Fact]
+    public async Task Reconcile_keeps_the_stack_lock_until_provider_cancel_succeeds()
+    {
+        var store = new InMemoryProvisioningStore();
+        var time = new MutableTimeProvider();
+        var provider = new FakeInfrastructureProvider(time) { CancelFails = true };
+        var worker = new ProvisioningOperationWorker(store, store, provider, timeProvider: time);
+        var request = ProvisioningFixtures.Request(
+            ProvisioningCommand.Provision,
+            ProvisioningFixtures.PlatformTarget("reconcile-cancel"),
+            ProvisioningFixtures.PlatformSpec("reconcile-cancel"),
+            "reconcile-cancel");
+        var enqueued = await store.CreateOrGetAsync(
+            request,
+            ProvisioningRequestHash.Compute(request),
+            time.GetUtcNow());
+        var claimed = await store.ClaimAsync(enqueued.OperationId, time.GetUtcNow());
+        var completed = await store.CompleteAsync(
+            claimed!.Id,
+            ProvisioningOperationState.Cancelled,
+            time.GetUtcNow(),
+            ProvisioningFailureCodes.Interrupted,
+            stateLockMayBeHeld: true,
+            fencingToken: claimed.FencingToken);
+        Assert.True(completed!.StateLockMayBeHeld);
+
+        await worker.ReconcileInterruptedAsync();
+        Assert.Equal(1, provider.CancelCalls);
+        var held = await store.GetAsync(claimed.Id);
+        Assert.True(held!.StateLockMayBeHeld);
+        Assert.Equal(claimed.Id, await store.GetHolderAsync(ProvisioningStackKind.Platform, "reconcile-cancel"));
+
+        provider.CancelFails = false;
+        await worker.ReconcileInterruptedAsync();
+        Assert.Equal(1, provider.CancelCalls);
+        Assert.True((await store.GetAsync(claimed.Id))!.StateLockMayBeHeld);
+
+        time.Advance(TimeSpan.FromSeconds(ProvisioningReplicaIdentity.DefaultLeaseSeconds + 1));
+        await worker.ReconcileInterruptedAsync();
+        Assert.Equal(2, provider.CancelCalls);
+        var cleared = await store.GetAsync(claimed.Id);
+        Assert.False(cleared!.StateLockMayBeHeld);
+        Assert.Null(await store.GetHolderAsync(ProvisioningStackKind.Platform, "reconcile-cancel"));
+    }
+
+    [Fact]
     public async Task Cancel_of_a_queued_create_does_not_run_the_provider()
     {
         var store = new InMemoryProvisioningStore();
@@ -482,5 +527,14 @@ public sealed class ProvisioningServiceTests
         Assert.Equal(ProvisioningOperationState.Cancelled, (await service.GetOperationAsync(provision.OperationId))!.State);
         Assert.Equal(0, await worker.ProcessOnceAsync());
         Assert.False(provider.StackExists("queued-cancel"));
+    }
+
+    private sealed class MutableTimeProvider : TimeProvider
+    {
+        private DateTimeOffset _now = DateTimeOffset.UtcNow;
+
+        public void Advance(TimeSpan by) => _now += by;
+
+        public override DateTimeOffset GetUtcNow() => _now;
     }
 }
