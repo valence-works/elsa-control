@@ -86,7 +86,6 @@ public sealed class ManagedElsaInstanceOverviewAllowedActionsTests
     [InlineData(ElsaInstanceOperationState.Queued)]
     [InlineData(ElsaInstanceOperationState.Running)]
     [InlineData(ElsaInstanceOperationState.WaitingForPriorOperation)]
-    [InlineData(ElsaInstanceOperationState.RecoveryRequired)]
     public void Blocking_delete_denies_with_operation_active(ElsaInstanceOperationState deleteState)
     {
         var instance = Instance(ElsaObservedLifecycle.Deleting, desired: ElsaDesiredLifecycle.Deleting);
@@ -94,8 +93,23 @@ public sealed class ManagedElsaInstanceOverviewAllowedActionsTests
         var decision = Overview(instance, delete).AllowedActions.Delete;
 
         Assert.True(ManagedElsaInstanceOverviewEndpoints.HasBlockingCustomerDelete(delete));
+        Assert.False(ManagedElsaInstanceOverviewEndpoints.IsResumableCustomerDelete(delete));
         Assert.False(decision.Allowed);
         Assert.Equal(ManagedElsaInstanceOverviewEndpoints.OperationActiveCode, decision.ReasonCode);
+    }
+
+    [Fact]
+    public void Owner_may_delete_a_recovery_required_delete()
+    {
+        var instance = Instance(ElsaObservedLifecycle.Deleting, desired: ElsaDesiredLifecycle.Deleting);
+        var delete = Operation(instance.Id, ElsaInstanceOperationAction.Delete, ElsaInstanceOperationState.RecoveryRequired);
+        var decision = Overview(instance, delete).AllowedActions.Delete;
+
+        Assert.True(ManagedElsaInstanceOverviewEndpoints.IsResumableCustomerDelete(delete));
+        Assert.False(ManagedElsaInstanceOverviewEndpoints.HasBlockingCustomerDelete(delete));
+        Assert.Null(ManagedElsaInstanceOverviewEndpoints.CustomerDeleteDenialCode(instance, delete));
+        Assert.True(decision.Allowed);
+        Assert.Null(decision.ReasonCode);
     }
 
     [Fact]
@@ -109,13 +123,29 @@ public sealed class ManagedElsaInstanceOverviewAllowedActionsTests
     }
 
     [Fact]
-    public void Source_admin_may_delete_a_ready_instance()
+    public void Source_admin_with_delete_grant_may_delete_a_ready_instance()
     {
-        var decision = Overview(Instance(ElsaObservedLifecycle.Ready), role: WorkspaceRole.SourceAdmin)
-            .AllowedActions.Delete;
+        var decision = Overview(
+            Instance(ElsaObservedLifecycle.Ready),
+            role: WorkspaceRole.SourceAdmin,
+            canDeletePermission: true).AllowedActions.Delete;
 
         Assert.True(decision.Allowed);
         Assert.Null(decision.ReasonCode);
+    }
+
+    [Fact]
+    public void Source_admin_without_delete_grant_is_denied_with_permission_required()
+    {
+        var overview = Overview(
+            Instance(ElsaObservedLifecycle.Ready),
+            role: WorkspaceRole.SourceAdmin,
+            canDeletePermission: false);
+        var decision = overview.AllowedActions.Delete;
+
+        Assert.True(overview.AllowedActions.Restart.Allowed);
+        Assert.False(decision.Allowed);
+        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.PermissionRequiredCode, decision.ReasonCode);
     }
 
     [Fact]
@@ -149,12 +179,14 @@ public sealed class ManagedElsaInstanceOverviewAllowedActionsTests
         ElsaInstance instance,
         ElsaInstanceOperationSummary? activeOperation = null,
         WorkspaceRole role = WorkspaceRole.Owner,
-        ElsaInstanceCommercialGateDecision? deleteGate = null) =>
+        ElsaInstanceCommercialGateDecision? deleteGate = null,
+        bool? canDeletePermission = null) =>
         ManagedElsaInstanceOverviewProjection.ToOverview(
             instance,
             instance.WorkspaceId,
             role,
             canOpenPermission: role is not WorkspaceRole.Reader,
+            canDeletePermission: canDeletePermission ?? role is WorkspaceRole.Owner or WorkspaceRole.SourceAdmin,
             identity: null,
             activeOperation,
             lastOperation: null,

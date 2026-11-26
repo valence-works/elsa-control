@@ -5245,6 +5245,7 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
             instance.WorkspaceId,
             WorkspaceRole.Owner,
             canOpenPermission: true,
+            canDeletePermission: true,
             identity,
             operation,
             lastOperation: null,

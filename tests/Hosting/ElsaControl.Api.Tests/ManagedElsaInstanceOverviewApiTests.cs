@@ -9,6 +9,7 @@ using ElsaControl.Api.Workspace;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.Deployment.Core.Provisioning;
+using ElsaControl.Deployment.Core.Workspace;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 using ElsaControl.RuntimeBuilder.Abstractions.ReleaseCatalog;
@@ -890,6 +891,39 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
     }
 
     [Fact]
+    public async Task Delete_is_allowed_for_a_recovery_required_delete_and_matches_the_delete_route()
+    {
+        var app = await PrepareApplicationAsync();
+        var client = app.CreateTrustedWorkspaceClient("overview-delete-resume-owner");
+        var (workspaceId, created) = await CreateReadyInstanceAsync(app, client, "overview-delete-resume");
+
+        using var firstConfirmationResponse = await client.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations",
+            content: null);
+        var firstConfirmation = await firstConfirmationResponse.Content
+            .ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        Assert.Equal(HttpStatusCode.OK, firstConfirmationResponse.StatusCode);
+        using var firstDelete = await SendDeleteAsync(
+            client,
+            workspaceId,
+            created.Instance.InstanceId,
+            created.Instance.ETag,
+            "overview-delete-resume-first",
+            firstConfirmation!.ConfirmationId);
+        var firstDeleteBody = await firstDelete.Content
+            .ReadControlJsonAsync<ManagedElsaInstanceDeleteAcceptedResponse>();
+        Assert.Equal(HttpStatusCode.Accepted, firstDelete.StatusCode);
+        Assert.NotNull(firstDeleteBody);
+        await ParkRecoveryRequiredAsync(app, firstDeleteBody!.OperationId, "del");
+        var acceptedEtag = firstDelete.Headers.ETag?.ToString()
+            ?? throw new InvalidOperationException("Delete acceptance ETag is missing.");
+
+        await AssertDeleteDecisionMatchesRouteAsync(
+            client, workspaceId, created.Instance.InstanceId, acceptedEtag,
+            "overview-delete-resume", allowed: true, reasonCode: null);
+    }
+
+    [Fact]
     public async Task Delete_is_denied_while_deleting()
     {
         var app = await PrepareApplicationAsync();
@@ -921,6 +955,39 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
             "overview-delete-reader", allowed: false,
             reasonCode: ManagedElsaInstanceOverviewEndpoints.PermissionRequiredCode,
             expectedDeleteStatus: HttpStatusCode.Forbidden);
+    }
+
+    [Fact]
+    public async Task Source_admin_without_delete_grant_is_denied_and_matches_the_delete_route()
+    {
+        var app = await PrepareApplicationAsync();
+        var owner = app.CreateTrustedWorkspaceClient("overview-delete-source-admin-denied-owner");
+        var (workspaceId, created) = await CreateReadyInstanceAsync(app, owner, "overview-delete-source-admin-denied");
+        await app.AddWorkspaceMemberAsync(workspaceId, "overview-delete-source-admin-denied", WorkspaceRole.SourceAdmin);
+        using var sourceAdmin = app.CreateTrustedWorkspaceClient("overview-delete-source-admin-denied");
+
+        await AssertDeleteDecisionMatchesRouteAsync(
+            sourceAdmin, workspaceId, created.Instance.InstanceId, created.Instance.ETag,
+            "overview-delete-source-admin-denied", allowed: false,
+            reasonCode: ManagedElsaInstanceOverviewEndpoints.PermissionRequiredCode,
+            expectedDeleteStatus: HttpStatusCode.Forbidden);
+    }
+
+    [Fact]
+    public async Task Source_admin_with_delete_grant_may_delete_and_matches_the_delete_route()
+    {
+        var app = await PrepareApplicationAsync();
+        var owner = app.CreateTrustedWorkspaceClient("overview-delete-source-admin-owner");
+        var (workspaceId, created) = await CreateReadyInstanceAsync(app, owner, "overview-delete-source-admin");
+        var sourceAdminId = await app.AddWorkspaceMemberAsync(
+            workspaceId, "overview-delete-source-admin", WorkspaceRole.SourceAdmin);
+        await app.GrantWorkspaceDeploymentPermissionAsync(
+            workspaceId, sourceAdminId, ManagedElsaInstancePermissions.Delete);
+        using var sourceAdmin = app.CreateTrustedWorkspaceClient("overview-delete-source-admin");
+
+        await AssertDeleteDecisionMatchesRouteAsync(
+            sourceAdmin, workspaceId, created.Instance.InstanceId, created.Instance.ETag,
+            "overview-delete-source-admin", allowed: true, reasonCode: null);
     }
 
     [Fact]
