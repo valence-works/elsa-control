@@ -105,4 +105,58 @@ public sealed class StagingRecoveryLifecycleLever(
             return new StagingRecoveryLifecycleLeverResult(StagingRecoveryLifecycleLeverOutcome.InstanceNotFound);
         }
     }
+
+    public Task<StagingRecoveryLifecycleLeverResult> FireFailedCreateAsync(
+        Guid instanceId,
+        string? operatorSubject,
+        CancellationToken cancellationToken = default) =>
+        FireTerminalFailureAsync(
+            instanceId,
+            operatorSubject,
+            store.FailActiveCreateAsync,
+            "The staging failed-create lifecycle lever is disabled because a required staging signal is missing.",
+            cancellationToken);
+
+    public Task<StagingRecoveryLifecycleLeverResult> FireFailedDeleteAsync(
+        Guid instanceId,
+        string? operatorSubject,
+        CancellationToken cancellationToken = default) =>
+        FireTerminalFailureAsync(
+            instanceId,
+            operatorSubject,
+            store.InjectTerminalFailedDeleteAsync,
+            "The staging failed-delete lifecycle lever is disabled because a required staging signal is missing.",
+            cancellationToken);
+
+    private async Task<StagingRecoveryLifecycleLeverResult> FireTerminalFailureAsync(
+        Guid instanceId,
+        string? operatorSubject,
+        Func<Guid, string?, CancellationToken, Task<StagingRecoveryLifecycleLeverCommit>> fire,
+        string disabledWarning,
+        CancellationToken cancellationToken)
+    {
+        if (instanceId == Guid.Empty)
+            throw new ArgumentException("Instance ID is required.", nameof(instanceId));
+
+        if (!StagingLifecycleLeverGate.IsArmed(options.Value.Enabled, stripeOptions.Value))
+        {
+            if (options.Value.Enabled)
+                logger.LogWarning("{Message}", disabledWarning);
+
+            return new StagingRecoveryLifecycleLeverResult(StagingRecoveryLifecycleLeverOutcome.Disabled);
+        }
+
+        if (!options.Value.AllowsInstance(instanceId))
+            return new StagingRecoveryLifecycleLeverResult(StagingRecoveryLifecycleLeverOutcome.InstanceNotAllowed);
+
+        try
+        {
+            var commit = await fire(instanceId, operatorSubject, cancellationToken);
+            return new StagingRecoveryLifecycleLeverResult(StagingRecoveryLifecycleLeverOutcome.Fired, commit);
+        }
+        catch (KeyNotFoundException)
+        {
+            return new StagingRecoveryLifecycleLeverResult(StagingRecoveryLifecycleLeverOutcome.InstanceNotFound);
+        }
+    }
 }

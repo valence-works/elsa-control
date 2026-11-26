@@ -102,6 +102,123 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
         await AssertFiredOnceAsync(app, AllowlistedInstanceId, body.OperationId);
     }
 
+    [Fact]
+    public async Task Flag_off_refuses_terminal_failed_create_and_delete_without_writes()
+    {
+        await using var app = CreateApp(recoveryEnabled: false, allowlisted: AllowlistedInstanceId);
+        await SeedReadyInstanceAsync(app, AllowlistedInstanceId);
+
+        var failedCreate = await PostFailedCreateAsync(Operator(app), AllowlistedInstanceId);
+        var failedDelete = await PostFailedDeleteAsync(Operator(app), AllowlistedInstanceId);
+
+        Assert.Equal(HttpStatusCode.Forbidden, failedCreate.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, failedDelete.StatusCode);
+        Assert.Equal(StagingRecoveryLifecycleLeverDefaults.DisabledCode, await ProblemCodeAsync(failedCreate));
+        Assert.Equal(StagingRecoveryLifecycleLeverDefaults.DisabledCode, await ProblemCodeAsync(failedDelete));
+        await AssertLeverDidNotFireAsync(app, AllowlistedInstanceId);
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        Assert.Equal(0, await ScalarIntAsync(
+            db,
+            "SELECT COUNT(*) FROM ElsaInstanceOperations WHERE InstanceId = @instanceId AND State = @state",
+            ("@instanceId", AllowlistedInstanceId),
+            ("@state", ElsaInstanceOperationState.Failed.ToString())));
+    }
+
+    [Fact]
+    public async Task Allowlisted_instance_with_a_stripe_test_key_injects_a_terminal_failed_create()
+    {
+        await using var app = CreateApp(recoveryEnabled: true, allowlisted: AllowlistedInstanceId);
+        await SeedAcceptedCreateInstanceAsync(app, AllowlistedInstanceId);
+
+        var response = await PostFailedCreateAsync(Operator(app), AllowlistedInstanceId);
+        if (response.StatusCode != HttpStatusCode.OK)
+            Assert.Fail($"{response.StatusCode}: {await response.Content.ReadAsStringAsync()}");
+
+        var body = await response.Content.ReadControlJsonAsync<StagingRecoveryLifecycleLeverResponse>();
+        Assert.NotNull(body);
+        Assert.Equal(AllowlistedInstanceId, body.InstanceId);
+        Assert.Equal(ElsaInstanceOperationAction.Create, body.Action);
+        Assert.Equal(ElsaInstanceOperationState.Failed, body.State);
+        Assert.Equal(StagingRecoveryLifecycleLeverDefaults.FailedCreateCode, body.Code);
+
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        Assert.Equal(
+            ElsaObservedLifecycle.Failed.ToString(),
+            await ScalarStringAsync(db, "SELECT ObservedLifecycle FROM ElsaInstances WHERE Id = @id", ("@id", AllowlistedInstanceId)));
+        Assert.Equal(
+            ElsaDesiredLifecycle.Running.ToString(),
+            await ScalarStringAsync(db, "SELECT DesiredLifecycle FROM ElsaInstances WHERE Id = @id", ("@id", AllowlistedInstanceId)));
+        Assert.Equal(0, await ScalarIntAsync(
+            db,
+            "SELECT COUNT(*) FROM ElsaInstanceOperations WHERE InstanceId = @instanceId AND State = @state",
+            ("@instanceId", AllowlistedInstanceId),
+            ("@state", ElsaInstanceOperationState.RecoveryRequired.ToString())));
+        Assert.Equal(
+            "outbox.invalid",
+            await ScalarStringAsync(
+                db,
+                "SELECT QuarantineCode FROM ElsaInstanceLifecycleOutbox WHERE OperationId = @id",
+                ("@id", body.OperationId)));
+        Assert.Equal(1, await CountFiredAsync(app, AllowlistedInstanceId, body.OperationId));
+    }
+
+    [Fact]
+    public async Task Allowlisted_instance_with_a_stripe_test_key_injects_a_leftover_failed_delete()
+    {
+        await using var app = CreateApp(recoveryEnabled: true, allowlisted: AllowlistedInstanceId);
+        await SeedReadyInstanceAsync(app, AllowlistedInstanceId);
+
+        var response = await PostFailedDeleteAsync(Operator(app), AllowlistedInstanceId);
+        if (response.StatusCode != HttpStatusCode.OK)
+            Assert.Fail($"{response.StatusCode}: {await response.Content.ReadAsStringAsync()}");
+
+        var body = await response.Content.ReadControlJsonAsync<StagingRecoveryLifecycleLeverResponse>();
+        Assert.NotNull(body);
+        Assert.Equal(AllowlistedInstanceId, body.InstanceId);
+        Assert.Equal(ElsaInstanceOperationAction.Delete, body.Action);
+        Assert.Equal(ElsaInstanceOperationState.Failed, body.State);
+        Assert.Equal(StagingRecoveryLifecycleLeverDefaults.FailedDeleteCode, body.Code);
+
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        Assert.Equal(
+            ElsaDesiredLifecycle.Deleting.ToString(),
+            await ScalarStringAsync(db, "SELECT DesiredLifecycle FROM ElsaInstances WHERE Id = @id", ("@id", AllowlistedInstanceId)));
+        Assert.Equal(
+            ElsaObservedLifecycle.Deleting.ToString(),
+            await ScalarStringAsync(db, "SELECT ObservedLifecycle FROM ElsaInstances WHERE Id = @id", ("@id", AllowlistedInstanceId)));
+        Assert.Equal(0, await ScalarIntAsync(
+            db,
+            "SELECT COUNT(*) FROM ElsaInstanceOperations WHERE InstanceId = @instanceId AND State = @state",
+            ("@instanceId", AllowlistedInstanceId),
+            ("@state", ElsaInstanceOperationState.RecoveryRequired.ToString())));
+        Assert.Equal(0, await ScalarIntAsync(
+            db,
+            "SELECT COUNT(*) FROM ElsaInstanceLifecycleOutbox WHERE OperationId = @id",
+            ("@id", body.OperationId)));
+        Assert.Equal(1, await CountFiredAsync(app, AllowlistedInstanceId, body.OperationId));
+    }
+
+    [Fact]
+    public async Task Live_stripe_key_refuses_terminal_failed_create_and_delete()
+    {
+        await using var app = CreateApp(
+            recoveryEnabled: true,
+            allowlisted: AllowlistedInstanceId,
+            stripeSecretKey: LiveSecretKey);
+        await SeedReadyInstanceAsync(app, AllowlistedInstanceId);
+
+        var failedCreate = await PostFailedCreateAsync(Operator(app), AllowlistedInstanceId);
+        var failedDelete = await PostFailedDeleteAsync(Operator(app), AllowlistedInstanceId);
+
+        Assert.Equal(HttpStatusCode.Forbidden, failedCreate.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, failedDelete.StatusCode);
+        Assert.Equal(StagingRecoveryLifecycleLeverDefaults.DisabledCode, await ProblemCodeAsync(failedCreate));
+        Assert.Equal(StagingRecoveryLifecycleLeverDefaults.DisabledCode, await ProblemCodeAsync(failedDelete));
+    }
+
     [Theory]
     [InlineData(null, StagingRecoveryLifecycleLeverDefaults.TransitionCode)]
     [InlineData(StagingRecoveryLifecycleLeverDefaults.TransitionCode, StagingRecoveryLifecycleLeverDefaults.TransitionCode)]
@@ -469,6 +586,14 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
             "POST /api/staging/lifecycle-lever/instances/{instanceId:guid}/reset",
             allowed,
             StringComparer.Ordinal);
+        Assert.DoesNotContain(
+            "POST /api/staging/lifecycle-lever/instances/{instanceId:guid}/terminal-failed-create",
+            allowed,
+            StringComparer.Ordinal);
+        Assert.DoesNotContain(
+            "POST /api/staging/lifecycle-lever/instances/{instanceId:guid}/terminal-failed-delete",
+            allowed,
+            StringComparer.Ordinal);
     }
 
     [Fact]
@@ -540,6 +665,12 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
 
     private static Task<HttpResponseMessage> PostResetAsync(HttpClient client, Guid instanceId) =>
         client.PostAsync($"/api/staging/lifecycle-lever/instances/{instanceId:D}/reset", null);
+
+    private static Task<HttpResponseMessage> PostFailedCreateAsync(HttpClient client, Guid instanceId) =>
+        client.PostAsync($"/api/staging/lifecycle-lever/instances/{instanceId:D}/terminal-failed-create", null);
+
+    private static Task<HttpResponseMessage> PostFailedDeleteAsync(HttpClient client, Guid instanceId) =>
+        client.PostAsync($"/api/staging/lifecycle-lever/instances/{instanceId:D}/terminal-failed-delete", null);
 
     private static Task<HttpResponseMessage> PostBillingAsync(HttpClient client, Guid organizationId) =>
         client.PostAsJsonAsync(
@@ -655,13 +786,21 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
 
         var fire = await PostAsync(Operator(app), AllowlistedInstanceId);
         var reset = await PostResetAsync(Operator(app), AllowlistedInstanceId);
+        var failedCreate = await PostFailedCreateAsync(Operator(app), AllowlistedInstanceId);
+        var failedDelete = await PostFailedDeleteAsync(Operator(app), AllowlistedInstanceId);
 
         Assert.Equal(HttpStatusCode.ServiceUnavailable, fire.StatusCode);
         Assert.Equal(HttpStatusCode.ServiceUnavailable, reset.StatusCode);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, failedCreate.StatusCode);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, failedDelete.StatusCode);
         var fireBody = await fire.Content.ReadFromJsonAsync<JsonElement>();
         var resetBody = await reset.Content.ReadFromJsonAsync<JsonElement>();
+        var failedCreateBody = await failedCreate.Content.ReadFromJsonAsync<JsonElement>();
+        var failedDeleteBody = await failedDelete.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal(StagingRecoveryLifecycleLeverDefaults.UnavailableCode, fireBody.GetProperty("code").GetString());
         Assert.Equal(StagingRecoveryLifecycleLeverDefaults.UnavailableCode, resetBody.GetProperty("code").GetString());
+        Assert.Equal(StagingRecoveryLifecycleLeverDefaults.UnavailableCode, failedCreateBody.GetProperty("code").GetString());
+        Assert.Equal(StagingRecoveryLifecycleLeverDefaults.UnavailableCode, failedDeleteBody.GetProperty("code").GetString());
         Assert.True(fireBody.GetProperty("retryable").GetBoolean());
         Assert.True(resetBody.GetProperty("retryable").GetBoolean());
         await AssertLeverDidNotFireAsync(app, AllowlistedInstanceId);
@@ -753,9 +892,21 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
         }
     }
 
+    private static Task SeedAcceptedCreateInstanceAsync(ControlApiTestApplication app, Guid instanceId) =>
+        SeedInstanceAsync(app, instanceId, completeCreate: false);
+
     private static async Task SeedReadyInstanceAsync(
         ControlApiTestApplication app,
         Guid instanceId,
+        bool deleted = false,
+        ElsaObservedLifecycle? observed = null,
+        ElsaInstanceHealth? health = null) =>
+        await SeedInstanceAsync(app, instanceId, completeCreate: true, deleted, observed, health);
+
+    private static async Task SeedInstanceAsync(
+        ControlApiTestApplication app,
+        Guid instanceId,
+        bool completeCreate,
         bool deleted = false,
         ElsaObservedLifecycle? observed = null,
         ElsaInstanceHealth? health = null)
@@ -796,6 +947,9 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
                     instanceId));
             operationId = created.Operation.Id;
         });
+
+        if (!completeCreate)
+            return;
 
         await using var scope = app.Services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
@@ -1127,6 +1281,22 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
                 new InvalidOperationException("persistence-unavailable"));
 
         public Task<StagingRecoveryLifecycleLeverCommit> ResetLeverParkedReconcileAsync(
+            Guid instanceId,
+            string? operatorSubject,
+            CancellationToken cancellationToken = default) =>
+            throw new DbUpdateException(
+                "The catalog write failed.",
+                new InvalidOperationException("persistence-unavailable"));
+
+        public Task<StagingRecoveryLifecycleLeverCommit> FailActiveCreateAsync(
+            Guid instanceId,
+            string? operatorSubject,
+            CancellationToken cancellationToken = default) =>
+            throw new DbUpdateException(
+                "The catalog write failed.",
+                new InvalidOperationException("persistence-unavailable"));
+
+        public Task<StagingRecoveryLifecycleLeverCommit> InjectTerminalFailedDeleteAsync(
             Guid instanceId,
             string? operatorSubject,
             CancellationToken cancellationToken = default) =>
