@@ -1,7 +1,10 @@
 using ElsaControl.Provisioning.Abstractions;
+using ElsaControl.Provisioning.Core.Stores;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ElsaControl.Provisioning.Core.Tests;
 
@@ -16,6 +19,58 @@ public sealed class ProvisioningCompositionTests
         using var provider = services.BuildServiceProvider();
         Assert.IsType<UnconfiguredInfrastructureProvider>(provider.GetRequiredService<IInfrastructureProvider>());
         Assert.NotNull(provider.GetRequiredService<IProvisioningService>());
+        Assert.IsType<NoOpProvisioningStepLedger>(provider.GetRequiredService<IProvisioningStepLedger>());
+        Assert.IsType<ProvisioningLiveEventSink>(provider.GetRequiredService<IProvisioningLiveEventSink>());
+    }
+
+    [Fact]
+    public void Live_event_sink_resolves_with_the_generic_logger()
+    {
+        var services = new ServiceCollection();
+        services.AddProvisioning(Configuration(("Provisioning:WorkerEnabled", "false")));
+        using var provider = services.BuildServiceProvider();
+        Assert.IsType<ProvisioningLiveEventSink>(provider.GetRequiredService<IProvisioningLiveEventSink>());
+        var logger = provider.GetRequiredService<ILogger<ProvisioningLiveEventSink>>();
+        Assert.IsNotType<NullLogger<ProvisioningLiveEventSink>>(logger);
+    }
+
+    [Fact]
+    public async Task Resolved_live_event_sink_logs_through_the_injected_generic_logger()
+    {
+        var logger = new RecordingSinkLogger();
+        var services = new ServiceCollection();
+        services.AddSingleton<ILogger<ProvisioningLiveEventSink>>(logger);
+        services.AddProvisioning(Configuration(("Provisioning:WorkerEnabled", "false")));
+        services.AddSingleton<IProvisioningStepLedger, ThrowingStepLedger>();
+        using var provider = services.BuildServiceProvider();
+        var sink = Assert.IsType<ProvisioningLiveEventSink>(provider.GetRequiredService<IProvisioningLiveEventSink>());
+        Assert.Same(logger, provider.GetRequiredService<ILogger<ProvisioningLiveEventSink>>());
+
+        var store = provider.GetRequiredService<IProvisioningOperationStore>();
+        var request = ProvisioningFixtures.Request(
+            ProvisioningCommand.Provision,
+            ProvisioningFixtures.EngineTarget(),
+            ProvisioningFixtures.EngineSpec(),
+            "sink-di-logger");
+        var enqueued = await store.CreateOrGetAsync(request, "hash", DateTimeOffset.UtcNow);
+        var operation = await store.ClaimAsync(enqueued.OperationId, DateTimeOffset.UtcNow);
+        Assert.NotNull(operation);
+
+        using (sink.Bind(operation, request))
+        {
+            await sink.PublishAsync(operation.Id, [
+                new ProvisioningEvent(
+                    operation.Id,
+                    ProvisioningEventKind.ResourceStarted,
+                    "resource-group",
+                    "Resource started.",
+                    DateTimeOffset.UtcNow,
+                    1)
+            ]);
+        }
+
+        Assert.Contains(logger.Entries, item => item.Contains("InvalidOperationException", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Entries, item => item.Contains("password", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -146,6 +201,41 @@ public sealed class ProvisioningCompositionTests
             out _,
             requireSqlServer: true));
         Assert.Equal("SqlServer", provider);
+    }
+
+    private sealed class ThrowingStepLedger : IProvisioningStepLedger
+    {
+        public Task<ProvisioningStepLedgerResult> TryWriteAsync(
+            ProvisioningOperation operation,
+            ProvisioningRequest? request,
+            IReadOnlyList<ProvisioningEvent> events,
+            CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("password=hunter2");
+
+        public Task HeartbeatAsync(
+            ProvisioningOperation operation,
+            ProvisioningRequest? request,
+            CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
+    }
+
+    private sealed class RecordingSinkLogger : ILogger<ProvisioningLiveEventSink>
+    {
+        public List<string> Entries { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            Entries.Add(formatter(state, exception));
+        }
     }
 
     private sealed class AzureStandIn : IInfrastructureProvider

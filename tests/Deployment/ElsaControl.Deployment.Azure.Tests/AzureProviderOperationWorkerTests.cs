@@ -171,6 +171,28 @@ public sealed class AzureProviderOperationWorkerTests
         Assert.Equal(operation.RequestHash, store.Operation.RequestHash);
     }
 
+    [Fact]
+    public async Task Accepted_operations_still_run_the_bicep_executor()
+    {
+        var digest = "sha256:" + new string('f', 64);
+        var operation = WithComputedMetadata(Operation() with
+        {
+            ReleaseManifestDigest = digest,
+            ReleaseManifestSignatureDigest = digest,
+            ReleaseManifestReference = "oci://evidence.example/manifest",
+            ReleaseManifestSignatureReference = "oci://evidence.example/signature"
+        });
+        var store = new WorkerStore(operation, execute: true);
+        var runner = new CompletingRunner();
+        var executor = new AzureProviderExecutor(store, runner, assignmentStore: new OperationAssignmentStore(operation));
+        var worker = new AzureProviderOperationWorker(store, executor, new PersistedAzureProviderPlanSource(), new FixedTimeProvider());
+
+        var processed = await worker.ProcessOnceAsync();
+
+        Assert.Equal(1, processed);
+        Assert.NotEmpty(runner.Steps);
+    }
+
     private static AzureProviderOperation Operation()
     {
         var operation = new AzureProviderOperation(

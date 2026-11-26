@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using ElsaControl.Provisioning.Abstractions;
+using ElsaControl.Provisioning.Core;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Pulumi.Automation;
@@ -10,7 +11,9 @@ namespace ElsaControl.Provisioning.Providers.Azure;
 /// Automation API client. Uses the pinned CLI in the host image. Tests that
 /// must not require the CLI inject a different <see cref="IPulumiAutomationClient"/>.
 /// </summary>
-public sealed class LocalPulumiAutomationClient(ILogger<LocalPulumiAutomationClient>? logger = null)
+public sealed class LocalPulumiAutomationClient(
+    ILogger<LocalPulumiAutomationClient>? logger = null,
+    IProvisioningLiveEventSink? liveEvents = null)
     : IPulumiAutomationClient
 {
     private readonly ILogger<LocalPulumiAutomationClient> _logger =
@@ -56,9 +59,31 @@ public sealed class LocalPulumiAutomationClient(ILogger<LocalPulumiAutomationCli
             }
 
             var events = new List<ProvisioningEvent>();
+            await using var pump = liveEvents is null
+                ? null
+                : new ProvisioningLiveEventPump(operation.Id, liveEvents, _logger);
             void OnEvent(Pulumi.Automation.Events.EngineEvent engineEvent)
             {
-                events.AddRange(PulumiEngineEventMapper.Map(operation.Id, engineEvent, DateTimeOffset.UtcNow));
+                try
+                {
+                    var mapped = PulumiEngineEventMapper.Map(operation.Id, engineEvent, DateTimeOffset.UtcNow).ToList();
+                    if (mapped.Count == 0)
+                        return;
+                    if (pump is null)
+                    {
+                        events.AddRange(mapped);
+                        return;
+                    }
+
+                    pump.TryEnqueue(mapped);
+                }
+                catch (Exception exception)
+                {
+                    _logger.LogError(
+                        "Provisioning live event mapping failed. OperationId={OperationId} ExceptionType={ExceptionType}",
+                        operation.Id,
+                        exception.GetType().FullName);
+                }
             }
 
             Dictionary<string, string>? outputs = null;
@@ -89,6 +114,9 @@ public sealed class LocalPulumiAutomationClient(ILogger<LocalPulumiAutomationCli
                     return ProviderRunResult.Fail([], ProvisioningFailureCodes.NotImplemented);
             }
 
+            if (pump is not null)
+                await pump.CompleteAsync().ConfigureAwait(false);
+
             if (command == ProvisioningCommand.Cancel)
             {
                 var cancelled = new ProvisioningEvent(
@@ -99,6 +127,9 @@ public sealed class LocalPulumiAutomationClient(ILogger<LocalPulumiAutomationCli
                     DateTimeOffset.UtcNow);
                 return ProviderRunResult.Ok([cancelled]);
             }
+
+            if (pump is not null)
+                return ProviderRunResult.Ok([], outputs);
 
             if (events.Count == 0)
             {

@@ -11,7 +11,8 @@ public sealed record ProvisioningEvent
         ProvisioningEventKind kind,
         string resourceKind,
         string message,
-        DateTimeOffset occurredAt)
+        DateTimeOffset occurredAt,
+        int? engineSequence = null)
     {
         if (operationId == Guid.Empty)
             throw new ArgumentException("Operation ID is required.", nameof(operationId));
@@ -19,12 +20,15 @@ public sealed record ProvisioningEvent
             throw new ArgumentOutOfRangeException(nameof(kind));
         ArgumentException.ThrowIfNullOrWhiteSpace(resourceKind);
         ArgumentException.ThrowIfNullOrWhiteSpace(message);
+        if (engineSequence is < 0)
+            throw new ArgumentOutOfRangeException(nameof(engineSequence));
 
         OperationId = operationId;
         Kind = kind;
         ResourceKind = resourceKind.Trim();
         Message = message.Trim();
         OccurredAt = occurredAt;
+        EngineSequence = engineSequence;
     }
 
     public Guid OperationId { get; }
@@ -32,4 +36,10 @@ public sealed record ProvisioningEvent
     public string ResourceKind { get; }
     public string Message { get; }
     public DateTimeOffset OccurredAt { get; }
+
+    /// <summary>
+    /// Pulumi engine event sequence when known. Used to make ledger writes
+    /// idempotent across retries of the same run.
+    /// </summary>
+    public int? EngineSequence { get; }
 }

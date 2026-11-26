@@ -21,7 +21,8 @@ public static partial class ProvisioningEventSanitizer
             value.Kind,
             SanitizeResourceKind(value.ResourceKind),
             SanitizeMessage(value.Message),
-            value.OccurredAt);
+            value.OccurredAt,
+            value.EngineSequence);
     }
 
     public static string SanitizeMessage(string message)

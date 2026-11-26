@@ -351,6 +351,49 @@ public sealed class EfProvisioningStore :
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<bool> TryAppendIfFenceHeldAsync(
+        Guid operationId,
+        long fencingToken,
+        IReadOnlyList<ProvisioningEvent> events,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ArgumentNullException.ThrowIfNull(events);
+        if (events.Count == 0)
+            return true;
+
+        await using var db = await _factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        return await WriteAsync(db, async () =>
+        {
+            var row = await db.Operations
+                .SingleOrDefaultAsync(item => item.Id == operationId, cancellationToken)
+                .ConfigureAwait(false);
+            if (row is null)
+                return false;
+            var held = await db.Locks
+                .SingleOrDefaultAsync(item => item.LockKey == row.LockKey, cancellationToken)
+                .ConfigureAwait(false);
+            if (!HoldsFence(held, operationId, fencingToken))
+                return false;
+
+            foreach (var value in events)
+            {
+                var sanitised = ProvisioningEventSanitizer.Sanitize(value);
+                db.Events.Add(new ProvisioningEventEntity
+                {
+                    OperationId = sanitised.OperationId,
+                    Kind = sanitised.Kind.ToString(),
+                    ResourceKind = sanitised.ResourceKind,
+                    Message = sanitised.Message,
+                    OccurredAt = sanitised.OccurredAt
+                });
+            }
+
+            await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            return true;
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<IReadOnlyList<ProvisioningEvent>> ListAsync(
         Guid operationId,
         CancellationToken cancellationToken = default)
