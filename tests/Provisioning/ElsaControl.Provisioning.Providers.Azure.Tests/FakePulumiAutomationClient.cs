@@ -9,8 +9,11 @@ internal sealed class FakePulumiAutomationClient : IPulumiAutomationClient
     public PulumiWorkspaceConfiguration? LastWorkspace { get; private set; }
     public bool ThrowLockConflict { get; set; }
     public bool Succeeded { get; set; } = true;
+    public TimeSpan Stall { get; set; }
+    public List<ProvisioningCommand> Commands { get; } = [];
+    public TaskCompletionSource Started { get; } = new();
 
-    public Task<ProviderRunResult> RunAsync(
+    public async Task<ProviderRunResult> RunAsync(
         ProvisioningCommand command,
         ProvisioningOperation operation,
         PulumiWorkspaceConfiguration workspace,
@@ -20,9 +23,17 @@ internal sealed class FakePulumiAutomationClient : IPulumiAutomationClient
         cancellationToken.ThrowIfCancellationRequested();
         LastCommand = command;
         LastWorkspace = workspace;
+        Commands.Add(command);
+        if (Stall > TimeSpan.Zero
+            && command is ProvisioningCommand.Provision or ProvisioningCommand.Update)
+        {
+            Started.TrySetResult();
+            await Task.Delay(Stall, cancellationToken).ConfigureAwait(false);
+        }
+
         if (command == ProvisioningCommand.Cancel)
         {
-            return Task.FromResult(new ProviderRunResult(
+            return new ProviderRunResult(
                 true,
                 [
                     new ProvisioningEvent(
@@ -32,12 +43,12 @@ internal sealed class FakePulumiAutomationClient : IPulumiAutomationClient
                         "Nothing to cancel.",
                         DateTimeOffset.UtcNow)
                 ],
-                failureCode: ProvisioningFailureCodes.NothingToCancel));
+                failureCode: ProvisioningFailureCodes.NothingToCancel);
         }
 
         if (ThrowLockConflict)
         {
-            return Task.FromResult(ProviderRunResult.Fail(
+            return ProviderRunResult.Fail(
                 [
                     new ProvisioningEvent(
                         operation.Id,
@@ -46,7 +57,7 @@ internal sealed class FakePulumiAutomationClient : IPulumiAutomationClient
                         "Stack lock conflict.",
                         DateTimeOffset.UtcNow)
                 ],
-                ProvisioningFailureCodes.StackLocked));
+                ProvisioningFailureCodes.StackLocked);
         }
 
         var events = new[]
@@ -60,8 +71,8 @@ internal sealed class FakePulumiAutomationClient : IPulumiAutomationClient
                 command == ProvisioningCommand.Destroy ? "Destroy completed." : "Apply completed.",
                 DateTimeOffset.UtcNow)
         };
-        return Task.FromResult(Succeeded
+        return Succeeded
             ? ProviderRunResult.Ok(events)
-            : ProviderRunResult.Fail(events, ProvisioningFailureCodes.ProviderFailed));
+            : ProviderRunResult.Fail(events, ProvisioningFailureCodes.ProviderFailed);
     }
 }

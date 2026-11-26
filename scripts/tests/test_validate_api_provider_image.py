@@ -68,7 +68,8 @@ esac
                          "--env Authentication__ApiKey", "docker exec",
                          "curl --fail --silent --max-time 2", "deadline=$((SECONDS + 60))",
                          'docker stop --time 30 "$container_id"', "Application is shutting down...",
-                         'docker rm --force "$container_id"'):
+                         'docker rm --force "$container_id"',
+                         'test "$PULUMI_DISABLE_AUTOMATIC_PLUGIN_ACQUISITION" = true'):
             self.assertIn(required, source)
         for forbidden in ("--publish", "--volume"):
             self.assertNotIn(forbidden, source)

@@ -15,7 +15,8 @@ public sealed class AzureProvisioningCompositionTests
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["Provisioning:WorkerEnabled"] = "true",
-                ["Provisioning:AllowFakeProvider"] = "false"
+                ["Provisioning:AllowFakeProvider"] = "false",
+                ["Provisioning:SeedVaultUri"] = "https://kv.example.vault.azure.net/"
             })
             .Build();
         services.AddProvisioning(configuration, runWorker: true, allowFakeProvider: false);
@@ -23,6 +24,9 @@ public sealed class AzureProvisioningCompositionTests
         using var provider = services.BuildServiceProvider();
         Assert.IsType<AzureInfrastructureProvider>(provider.GetRequiredService<IInfrastructureProvider>());
         Assert.IsType<AzureArmResourceGroupAbsenceProbe>(provider.GetRequiredService<IResourceGroupAbsenceProbe>());
+        var secrets = provider.GetRequiredService<IProvisioningSecretResolver>();
+        Assert.IsType<AzureKeyVaultProvisioningSecretResolver>(secrets);
+        Assert.True(secrets.IsReady);
         Assert.NotEqual(
             FakeInfrastructureProvider.Id,
             provider.GetRequiredService<IInfrastructureProvider>().ProviderId);

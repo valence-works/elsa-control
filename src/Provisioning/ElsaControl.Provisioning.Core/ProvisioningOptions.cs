@@ -21,6 +21,12 @@ public sealed class ProvisioningOptions
     /// </summary>
     public bool AllowFileBackend { get; set; }
 
+    /// <summary>
+    /// Key Vault URI for the three engine seed values. Required when the
+    /// worker is on outside tests.
+    /// </summary>
+    public string? SeedVaultUri { get; set; }
+
     public TimeSpan PollInterval { get; set; } = TimeSpan.FromSeconds(5);
 
     public int BatchSize { get; set; } = 10;

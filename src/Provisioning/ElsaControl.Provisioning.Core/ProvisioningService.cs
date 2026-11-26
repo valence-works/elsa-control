@@ -104,12 +104,24 @@ public sealed class ProvisioningService(
             return result;
 
         if (command == ProvisioningCommand.Cancel)
+        {
             _runs.TryCancel(request.Target.StackKind, ProvisioningStackName.Canonicalize(request.Target.StackName));
+        }
 
         var kind = result.LockConflict
             ? ProvisioningEventKind.LockConflicted
-            : ProvisioningEventKind.OperationQueued;
-        var message = result.LockConflict ? "Stack lock conflict." : "Operation queued.";
+            : result.State == ProvisioningOperationState.Succeeded
+                ? result.Code == ProvisioningFailureCodes.NothingToCancel
+                    ? ProvisioningEventKind.OperationSucceeded
+                    : ProvisioningEventKind.OperationCancelled
+                : ProvisioningEventKind.OperationQueued;
+        var message = result.LockConflict
+            ? "Stack lock conflict."
+            : result.Code == ProvisioningFailureCodes.NothingToCancel
+                ? "Nothing to cancel."
+                : result.State == ProvisioningOperationState.Succeeded
+                    ? "Cancel requested."
+                    : "Operation queued.";
         await events.AppendAsync(
             [
                 new ProvisioningEvent(

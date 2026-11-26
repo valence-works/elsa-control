@@ -7,7 +7,8 @@ public sealed class UnknownResourceGroupAbsenceProbe : IResourceGroupAbsenceProb
 {
     public Task<ResourceGroupPresence> ObserveAsync(
         string resourceGroupName,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? subscriptionId = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         ArgumentException.ThrowIfNullOrWhiteSpace(resourceGroupName);

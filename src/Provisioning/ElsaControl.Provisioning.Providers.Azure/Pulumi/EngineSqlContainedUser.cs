@@ -3,27 +3,55 @@ using Pulumi;
 
 namespace ElsaControl.Provisioning.Providers.Azure.Programs;
 
-/// <summary>
-/// Creates the runtime identity as a contained Azure SQL database user, matching
-/// Bicep's sql-bootstrap.sql. The server Entra admin is the governed bootstrap
-/// principal, not this runtime identity.
-/// </summary>
-internal static class EngineSqlContainedUser
+internal sealed class EngineSqlContainedUserArgs
 {
-    public static Output<string> Ensure(
-        Output<string> fullyQualifiedDomainName,
-        Output<string> clientId,
-        Output<string> displayName)
+    public Input<string> FullyQualifiedDomainName { get; set; } = null!;
+    public Input<string> ClientId { get; set; } = null!;
+    public Input<string> DisplayName { get; set; } = null!;
+}
+
+/// <summary>
+/// Tracked contained Azure SQL user matching Bicep's sql-bootstrap.sql.
+/// Depends on the database and the server's Entra admin. Skipped during
+/// Preview. The server Entra admin is the governed bootstrap principal,
+/// not this runtime identity.
+/// </summary>
+internal sealed class EngineSqlContainedUser : ComponentResource
+{
+    public const string ResourceTypeName = "elsacontrol:sql:ContainedUser";
+
+    internal static Action<string, string, string>? GrantOverride { get; set; }
+
+    public EngineSqlContainedUser(
+        string name,
+        EngineSqlContainedUserArgs args,
+        ComponentResourceOptions? options = null)
+        : base(ResourceTypeName, name, options)
     {
-        return Output.Tuple(fullyQualifiedDomainName, clientId, displayName).Apply(tuple =>
+        ArgumentNullException.ThrowIfNull(args);
+        DisplayName = Output.Tuple(
+            args.FullyQualifiedDomainName.Apply(value => value),
+            args.ClientId.Apply(value => value),
+            args.DisplayName.Apply(value => value)).Apply(tuple =>
         {
             Grant(tuple.Item1, tuple.Item2, tuple.Item3);
             return tuple.Item3;
         });
+        RegisterOutputs(new Dictionary<string, object?> { ["displayName"] = DisplayName });
     }
+
+    public Output<string> DisplayName { get; }
 
     internal static void Grant(string fullyQualifiedDomainName, string clientId, string displayName)
     {
+        if (IsPreview())
+            return;
+        if (GrantOverride is not null)
+        {
+            GrantOverride(fullyQualifiedDomainName, clientId, displayName);
+            return;
+        }
+
         if (!fullyQualifiedDomainName.EndsWith(".database.windows.net", StringComparison.OrdinalIgnoreCase))
             return;
         if (!Guid.TryParse(clientId, out var parsed) || parsed == Guid.Empty)
@@ -64,6 +92,18 @@ internal static class EngineSqlContainedUser
         using var command = connection.CreateCommand();
         command.CommandText = sql;
         command.ExecuteNonQuery();
+    }
+
+    private static bool IsPreview()
+    {
+        try
+        {
+            return Deployment.Instance.IsDryRun;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
     }
 
     private static bool IsSafeSqlName(string value) =>

@@ -16,6 +16,11 @@ internal sealed class ProvisioningOperationEntity
     public DateTimeOffset? CompletedAt { get; set; }
     public string? FailureCode { get; set; }
     public string RequestJson { get; set; } = "";
+    public bool CancelRequested { get; set; }
+    public bool StateLockMayBeHeld { get; set; }
+    public string? LeaseOwner { get; set; }
+    public DateTimeOffset? LeaseExpiresAt { get; set; }
+    public long FencingToken { get; set; }
 }
 
 internal sealed class ProvisioningEventEntity
@@ -32,4 +37,7 @@ internal sealed class ProvisioningLockEntity
 {
     public string LockKey { get; set; } = "";
     public Guid OperationId { get; set; }
+    public string Owner { get; set; } = "";
+    public DateTimeOffset LeaseExpiresAt { get; set; }
+    public long FencingToken { get; set; }
 }

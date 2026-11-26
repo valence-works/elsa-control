@@ -228,8 +228,9 @@ public sealed class ProvisioningServiceTests
             ProvisioningFixtures.EngineTarget(),
             ProvisioningFixtures.EngineSpec(),
             "cancel-run"));
-        Assert.Equal(ProvisioningOperationState.Queued, cancel.State);
-        Assert.Equal(1, await worker.ProcessOnceAsync());
+        Assert.Equal(ProvisioningOperationState.Succeeded, cancel.State);
+        Assert.Equal(ProvisioningFailureCodes.NothingToCancel, cancel.Code);
+        Assert.Equal(0, await worker.ProcessOnceAsync());
 
         var completed = await service.GetOperationAsync(cancel.OperationId);
         Assert.Equal(ProvisioningOperationState.Succeeded, completed!.State);
@@ -266,12 +267,14 @@ public sealed class ProvisioningServiceTests
             ProvisioningFixtures.PlatformSpec("inflight"),
             "inflight-cancel"));
         Assert.False(cancel.LockConflict);
+        Assert.Equal(ProvisioningOperationState.Succeeded, cancel.State);
+        Assert.Equal(ProvisioningFailureCodes.Cancelled, cancel.Code);
         Assert.True(cts.IsCancellationRequested);
-
-        Assert.Equal(1, await worker.ProcessOnceAsync());
+        Assert.True((await store.GetAsync(claimed.Id))!.CancelRequested);
+        Assert.Equal(0, await worker.ProcessOnceAsync());
         var completed = await service.GetOperationAsync(cancel.OperationId);
         Assert.Equal(ProvisioningOperationState.Succeeded, completed!.State);
-        Assert.Equal(ProvisioningFailureCodes.NothingToCancel, completed.FailureCode);
+        Assert.Equal(ProvisioningFailureCodes.Cancelled, completed.FailureCode);
         Assert.False(provider.StackExists("inflight"));
     }
 
@@ -370,13 +373,45 @@ public sealed class ProvisioningServiceTests
 
         using var cts = new CancellationTokenSource();
         var processing = worker.ProcessOnceAsync(cancellationToken: cts.Token);
-        await Task.Delay(50);
+        await provider.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
         cts.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => processing);
 
         var completed = await service.GetOperationAsync(provision.OperationId);
-        Assert.Equal(ProvisioningOperationState.Failed, completed!.State);
+        Assert.Equal(ProvisioningOperationState.Cancelled, completed!.State);
         Assert.Equal(ProvisioningFailureCodes.Interrupted, completed.FailureCode);
+        Assert.True(completed.StateLockMayBeHeld);
+        Assert.Equal(provision.OperationId, await store.GetHolderAsync(ProvisioningStackKind.Platform, "interrupt"));
+
+        await worker.ReconcileInterruptedAsync();
+        var cleared = await service.GetOperationAsync(provision.OperationId);
+        Assert.False(cleared!.StateLockMayBeHeld);
         Assert.Null(await store.GetHolderAsync(ProvisioningStackKind.Platform, "interrupt"));
+    }
+
+    [Fact]
+    public async Task Cancel_of_a_queued_create_does_not_run_the_provider()
+    {
+        var store = new InMemoryProvisioningStore();
+        var provider = new FakeInfrastructureProvider();
+        var service = new ProvisioningService(store, store);
+        var worker = new ProvisioningOperationWorker(store, store, provider);
+        var provision = await service.ProvisionAsync(ProvisioningFixtures.Request(
+            ProvisioningCommand.Provision,
+            ProvisioningFixtures.PlatformTarget("queued-cancel"),
+            ProvisioningFixtures.PlatformSpec("queued-cancel"),
+            "queued-cancel-create"));
+        Assert.Equal(ProvisioningOperationState.Queued, provision.State);
+
+        var cancel = await service.CancelAsync(ProvisioningFixtures.Request(
+            ProvisioningCommand.Cancel,
+            ProvisioningFixtures.PlatformTarget("queued-cancel"),
+            ProvisioningFixtures.PlatformSpec("queued-cancel"),
+            "queued-cancel-signal"));
+        Assert.Equal(ProvisioningOperationState.Succeeded, cancel.State);
+        Assert.Equal(ProvisioningFailureCodes.Cancelled, cancel.Code);
+        Assert.Equal(ProvisioningOperationState.Cancelled, (await service.GetOperationAsync(provision.OperationId))!.State);
+        Assert.Equal(0, await worker.ProcessOnceAsync());
+        Assert.False(provider.StackExists("queued-cancel"));
     }
 }

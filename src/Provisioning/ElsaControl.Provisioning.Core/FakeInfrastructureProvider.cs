@@ -31,6 +31,8 @@ public sealed class FakeInfrastructureProvider : IInfrastructureProvider, ICrede
 
     public TimeSpan Stall { get; set; }
 
+    public TaskCompletionSource Started { get; } = new();
+
     public IReadOnlySet<string> Capabilities { get; } = new HashSet<string>(StringComparer.Ordinal)
     {
         ProvisioningCapability.ContainerRuntime,
@@ -156,7 +158,10 @@ public sealed class FakeInfrastructureProvider : IInfrastructureProvider, ICrede
         ArgumentNullException.ThrowIfNull(request);
         cancellationToken.ThrowIfCancellationRequested();
         if (Stall > TimeSpan.Zero)
+        {
+            Started.TrySetResult();
             await Task.Delay(Stall, cancellationToken).ConfigureAwait(false);
+        }
 
         var missing = request.Spec.RequiredCapabilities.Where(capability => !Capabilities.Contains(capability)).ToArray();
         if (missing.Length > 0)

@@ -20,14 +20,24 @@ public static class AzureProvisioningServiceCollectionExtensions
 
         var options = configuration.GetSection(ProvisioningOptions.ConfigurationSection).Get<ProvisioningOptions>()
                       ?? new ProvisioningOptions();
+        var vault = configuration["Provisioning:SeedVaultUri"];
+        if (string.IsNullOrWhiteSpace(vault) && !options.AllowFakeProvider)
+        {
+            throw new InvalidOperationException("Provisioning seed vault is not configured.");
+        }
+
         services.AddSingleton(new AzurePulumiAutomationRunner(options.AllowFileBackend));
         services.AddSingleton<ICredentialResolver, AzureWorkloadIdentityCredentials>();
-        services.AddSingleton<IProvisioningSecretResolver, EmptyProvisioningSecretResolver>();
+        if (string.IsNullOrWhiteSpace(vault))
+            services.AddSingleton<IProvisioningSecretResolver, EmptyProvisioningSecretResolver>();
+        else
+            services.AddSingleton<IProvisioningSecretResolver>(_ => new AzureKeyVaultProvisioningSecretResolver(vault));
         services.AddSingleton<IPulumiAutomationClient, LocalPulumiAutomationClient>();
         services.AddSingleton<IResourceGroupAbsenceProbe, AzureArmResourceGroupAbsenceProbe>();
         services.AddSingleton<AzureInfrastructureProvider>();
         services.AddSingleton<IInfrastructureProvider>(provider =>
             provider.GetRequiredService<AzureInfrastructureProvider>());
+        services.AddHostedService<AzureProvisioningSecretGuard>();
         return services;
     }
 }

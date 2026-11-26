@@ -107,6 +107,27 @@ public sealed class ProvisioningCompositionTests
         Assert.Equal("Provisioning worker is enabled but no durable store is configured.", error.Message);
     }
 
+    [Fact]
+    public void Hosted_catalog_store_requires_sql_server()
+    {
+        Assert.False(ElsaControl.Provisioning.Persistence.EntityFrameworkCore.ProvisioningPersistenceServiceCollectionExtensions.TryGetCatalogStore(
+            Configuration(("Database:Provider", "Sqlite"), ("ConnectionStrings:Catalog", "Data Source=:memory:")),
+            out _,
+            out _,
+            requireSqlServer: true));
+        Assert.False(ElsaControl.Provisioning.Persistence.EntityFrameworkCore.ProvisioningPersistenceServiceCollectionExtensions.TryGetCatalogStore(
+            Configuration(("ConnectionStrings:Catalog", "Server=catalog")),
+            out _,
+            out _,
+            requireSqlServer: true));
+        Assert.True(ElsaControl.Provisioning.Persistence.EntityFrameworkCore.ProvisioningPersistenceServiceCollectionExtensions.TryGetCatalogStore(
+            Configuration(("Database:Provider", "SqlServer"), ("ConnectionStrings:Catalog", "Server=catalog")),
+            out var provider,
+            out _,
+            requireSqlServer: true));
+        Assert.Equal("SqlServer", provider);
+    }
+
     private sealed class AzureStandIn : IInfrastructureProvider
     {
         public string ProviderId => "azure";

@@ -28,11 +28,6 @@ public sealed record PulumiWorkspaceConfiguration(
         var config = new Dictionary<string, StackSettingsConfigValue>(StringComparer.Ordinal);
         foreach (var pair in StackConfig)
             config[pair.Key] = new StackSettingsConfigValue(pair.Value, isSecure: false);
-        if (SecretStackConfig is not null)
-        {
-            foreach (var pair in SecretStackConfig)
-                config[pair.Key] = new StackSettingsConfigValue(pair.Value, isSecure: true);
-        }
 
         return new LocalWorkspaceOptions
         {

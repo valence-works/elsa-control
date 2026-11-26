@@ -127,9 +127,12 @@ internal sealed class RecordingMocks(List<string> types) : IMocks
 {
     private readonly PlatformStackReferenceMocks _inner = new();
 
+    public List<MockResourceArgs> Args { get; } = [];
+
     public async Task<(string? id, object state)> NewResourceAsync(MockResourceArgs args)
     {
         types.Add(args.Type ?? args.Name ?? "");
+        Args.Add(args);
         return await _inner.NewResourceAsync(args);
     }
 

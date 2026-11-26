@@ -1,3 +1,4 @@
+using ElsaControl.Provisioning.Core;
 using ElsaControl.Provisioning.Core.Stores;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -15,14 +16,17 @@ public static class ProvisioningPersistenceServiceCollectionExtensions
     /// </summary>
     public static IServiceCollection AddProvisioningPersistence(
         this IServiceCollection services,
-        IConfiguration configuration)
+        IConfiguration configuration,
+        bool requireSqlServer = false)
     {
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(configuration);
-        if (!TryGetCatalogStore(configuration, out var provider, out var connectionString))
+        if (!TryGetCatalogStore(configuration, out var provider, out var connectionString, requireSqlServer))
         {
             throw new InvalidOperationException(
-                "Provisioning durable store requires ConnectionStrings:Catalog.");
+                requireSqlServer
+                    ? "Provisioning durable store requires Database:Provider SqlServer and ConnectionStrings:Catalog."
+                    : "Provisioning durable store requires ConnectionStrings:Catalog.");
         }
 
         services.AddDbContextFactory<ProvisioningDbContext>(options =>
@@ -31,7 +35,11 @@ public static class ProvisioningPersistenceServiceCollectionExtensions
         services.RemoveAll<IProvisioningEventStore>();
         services.RemoveAll<IProvisioningStackLockStore>();
         services.RemoveAll<InMemoryProvisioningStore>();
-        services.AddSingleton<EfProvisioningStore>();
+        services.TryAddSingleton<ProvisioningReplicaIdentity>();
+        services.AddSingleton<EfProvisioningStore>(sp =>
+            new EfProvisioningStore(
+                sp.GetRequiredService<IDbContextFactory<ProvisioningDbContext>>(),
+                sp.GetRequiredService<ProvisioningReplicaIdentity>()));
         services.AddSingleton<IProvisioningOperationStore>(sp => sp.GetRequiredService<EfProvisioningStore>());
         services.AddSingleton<IProvisioningEventStore>(sp => sp.GetRequiredService<EfProvisioningStore>());
         services.AddSingleton<IProvisioningStackLockStore>(sp => sp.GetRequiredService<EfProvisioningStore>());
@@ -42,13 +50,19 @@ public static class ProvisioningPersistenceServiceCollectionExtensions
     public static bool TryGetCatalogStore(
         IConfiguration configuration,
         out string provider,
-        out string connectionString)
+        out string connectionString,
+        bool requireSqlServer = false)
     {
         ArgumentNullException.ThrowIfNull(configuration);
         provider = configuration["Database:Provider"] ?? "";
         connectionString = configuration.GetConnectionString("Catalog") ?? "";
         if (string.IsNullOrWhiteSpace(connectionString))
             return false;
+        if (requireSqlServer)
+        {
+            return string.Equals(provider, "SqlServer", StringComparison.OrdinalIgnoreCase);
+        }
+
         if (string.IsNullOrWhiteSpace(provider))
             provider = "Sqlite";
         return string.Equals(provider, "Sqlite", StringComparison.OrdinalIgnoreCase)

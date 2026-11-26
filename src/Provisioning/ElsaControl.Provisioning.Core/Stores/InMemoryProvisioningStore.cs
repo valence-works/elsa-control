@@ -5,7 +5,8 @@ namespace ElsaControl.Provisioning.Core.Stores;
 
 /// <summary>
 /// Module-owned tables in process. Tests only. Production uses the EF store
-/// on Control's catalog SQL database. Locks are keyed by (project, stack).
+/// on Control's catalog SQL database. Locks are keyed by (project, stack) and
+/// fenced by owner, lease, and a monotonic token.
 /// </summary>
 public sealed class InMemoryProvisioningStore :
     IProvisioningOperationStore,
@@ -13,11 +14,17 @@ public sealed class InMemoryProvisioningStore :
     IProvisioningStackLockStore
 {
     private readonly object _gate = new();
+    private readonly ProvisioningReplicaIdentity _replica;
     private readonly Dictionary<Guid, ProvisioningOperation> _operations = [];
     private readonly Dictionary<Guid, ProvisioningRequest> _requests = [];
     private readonly Dictionary<string, Guid> _idempotency = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, Guid> _locks = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, LockRecord> _locks = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<Guid, List<ProvisioningEvent>> _events = [];
+
+    public InMemoryProvisioningStore(ProvisioningReplicaIdentity? replica = null)
+    {
+        _replica = replica ?? new ProvisioningReplicaIdentity();
+    }
 
     public Task<ProvisioningEnqueueResult> CreateOrGetAsync(
         ProvisioningRequest request,
@@ -50,17 +57,11 @@ public sealed class InMemoryProvisioningStore :
 
             var stackName = StackName(request);
             var lockKey = ProvisioningStackLockKey.Format(request.Target.StackKind, stackName);
-            var lockHeld = _locks.ContainsKey(lockKey)
-                || _operations.Values.Any(operation =>
-                    string.Equals(
-                        ProvisioningStackLockKey.Format(operation.StackKind, operation.StackName),
-                        lockKey,
-                        StringComparison.Ordinal)
-                    && ProvisioningOperationStateMachine.HoldsStackLock(operation.State));
+            if (request.Command == ProvisioningCommand.Cancel)
+                return Task.FromResult(EnqueueCancel(request, requestHash, stackName, lockKey, now));
 
-            // Cancel never takes the stack lock and never conflicts with an
-            // in-flight run: it signals that run, or no-ops when idle.
-            var lockConflict = lockHeld && request.Command != ProvisioningCommand.Cancel;
+            var lockHeld = LockHeld(lockKey);
+            var lockConflict = lockHeld;
             var state = lockConflict
                 ? ProvisioningOperationState.LockConflict
                 : ProvisioningOperationState.Queued;
@@ -113,11 +114,27 @@ public sealed class InMemoryProvisioningStore :
         lock (_gate)
         {
             return Task.FromResult(_operations.Values.FirstOrDefault(operation =>
-                string.Equals(
-                    ProvisioningStackLockKey.Format(operation.StackKind, operation.StackName),
-                    lockKey,
-                    StringComparison.Ordinal)
+                SameLock(operation, lockKey)
                 && operation.State is ProvisioningOperationState.Running or ProvisioningOperationState.Cancelling));
+        }
+    }
+
+    public Task<ProvisioningOperation?> FindQueuedAsync(
+        ProvisioningStackKind kind,
+        string stackName,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var lockKey = ProvisioningStackLockKey.Format(kind, ProvisioningStackName.Canonicalize(stackName));
+        lock (_gate)
+        {
+            return Task.FromResult(_operations.Values
+                .Where(operation =>
+                    SameLock(operation, lockKey)
+                    && operation.State == ProvisioningOperationState.Queued
+                    && operation.Command != ProvisioningCommand.Cancel)
+                .OrderBy(operation => operation.AcceptedAt)
+                .FirstOrDefault());
         }
     }
 
@@ -165,9 +182,19 @@ public sealed class InMemoryProvisioningStore :
                 operation,
                 ProvisioningOperationState.Running,
                 now);
-            _operations[operationId] = running;
             if (operation.Command != ProvisioningCommand.Cancel)
-                _locks[lockKey] = operationId;
+            {
+                var held = new LockRecord(operationId, _replica.Id, _replica.ExpiresAt(now), 1);
+                _locks[lockKey] = held;
+                running = running with
+                {
+                    LeaseOwner = held.Owner,
+                    LeaseExpiresAt = held.LeaseExpiresAt,
+                    FencingToken = held.FencingToken
+                };
+            }
+
+            _operations[operationId] = running;
             return Task.FromResult<ProvisioningOperation?>(running);
         }
     }
@@ -177,7 +204,8 @@ public sealed class InMemoryProvisioningStore :
         ProvisioningOperationState state,
         DateTimeOffset now,
         string? failureCode,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool stateLockMayBeHeld = false)
     {
         cancellationToken.ThrowIfCancellationRequested();
         lock (_gate)
@@ -185,12 +213,16 @@ public sealed class InMemoryProvisioningStore :
             if (!_operations.TryGetValue(operationId, out var operation))
                 return Task.FromResult<ProvisioningOperation?>(null);
 
-            var completed = ProvisioningOperationStateMachine.Transition(operation, state, now, failureCode);
+            var completed = ProvisioningOperationStateMachine.Transition(operation, state, now, failureCode) with
+            {
+                StateLockMayBeHeld = stateLockMayBeHeld
+            };
             _operations[operationId] = completed;
             var lockKey = ProvisioningStackLockKey.Format(operation.StackKind, operation.StackName);
             if (ProvisioningOperationStateMachine.IsTerminal(completed.State)
+                && !stateLockMayBeHeld
                 && _locks.TryGetValue(lockKey, out var holder)
-                && holder == operationId)
+                && holder.OperationId == operationId)
             {
                 _locks.Remove(lockKey);
             }
@@ -237,7 +269,7 @@ public sealed class InMemoryProvisioningStore :
         {
             if (_locks.ContainsKey(lockKey))
                 return Task.FromResult(false);
-            _locks[lockKey] = operationId;
+            _locks[lockKey] = new LockRecord(operationId, _replica.Id, _replica.ExpiresAt(now), 1);
             return Task.FromResult(true);
         }
     }
@@ -252,7 +284,7 @@ public sealed class InMemoryProvisioningStore :
         var lockKey = ProvisioningStackLockKey.Format(kind, stackName);
         lock (_gate)
         {
-            if (_locks.TryGetValue(lockKey, out var holder) && holder == operationId)
+            if (_locks.TryGetValue(lockKey, out var holder) && holder.OperationId == operationId)
                 _locks.Remove(lockKey);
         }
 
@@ -267,42 +299,220 @@ public sealed class InMemoryProvisioningStore :
         cancellationToken.ThrowIfCancellationRequested();
         var lockKey = ProvisioningStackLockKey.Format(kind, stackName);
         lock (_gate)
-            return Task.FromResult(_locks.TryGetValue(lockKey, out var holder) ? holder : (Guid?)null);
+            return Task.FromResult(_locks.TryGetValue(lockKey, out var holder) ? holder.OperationId : (Guid?)null);
     }
 
-    public async Task<IReadOnlyList<ProvisioningOperation>> FailInterruptedAsync(
+    public Task<bool> RenewLeaseAsync(Guid operationId, DateTimeOffset now, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            if (!_operations.TryGetValue(operationId, out var operation))
+                return Task.FromResult(false);
+            var lockKey = ProvisioningStackLockKey.Format(operation.StackKind, operation.StackName);
+            if (!_locks.TryGetValue(lockKey, out var held)
+                || held.OperationId != operationId
+                || !string.Equals(held.Owner, _replica.Id, StringComparison.Ordinal)
+                || held.FencingToken != operation.FencingToken)
+            {
+                return Task.FromResult(false);
+            }
+
+            held.LeaseExpiresAt = _replica.ExpiresAt(now);
+            _operations[operationId] = operation with { LeaseExpiresAt = held.LeaseExpiresAt };
+            return Task.FromResult(true);
+        }
+    }
+
+    public Task RequestCancelAsync(Guid operationId, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            if (_operations.TryGetValue(operationId, out var operation)
+                && !ProvisioningOperationStateMachine.IsTerminal(operation.State))
+            {
+                _operations[operationId] = operation with { CancelRequested = true };
+            }
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public Task<bool> IsCancelRequestedAsync(Guid operationId, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            return Task.FromResult(
+                _operations.TryGetValue(operationId, out var operation) && operation.CancelRequested);
+        }
+    }
+
+    public Task<IReadOnlyList<ProvisioningOperation>> ListStateLockPendingAsync(
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            IReadOnlyList<ProvisioningOperation> pending = _operations.Values
+                .Where(operation => operation.StateLockMayBeHeld)
+                .ToArray();
+            return Task.FromResult(pending);
+        }
+    }
+
+    public Task MarkStateLockClearedAsync(Guid operationId, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            if (!_operations.TryGetValue(operationId, out var operation))
+                return Task.CompletedTask;
+
+            _operations[operationId] = operation with { StateLockMayBeHeld = false };
+            var lockKey = ProvisioningStackLockKey.Format(operation.StackKind, operation.StackName);
+            if (_locks.TryGetValue(lockKey, out var holder) && holder.OperationId == operationId)
+                _locks.Remove(lockKey);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public Task<IReadOnlyList<ProvisioningOperation>> FailInterruptedAsync(
         DateTimeOffset now,
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        Guid[] interrupted;
         lock (_gate)
         {
-            interrupted = _operations.Values
-                .Where(operation => ProvisioningOperationStateMachine.HoldsStackLock(operation.State))
-                .Select(operation => operation.Id)
+            var expired = _locks
+                .Where(pair => pair.Value.LeaseExpiresAt <= now)
+                .Select(pair => pair.Value.OperationId)
                 .ToArray();
-        }
+            var failed = new List<ProvisioningOperation>();
+            foreach (var id in expired)
+            {
+                if (!_operations.TryGetValue(id, out var operation)
+                    || !ProvisioningOperationStateMachine.HoldsStackLock(operation.State))
+                {
+                    continue;
+                }
 
-        var failed = new List<ProvisioningOperation>();
-        foreach (var id in interrupted)
-        {
-            var completed = await CompleteAsync(
-                id,
-                ProvisioningOperationState.Failed,
-                now,
-                ProvisioningFailureCodes.Interrupted,
-                CancellationToken.None).ConfigureAwait(false);
-            if (completed is not null)
+                var lockKey = ProvisioningStackLockKey.Format(operation.StackKind, operation.StackName);
+                if (!_locks.TryGetValue(lockKey, out var held)
+                    || held.OperationId != id
+                    || held.LeaseExpiresAt > now)
+                {
+                    continue;
+                }
+
+                held.Owner = _replica.Id;
+                held.FencingToken++;
+                held.LeaseExpiresAt = _replica.ExpiresAt(now);
+                var completed = ProvisioningOperationStateMachine.Transition(
+                    operation,
+                    ProvisioningOperationState.Failed,
+                    now,
+                    ProvisioningFailureCodes.Interrupted) with
+                {
+                    StateLockMayBeHeld = true,
+                    LeaseOwner = held.Owner,
+                    LeaseExpiresAt = held.LeaseExpiresAt,
+                    FencingToken = held.FencingToken
+                };
+                _operations[id] = completed;
                 failed.Add(completed);
-        }
+            }
 
-        return failed;
+            return Task.FromResult<IReadOnlyList<ProvisioningOperation>>(failed);
+        }
     }
 
     public static string HashRequest(ProvisioningRequest request) =>
         ProvisioningRequestHash.Compute(request);
 
+    private ProvisioningEnqueueResult EnqueueCancel(
+        ProvisioningRequest request,
+        string requestHash,
+        string stackName,
+        string lockKey,
+        DateTimeOffset now)
+    {
+        var running = _operations.Values.FirstOrDefault(operation =>
+            SameLock(operation, lockKey)
+            && operation.State is ProvisioningOperationState.Running or ProvisioningOperationState.Cancelling);
+        var queued = _operations.Values
+            .Where(operation =>
+                SameLock(operation, lockKey)
+                && operation.State == ProvisioningOperationState.Queued
+                && operation.Command != ProvisioningCommand.Cancel)
+            .OrderBy(operation => operation.AcceptedAt)
+            .FirstOrDefault();
+
+        string? code;
+        if (running is not null)
+        {
+            _operations[running.Id] = running with { CancelRequested = true };
+            code = ProvisioningFailureCodes.Cancelled;
+        }
+        else if (queued is not null)
+        {
+            _operations[queued.Id] = ProvisioningOperationStateMachine.Transition(
+                queued,
+                ProvisioningOperationState.Cancelled,
+                now,
+                ProvisioningFailureCodes.Cancelled);
+            code = ProvisioningFailureCodes.Cancelled;
+        }
+        else
+        {
+            code = ProvisioningFailureCodes.NothingToCancel;
+        }
+
+        var operation = new ProvisioningOperation(
+            Guid.NewGuid(),
+            ProvisioningCommand.Cancel,
+            ProvisioningOperationState.Succeeded,
+            request.Target.ProviderId,
+            request.Target.StackKind,
+            stackName,
+            request.IdempotencyKey,
+            requestHash,
+            now,
+            completedAt: now,
+            failureCode: code);
+        _operations[operation.Id] = operation;
+        _requests[operation.Id] = request;
+        _idempotency[request.IdempotencyKey] = operation.Id;
+        return new ProvisioningEnqueueResult(
+            operation.Id,
+            operation.State,
+            Replayed: false,
+            LockConflict: false,
+            operation.FailureCode);
+    }
+
+    private bool LockHeld(string lockKey) =>
+        _locks.ContainsKey(lockKey)
+        || _operations.Values.Any(operation =>
+            SameLock(operation, lockKey)
+            && ProvisioningOperationStateMachine.HoldsStackLock(operation.State));
+
+    private static bool SameLock(ProvisioningOperation operation, string lockKey) =>
+        string.Equals(
+            ProvisioningStackLockKey.Format(operation.StackKind, operation.StackName),
+            lockKey,
+            StringComparison.Ordinal);
+
     private static string StackName(ProvisioningRequest request) =>
         ProvisioningStackName.Canonicalize(request.Target.StackName);
+
+    private sealed class LockRecord(Guid operationId, string owner, DateTimeOffset leaseExpiresAt, long fencingToken)
+    {
+        public Guid OperationId { get; } = operationId;
+        public string Owner { get; set; } = owner;
+        public DateTimeOffset LeaseExpiresAt { get; set; } = leaseExpiresAt;
+        public long FencingToken { get; set; } = fencingToken;
+    }
 }

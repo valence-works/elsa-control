@@ -24,7 +24,8 @@ public interface IProvisioningOperationStore
         ProvisioningOperationState state,
         DateTimeOffset now,
         string? failureCode,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        bool stateLockMayBeHeld = false);
 
     Task<ProvisioningRequest?> GetRequestAsync(Guid operationId, CancellationToken cancellationToken = default);
 
@@ -33,6 +34,27 @@ public interface IProvisioningOperationStore
         string stackName,
         CancellationToken cancellationToken = default);
 
+    Task<ProvisioningOperation?> FindQueuedAsync(
+        ProvisioningStackKind kind,
+        string stackName,
+        CancellationToken cancellationToken = default);
+
+    Task<bool> RenewLeaseAsync(Guid operationId, DateTimeOffset now, CancellationToken cancellationToken = default);
+
+    Task RequestCancelAsync(Guid operationId, CancellationToken cancellationToken = default);
+
+    Task<bool> IsCancelRequestedAsync(Guid operationId, CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<ProvisioningOperation>> ListStateLockPendingAsync(
+        CancellationToken cancellationToken = default);
+
+    Task MarkStateLockClearedAsync(Guid operationId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Reclaims operations whose lock lease has expired. Live replicas are left
+    /// alone. Returned rows keep the module lock until the Pulumi state lock
+    /// is cleared.
+    /// </summary>
     Task<IReadOnlyList<ProvisioningOperation>> FailInterruptedAsync(
         DateTimeOffset now,
         CancellationToken cancellationToken = default);

@@ -6,6 +6,10 @@ namespace ElsaControl.Provisioning.Providers.Azure;
 /// </summary>
 public interface IProvisioningSecretResolver
 {
+    bool IsReady { get; }
+
+    Task EnsureReadyAsync(CancellationToken cancellationToken = default);
+
     Task<IReadOnlyDictionary<string, string>> ResolveSecretConfigAsync(
         IReadOnlyDictionary<string, string> stackConfig,
         CancellationToken cancellationToken = default);
@@ -13,6 +17,14 @@ public interface IProvisioningSecretResolver
 
 public sealed class EmptyProvisioningSecretResolver : IProvisioningSecretResolver
 {
+    public bool IsReady => true;
+
+    public Task EnsureReadyAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.CompletedTask;
+    }
+
     public Task<IReadOnlyDictionary<string, string>> ResolveSecretConfigAsync(
         IReadOnlyDictionary<string, string> stackConfig,
         CancellationToken cancellationToken = default)
@@ -21,5 +33,29 @@ public sealed class EmptyProvisioningSecretResolver : IProvisioningSecretResolve
         ArgumentNullException.ThrowIfNull(stackConfig);
         return Task.FromResult<IReadOnlyDictionary<string, string>>(
             new Dictionary<string, string>(StringComparer.Ordinal));
+    }
+}
+
+public sealed class StaticProvisioningSecretResolver(IReadOnlyDictionary<string, string> values)
+    : IProvisioningSecretResolver
+{
+    private readonly IReadOnlyDictionary<string, string> _values =
+        new Dictionary<string, string>(values ?? throw new ArgumentNullException(nameof(values)), StringComparer.Ordinal);
+
+    public bool IsReady => true;
+
+    public Task EnsureReadyAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.CompletedTask;
+    }
+
+    public Task<IReadOnlyDictionary<string, string>> ResolveSecretConfigAsync(
+        IReadOnlyDictionary<string, string> stackConfig,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ArgumentNullException.ThrowIfNull(stackConfig);
+        return Task.FromResult(_values);
     }
 }

@@ -3,7 +3,6 @@ using ElsaControl.Provisioning.Abstractions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Pulumi.Automation;
-using Pulumi.Automation.Commands.Exceptions;
 
 namespace ElsaControl.Provisioning.Providers.Azure;
 
@@ -129,7 +128,7 @@ public sealed class LocalPulumiAutomationClient(ILogger<LocalPulumiAutomationCli
                 DateTimeOffset.UtcNow);
             return new ProviderRunResult(true, [nothing], failureCode: ProvisioningFailureCodes.NothingToCancel);
         }
-        catch (Exception exception) when (IsLockConflict(exception))
+        catch (Exception exception) when (PulumiLockConflict.Matches(exception))
         {
             _logger.LogError(
                 "Provisioning stack lock conflict. OperationId={OperationId} ExceptionType={ExceptionType}",
@@ -157,27 +156,6 @@ public sealed class LocalPulumiAutomationClient(ILogger<LocalPulumiAutomationCli
                 DateTimeOffset.UtcNow);
             return ProviderRunResult.Fail([failed], ProvisioningFailureCodes.ProviderFailed);
         }
-    }
-
-    private static bool IsLockConflict(Exception exception)
-    {
-        for (var current = exception; current is not null; current = current.InnerException)
-        {
-            if (current is ConcurrentUpdateException)
-                return true;
-            var name = current.GetType().Name;
-            if (name.Contains("ConcurrentUpdate", StringComparison.OrdinalIgnoreCase))
-                return true;
-            var message = current.Message;
-            if (message.Contains("currently locked", StringComparison.OrdinalIgnoreCase)
-                || message.Contains("lock conflict", StringComparison.OrdinalIgnoreCase)
-                || message.Contains("[409]", StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     private static bool IsNothingToCancel(Exception exception, ProvisioningCommand command)

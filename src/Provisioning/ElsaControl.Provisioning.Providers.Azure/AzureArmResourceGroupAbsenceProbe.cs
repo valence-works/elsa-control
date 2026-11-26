@@ -59,14 +59,15 @@ public sealed class AzureArmResourceGroupAbsenceProbe : IResourceGroupAbsencePro
 
     public async Task<ResourceGroupPresence> ObserveAsync(
         string resourceGroupName,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? subscriptionId = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         ArgumentException.ThrowIfNullOrWhiteSpace(resourceGroupName);
         if (!IsResourceGroupName(resourceGroupName))
             throw new ArgumentException("Resource group name is invalid.", nameof(resourceGroupName));
 
-        var subscription = _subscription();
+        var subscription = string.IsNullOrWhiteSpace(subscriptionId) ? _subscription() : subscriptionId;
         if (string.IsNullOrWhiteSpace(subscription) || !Guid.TryParse(subscription, out _))
             return ResourceGroupPresence.Unknown;
 

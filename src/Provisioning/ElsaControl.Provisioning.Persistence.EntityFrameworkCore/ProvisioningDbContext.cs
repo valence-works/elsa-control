@@ -33,9 +33,11 @@ public sealed class ProvisioningDbContext(DbContextOptions<ProvisioningDbContext
             builder.Property(x => x.RequestHash).HasMaxLength(128).IsRequired();
             builder.Property(x => x.FailureCode).HasMaxLength(128);
             builder.Property(x => x.RequestJson).IsRequired();
+            builder.Property(x => x.LeaseOwner).HasMaxLength(64);
             builder.HasIndex(x => x.IdempotencyKey).IsUnique();
             builder.HasIndex(x => new { x.State, x.AcceptedAt });
             builder.HasIndex(x => new { x.LockKey, x.State });
+            builder.HasIndex(x => x.StateLockMayBeHeld);
         });
 
         modelBuilder.Entity<ProvisioningEventEntity>(builder =>
@@ -54,6 +56,8 @@ public sealed class ProvisioningDbContext(DbContextOptions<ProvisioningDbContext
             builder.ToTable("Locks");
             builder.HasKey(x => x.LockKey);
             builder.Property(x => x.LockKey).HasMaxLength(192);
+            builder.Property(x => x.Owner).HasMaxLength(64).IsRequired();
+            builder.HasIndex(x => x.LeaseExpiresAt);
         });
     }
 }

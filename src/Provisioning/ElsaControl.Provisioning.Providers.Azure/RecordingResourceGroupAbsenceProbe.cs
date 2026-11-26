@@ -9,13 +9,17 @@ public sealed class RecordingResourceGroupAbsenceProbe : IResourceGroupAbsencePr
 
     public string? LastName { get; private set; }
 
+    public string? LastSubscription { get; private set; }
+
     public Task<ResourceGroupPresence> ObserveAsync(
         string resourceGroupName,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? subscriptionId = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         ArgumentException.ThrowIfNullOrWhiteSpace(resourceGroupName);
         LastName = resourceGroupName;
+        LastSubscription = subscriptionId;
         return Task.FromResult(Result);
     }
 }

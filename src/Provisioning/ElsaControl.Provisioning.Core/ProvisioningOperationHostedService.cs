@@ -35,6 +35,7 @@ public sealed class ProvisioningOperationHostedService(
             try
             {
                 await worker.ProcessOnceAsync(batchSize, stoppingToken).ConfigureAwait(false);
+                await worker.ReconcileInterruptedAsync(stoppingToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {

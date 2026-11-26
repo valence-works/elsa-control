@@ -33,10 +33,12 @@ public static class ProvisioningServiceCollectionExtensions
                 options.AllowFileBackend = true;
         });
         services.AddSingleton<ProvisioningRunRegistry>();
+        services.AddSingleton<ProvisioningReplicaIdentity>();
 
         var configured = configuration.GetSection(ProvisioningOptions.ConfigurationSection).Get<ProvisioningOptions>()
                          ?? new ProvisioningOptions();
-        services.AddSingleton<InMemoryProvisioningStore>();
+        services.AddSingleton<InMemoryProvisioningStore>(provider =>
+            new InMemoryProvisioningStore(provider.GetRequiredService<ProvisioningReplicaIdentity>()));
         services.AddSingleton<IProvisioningOperationStore>(provider =>
             provider.GetRequiredService<InMemoryProvisioningStore>());
         services.AddSingleton<IProvisioningEventStore>(provider =>

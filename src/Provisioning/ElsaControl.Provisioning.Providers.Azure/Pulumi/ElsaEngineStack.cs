@@ -222,10 +222,18 @@ public sealed class ElsaEngineStack : Stack
             EndIpAddress = "0.0.0.0"
         });
 
-        var runtimeUser = EngineSqlContainedUser.Ensure(
-            server.FullyQualifiedDomainName,
-            identity.ClientId,
-            identity.Name);
+        var runtimeUser = new EngineSqlContainedUser(
+            "engine-sql-user",
+            new EngineSqlContainedUserArgs
+            {
+                FullyQualifiedDomainName = server.FullyQualifiedDomainName,
+                ClientId = identity.ClientId,
+                DisplayName = identity.Name
+            },
+            new ComponentResourceOptions
+            {
+                DependsOn = { database, server }
+            });
 
         var cpu = values.GetValueOrDefault("cpu") ?? "0.5";
         var memory = values.GetValueOrDefault("memory") ?? "1Gi";
@@ -318,7 +326,7 @@ public sealed class ElsaEngineStack : Stack
                             Cpu = double.Parse(cpu, System.Globalization.CultureInfo.InvariantCulture),
                             Memory = memory
                         },
-                        Env = EnvironmentVariables(values, sqlRef, signingRef, adminRef, handoffCallback, runtimeUser),
+                        Env = EnvironmentVariables(values, sqlRef, signingRef, adminRef, handoffCallback, runtimeUser.DisplayName),
                         Probes =
                         {
                             StartupProbe(),
@@ -338,7 +346,8 @@ public sealed class ElsaEngineStack : Stack
                 sqlSecret,
                 signingSecret,
                 adminSecret,
-                acrPull
+                acrPull,
+                runtimeUser
             }
         });
         _ = app;

@@ -48,6 +48,9 @@ public sealed class ElsaEngineStackTests
         Assert.Contains(resources, resource => resource is ContainerApp);
         Assert.Contains(resources, resource => resource is RoleAssignment);
         Assert.Equal(3, resources.OfType<Secret>().Count());
+        Assert.Contains(
+            resources,
+            resource => resource.GetResourceType() == EngineSqlContainedUser.ResourceTypeName);
         var stackReference = resources.OfType<StackReference>().Single();
         Assert.Equal("organization/elsa-platform/staging", stackReference.GetResourceName());
     }
@@ -96,6 +99,126 @@ public sealed class ElsaEngineStackTests
         Assert.True(appIndex > secretIndex);
         Assert.Contains(resources, resource => resource is Secret);
         Assert.Contains(resources, resource => resource is ContainerApp);
+    }
+
+    [Fact]
+    public async Task Engine_database_is_pinned_to_standard_s0()
+    {
+        var recorded = new List<string>();
+        var mocks = new RecordingMocks(recorded);
+        using var config = PulumiTestConfig.Set(PulumiProjectNames.Engine, EngineTestConfig.Values());
+        await PulumiDeployment.TestAsync<ElsaEngineStack>(
+            mocks,
+            new TestOptions
+            {
+                IsPreview = false,
+                ProjectName = PulumiProjectNames.Engine,
+                StackName = "engine-" + EngineTestConfig.InstanceId.ToString("N")
+            });
+        var database = mocks.Args.Single(args =>
+            (args.Type ?? "").Contains("sql", StringComparison.OrdinalIgnoreCase)
+            && (args.Type ?? "").Contains("Database", StringComparison.Ordinal));
+        Assert.Equal("S0", SkuName(database.Inputs["sku"]));
+    }
+
+    [Fact]
+    public async Task Contained_user_grant_is_skipped_during_preview()
+    {
+        var granted = new List<string>();
+        EngineSqlContainedUser.GrantOverride = (_, _, name) => granted.Add(name);
+        try
+        {
+            using var config = PulumiTestConfig.Set(PulumiProjectNames.Engine, EngineTestConfig.Values());
+            var resources = await PulumiDeployment.TestAsync<ElsaEngineStack>(
+                new PlatformStackReferenceMocks(),
+                new TestOptions
+                {
+                    IsPreview = true,
+                    ProjectName = PulumiProjectNames.Engine,
+                    StackName = "engine-" + EngineTestConfig.InstanceId.ToString("N")
+                });
+            Assert.Empty(granted);
+            Assert.Contains(
+                resources,
+                resource => resource.GetResourceType() == EngineSqlContainedUser.ResourceTypeName);
+        }
+        finally
+        {
+            EngineSqlContainedUser.GrantOverride = null;
+        }
+    }
+
+    [Fact]
+    public async Task Contained_user_grant_runs_after_the_database_on_apply()
+    {
+        var granted = new List<string>();
+        var recorded = new List<string>();
+        var mocks = new RecordingMocks(recorded);
+        EngineSqlContainedUser.GrantOverride = (_, _, name) => granted.Add(name);
+        try
+        {
+            using var config = PulumiTestConfig.Set(PulumiProjectNames.Engine, EngineTestConfig.Values());
+            var resources = await PulumiDeployment.TestAsync<ElsaEngineStack>(
+                mocks,
+                new TestOptions
+                {
+                    IsPreview = false,
+                    ProjectName = PulumiProjectNames.Engine,
+                    StackName = "engine-" + EngineTestConfig.InstanceId.ToString("N")
+                });
+            Assert.NotEmpty(granted);
+            var databaseIndex = recorded.FindIndex(type =>
+                type.Contains("sql", StringComparison.OrdinalIgnoreCase)
+                && type.Contains("Database", StringComparison.Ordinal));
+            var userIndex = recorded.FindIndex(type =>
+                type.Contains("ContainedUser", StringComparison.Ordinal));
+            Assert.True(databaseIndex >= 0);
+            Assert.True(userIndex > databaseIndex);
+            Assert.Contains(
+                resources,
+                resource => resource.GetResourceType() == EngineSqlContainedUser.ResourceTypeName);
+        }
+        finally
+        {
+            EngineSqlContainedUser.GrantOverride = null;
+        }
+    }
+
+    [Fact]
+    public async Task Contained_user_grant_is_idempotent()
+    {
+        var calls = 0;
+        EngineSqlContainedUser.GrantOverride = (_, _, _) => calls++;
+        try
+        {
+            EngineSqlContainedUser.Grant(
+                "sql.database.windows.net",
+                "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                "engine-runtime");
+            EngineSqlContainedUser.Grant(
+                "sql.database.windows.net",
+                "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                "engine-runtime");
+            Assert.Equal(2, calls);
+        }
+        finally
+        {
+            EngineSqlContainedUser.GrantOverride = null;
+        }
+    }
+
+    private static string? SkuName(object? sku)
+    {
+        if (sku is System.Collections.IDictionary map)
+        {
+            foreach (var key in new[] { "name", "Name" })
+            {
+                if (map.Contains(key) && map[key] is not null)
+                    return map[key]!.ToString();
+            }
+        }
+
+        return sku?.ToString();
     }
 
     private static async Task<System.Collections.Immutable.ImmutableArray<Pulumi.Resource>> Run(string engineName)

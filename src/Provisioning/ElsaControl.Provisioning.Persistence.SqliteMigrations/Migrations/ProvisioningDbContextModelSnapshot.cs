@@ -57,10 +57,23 @@ namespace ElsaControl.Provisioning.Persistence.SqliteMigrations.Migrations
                         .HasMaxLength(192)
                         .HasColumnType("TEXT");
 
+                    b.Property<long>("FencingToken")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTimeOffset>("LeaseExpiresAt")
+                        .HasColumnType("TEXT");
+
                     b.Property<Guid>("OperationId")
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("Owner")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
                     b.HasKey("LockKey");
+
+                    b.HasIndex("LeaseExpiresAt");
 
                     b.ToTable("Locks", (string)null);
                 });
@@ -74,6 +87,9 @@ namespace ElsaControl.Provisioning.Persistence.SqliteMigrations.Migrations
                     b.Property<DateTimeOffset>("AcceptedAt")
                         .HasColumnType("TEXT");
 
+                    b.Property<bool>("CancelRequested")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("Command")
                         .IsRequired()
                         .HasMaxLength(32)
@@ -86,9 +102,19 @@ namespace ElsaControl.Provisioning.Persistence.SqliteMigrations.Migrations
                         .HasMaxLength(128)
                         .HasColumnType("TEXT");
 
+                    b.Property<long>("FencingToken")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("IdempotencyKey")
                         .IsRequired()
                         .HasMaxLength(256)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTimeOffset?>("LeaseExpiresAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("LeaseOwner")
+                        .HasMaxLength(64)
                         .HasColumnType("TEXT");
 
                     b.Property<string>("LockKey")
@@ -128,10 +154,15 @@ namespace ElsaControl.Provisioning.Persistence.SqliteMigrations.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("TEXT");
 
+                    b.Property<bool>("StateLockMayBeHeld")
+                        .HasColumnType("INTEGER");
+
                     b.HasKey("Id");
 
                     b.HasIndex("IdempotencyKey")
                         .IsUnique();
+
+                    b.HasIndex("StateLockMayBeHeld");
 
                     b.HasIndex("LockKey", "State");
 

@@ -65,10 +65,23 @@ namespace ElsaControl.Provisioning.Persistence.SqlServerMigrations.Migrations
                         .HasMaxLength(192)
                         .HasColumnType("nvarchar(192)");
 
+                    b.Property<long>("FencingToken")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTimeOffset>("LeaseExpiresAt")
+                        .HasColumnType("datetimeoffset");
+
                     b.Property<Guid>("OperationId")
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<string>("Owner")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
                     b.HasKey("LockKey");
+
+                    b.HasIndex("LeaseExpiresAt");
 
                     b.ToTable("Locks", "provisioning");
                 });
@@ -82,6 +95,9 @@ namespace ElsaControl.Provisioning.Persistence.SqlServerMigrations.Migrations
                     b.Property<DateTimeOffset>("AcceptedAt")
                         .HasColumnType("datetimeoffset");
 
+                    b.Property<bool>("CancelRequested")
+                        .HasColumnType("bit");
+
                     b.Property<string>("Command")
                         .IsRequired()
                         .HasMaxLength(32)
@@ -94,10 +110,20 @@ namespace ElsaControl.Provisioning.Persistence.SqlServerMigrations.Migrations
                         .HasMaxLength(128)
                         .HasColumnType("nvarchar(128)");
 
+                    b.Property<long>("FencingToken")
+                        .HasColumnType("bigint");
+
                     b.Property<string>("IdempotencyKey")
                         .IsRequired()
                         .HasMaxLength(256)
                         .HasColumnType("nvarchar(256)");
+
+                    b.Property<DateTimeOffset?>("LeaseExpiresAt")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<string>("LeaseOwner")
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
 
                     b.Property<string>("LockKey")
                         .IsRequired()
@@ -136,10 +162,15 @@ namespace ElsaControl.Provisioning.Persistence.SqlServerMigrations.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("nvarchar(32)");
 
+                    b.Property<bool>("StateLockMayBeHeld")
+                        .HasColumnType("bit");
+
                     b.HasKey("Id");
 
                     b.HasIndex("IdempotencyKey")
                         .IsUnique();
+
+                    b.HasIndex("StateLockMayBeHeld");
 
                     b.HasIndex("LockKey", "State");
 

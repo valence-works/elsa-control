@@ -8,7 +8,8 @@ public interface IResourceGroupAbsenceProbe
 {
     Task<ResourceGroupPresence> ObserveAsync(
         string resourceGroupName,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        string? subscriptionId = null);
 }
 
 public enum ResourceGroupPresence

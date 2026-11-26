@@ -54,6 +54,7 @@ public sealed class AzurePulumiAutomationRunner
             environment[pair.Key] = pair.Value;
         foreach (var pair in credentialEnvironment)
             environment[pair.Key] = pair.Value;
+        environment["PULUMI_DISABLE_AUTOMATIC_PLUGIN_ACQUISITION"] = "true";
 
         var config = new Dictionary<string, string>(stackConfig, StringComparer.Ordinal);
         if (target.StackKind == ProvisioningStackKind.Engine

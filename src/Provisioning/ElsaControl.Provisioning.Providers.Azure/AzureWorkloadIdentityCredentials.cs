@@ -23,6 +23,15 @@ public sealed class AzureWorkloadIdentityCredentials : ICredentialResolver
         {
             ["AZURE_CLIENT_ID"] = reference.Locator ?? string.Empty
         };
+        CopyEnvironment(environment, "ARM_SUBSCRIPTION_ID");
+        CopyEnvironment(environment, "AZURE_SUBSCRIPTION_ID");
         return Task.FromResult<IReadOnlyDictionary<string, string>>(environment);
+    }
+
+    private static void CopyEnvironment(IDictionary<string, string> environment, string name)
+    {
+        var value = Environment.GetEnvironmentVariable(name);
+        if (!string.IsNullOrWhiteSpace(value))
+            environment[name] = value;
     }
 }

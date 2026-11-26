@@ -7,7 +7,8 @@ namespace ElsaControl.Provisioning.Core;
 
 /// <summary>
 /// Drains the module's own queue. Provider work happens here, never on the
-/// API request thread.
+/// API request thread. Cancel and host stop run a graceful provider cancel
+/// and leave a flag when the Pulumi state lock may still be held.
 /// </summary>
 public sealed class ProvisioningOperationWorker(
     IProvisioningOperationStore operations,
@@ -15,11 +16,15 @@ public sealed class ProvisioningOperationWorker(
     IInfrastructureProvider provider,
     ProvisioningRunRegistry? runs = null,
     TimeProvider? timeProvider = null,
-    ILogger<ProvisioningOperationWorker>? logger = null)
+    ILogger<ProvisioningOperationWorker>? logger = null,
+    TimeSpan? heartbeat = null)
 {
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
     private readonly ProvisioningRunRegistry _runs = runs ?? new ProvisioningRunRegistry();
     private readonly ILogger<ProvisioningOperationWorker> _logger = logger ?? NullLogger<ProvisioningOperationWorker>.Instance;
+    private readonly TimeSpan _heartbeat = heartbeat is { } value && value > TimeSpan.Zero
+        ? value
+        : TimeSpan.FromMilliseconds(250);
 
     public async Task<int> ProcessOnceAsync(int batchSize = 10, CancellationToken cancellationToken = default)
     {
@@ -72,23 +77,28 @@ public sealed class ProvisioningOperationWorker(
                 continue;
             }
 
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            using var registration = claimed.Command == ProvisioningCommand.Cancel
+                ? null
+                : _runs.Register(claimed, linked);
+
             try
             {
-                using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                using var registration = claimed.Command == ProvisioningCommand.Cancel
-                    ? null
-                    : _runs.Register(claimed, linked);
-
-                var result = await RunProviderAsync(claimed, request, linked.Token).ConfigureAwait(false);
+                var result = await RunWithHeartbeatAsync(claimed, request, linked, cancellationToken)
+                    .ConfigureAwait(false);
                 await events.AppendAsync(result.Events, cancellationToken).ConfigureAwait(false);
                 var terminal = TerminalState(claimed, result, linked, cancellationToken);
+                var holdLock = terminal != ProvisioningOperationState.Succeeded;
+                if (holdLock)
+                    await TryCancelProviderAsync(claimed, request).ConfigureAwait(false);
 
                 var completed = await operations.CompleteAsync(
                     claimed.Id,
                     terminal,
                     _timeProvider.GetUtcNow(),
                     result.FailureCode,
-                    cancellationToken).ConfigureAwait(false);
+                    cancellationToken,
+                    stateLockMayBeHeld: holdLock).ConfigureAwait(false);
                 if (completed is not null)
                 {
                     await events.AppendAsync(
@@ -117,13 +127,24 @@ public sealed class ProvisioningOperationWorker(
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                await FailAsync(claimed, ProvisioningFailureCodes.Interrupted, CancellationToken.None)
-                    .ConfigureAwait(false);
+                await TryCancelProviderAsync(claimed, request).ConfigureAwait(false);
+                await CompleteTerminalAsync(
+                    claimed,
+                    ProvisioningOperationState.Cancelled,
+                    ProvisioningFailureCodes.Interrupted,
+                    stateLockMayBeHeld: true,
+                    CancellationToken.None).ConfigureAwait(false);
                 throw;
             }
             catch (OperationCanceledException)
             {
-                await CompleteCancelledAsync(claimed, cancellationToken).ConfigureAwait(false);
+                await TryCancelProviderAsync(claimed, request).ConfigureAwait(false);
+                await CompleteTerminalAsync(
+                    claimed,
+                    ProvisioningOperationState.Cancelled,
+                    ProvisioningFailureCodes.Cancelled,
+                    stateLockMayBeHeld: true,
+                    cancellationToken).ConfigureAwait(false);
             }
             catch (Exception exception)
             {
@@ -131,7 +152,9 @@ public sealed class ProvisioningOperationWorker(
                     "Provisioning provider failed. OperationId={OperationId} ExceptionType={ExceptionType}",
                     claimed.Id,
                     exception.GetType().FullName);
-                await FailAsync(claimed, ProvisioningFailureCodes.ProviderFailed, cancellationToken).ConfigureAwait(false);
+                await TryCancelProviderAsync(claimed, request).ConfigureAwait(false);
+                await FailAsync(claimed, ProvisioningFailureCodes.ProviderFailed, cancellationToken)
+                    .ConfigureAwait(false);
             }
         }
 
@@ -141,42 +164,66 @@ public sealed class ProvisioningOperationWorker(
     public async Task ReconcileInterruptedAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var interrupted = await operations
+        var expired = await operations
             .FailInterruptedAsync(_timeProvider.GetUtcNow(), CancellationToken.None)
             .ConfigureAwait(false);
-        foreach (var operation in interrupted)
+        var pending = await operations.ListStateLockPendingAsync(CancellationToken.None).ConfigureAwait(false);
+        var seen = new HashSet<Guid>();
+        foreach (var operation in expired.Concat(pending))
         {
+            if (!seen.Add(operation.Id))
+                continue;
+
             var request = await operations.GetRequestAsync(operation.Id, CancellationToken.None)
                 .ConfigureAwait(false);
             if (request is not null)
-            {
-                try
-                {
-                    await provider.CancelAsync(operation, request, CancellationToken.None)
-                        .ConfigureAwait(false);
-                }
-                catch (Exception exception)
-                {
-                    _logger.LogError(
-                        "Provisioning state-lock release failed. OperationId={OperationId} ExceptionType={ExceptionType}",
-                        operation.Id,
-                        exception.GetType().FullName);
-                }
-            }
+                await TryCancelProviderAsync(operation, request).ConfigureAwait(false);
 
-            await events.AppendAsync(
-                [
-                    new ProvisioningEvent(
-                        operation.Id,
-                        ProvisioningEventKind.OperationFailed,
-                        operation.StackKind == ProvisioningStackKind.Platform
-                            ? ProvisioningCapability.SharedEnvironment
-                            : ProvisioningCapability.ContainerRuntime,
-                        "Operation interrupted.",
-                        _timeProvider.GetUtcNow())
-                ],
-                CancellationToken.None).ConfigureAwait(false);
+            await operations.MarkStateLockClearedAsync(operation.Id, CancellationToken.None)
+                .ConfigureAwait(false);
+
+            if (expired.Any(item => item.Id == operation.Id))
+            {
+                await events.AppendAsync(
+                    [
+                        new ProvisioningEvent(
+                            operation.Id,
+                            ProvisioningEventKind.OperationFailed,
+                            operation.StackKind == ProvisioningStackKind.Platform
+                                ? ProvisioningCapability.SharedEnvironment
+                                : ProvisioningCapability.ContainerRuntime,
+                            "Operation interrupted.",
+                            _timeProvider.GetUtcNow())
+                    ],
+                    CancellationToken.None).ConfigureAwait(false);
+            }
         }
+    }
+
+    private async Task<ProviderRunResult> RunWithHeartbeatAsync(
+        ProvisioningOperation operation,
+        ProvisioningRequest request,
+        CancellationTokenSource linked,
+        CancellationToken hostToken)
+    {
+        var run = RunProviderAsync(operation, request, linked.Token);
+        while (!run.IsCompleted)
+        {
+            var delay = Task.Delay(_heartbeat, linked.Token);
+            var finished = await Task.WhenAny(run, delay).ConfigureAwait(false);
+            if (finished == run)
+                break;
+
+            if (hostToken.IsCancellationRequested)
+                break;
+
+            await operations.RenewLeaseAsync(operation.Id, _timeProvider.GetUtcNow(), CancellationToken.None)
+                .ConfigureAwait(false);
+            if (await operations.IsCancelRequestedAsync(operation.Id, CancellationToken.None).ConfigureAwait(false))
+                await linked.CancelAsync().ConfigureAwait(false);
+        }
+
+        return await run.ConfigureAwait(false);
     }
 
     private static ProvisioningOperationState TerminalState(
@@ -220,21 +267,46 @@ public sealed class ProvisioningOperationWorker(
             _ => Task.FromResult(ProviderRunResult.Fail([], ProvisioningFailureCodes.UnknownCommand))
         };
 
-    private async Task CompleteCancelledAsync(ProvisioningOperation operation, CancellationToken cancellationToken)
+    private async Task TryCancelProviderAsync(ProvisioningOperation operation, ProvisioningRequest request)
+    {
+        try
+        {
+            await provider.CancelAsync(operation, request, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(
+                "Provisioning state-lock release failed. OperationId={OperationId} ExceptionType={ExceptionType}",
+                operation.Id,
+                exception.GetType().FullName);
+        }
+    }
+
+    private async Task CompleteTerminalAsync(
+        ProvisioningOperation operation,
+        ProvisioningOperationState state,
+        string failureCode,
+        bool stateLockMayBeHeld,
+        CancellationToken cancellationToken)
     {
         await operations.CompleteAsync(
             operation.Id,
-            ProvisioningOperationState.Cancelled,
+            state,
             _timeProvider.GetUtcNow(),
-            ProvisioningFailureCodes.Cancelled,
-            cancellationToken).ConfigureAwait(false);
+            failureCode,
+            cancellationToken,
+            stateLockMayBeHeld).ConfigureAwait(false);
         await events.AppendAsync(
             [
                 new ProvisioningEvent(
                     operation.Id,
-                    ProvisioningEventKind.OperationCancelled,
+                    state == ProvisioningOperationState.Cancelled
+                        ? ProvisioningEventKind.OperationCancelled
+                        : ProvisioningEventKind.OperationFailed,
                     ProvisioningCapability.ContainerRuntime,
-                    "Operation cancelled.",
+                    state == ProvisioningOperationState.Cancelled
+                        ? "Operation cancelled."
+                        : "Operation failed.",
                     _timeProvider.GetUtcNow())
             ],
             cancellationToken).ConfigureAwait(false);
@@ -251,7 +323,8 @@ public sealed class ProvisioningOperationWorker(
             ProvisioningOperationState.Failed,
             _timeProvider.GetUtcNow(),
             failureCode,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            stateLockMayBeHeld: true).ConfigureAwait(false);
         await events.AppendAsync(
             [
                 new ProvisioningEvent(

@@ -696,13 +696,20 @@ builder.Services.AddProvisioning(
 var provisioningWorkerEnabled = builder.Configuration.GetValue("Provisioning:WorkerEnabled", false);
 if (provisioningWorkerEnabled && !provisioningTesting)
 {
-    if (!ProvisioningPersistenceServiceCollectionExtensions.TryGetCatalogStore(builder.Configuration, out _, out _))
+    var requireSqlServer = !builder.Environment.IsDevelopment();
+    if (!ProvisioningPersistenceServiceCollectionExtensions.TryGetCatalogStore(
+            builder.Configuration,
+            out _,
+            out _,
+            requireSqlServer))
     {
         throw new InvalidOperationException(
-            "Provisioning worker is enabled but no durable store is configured.");
+            requireSqlServer
+                ? "Provisioning worker is enabled but Database:Provider is not SqlServer."
+                : "Provisioning worker is enabled but no durable store is configured.");
     }
 
-    builder.Services.AddProvisioningPersistence(builder.Configuration);
+    builder.Services.AddProvisioningPersistence(builder.Configuration, requireSqlServer);
     builder.Services.AddAzureProvisioning(builder.Configuration);
 }
 var webhookDispatchEnabled = builder.Configuration.GetValue("Deployment:WebhookDispatch:Enabled", false);

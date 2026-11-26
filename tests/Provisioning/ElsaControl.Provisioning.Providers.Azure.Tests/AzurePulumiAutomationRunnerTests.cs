@@ -1,5 +1,6 @@
 using ElsaControl.Provisioning.Abstractions;
 using ElsaControl.Provisioning.Core;
+using ElsaControl.Provisioning.Core.Stores;
 using ElsaControl.Provisioning.Providers.Azure.Programs;
 
 namespace ElsaControl.Provisioning.Providers.Azure.Tests;
@@ -22,6 +23,7 @@ public sealed class AzurePulumiAutomationRunnerTests
         Assert.Equal("azurekeyvault://kv-elsa-platform.vault.azure.net/keys/pulumi-secrets", workspace.SecretsProviderUrl);
         Assert.Equal("stelsaplatform", workspace.EnvironmentVariables["AZURE_STORAGE_ACCOUNT"]);
         Assert.Equal("workload-identity-client", workspace.EnvironmentVariables["AZURE_CLIENT_ID"]);
+        Assert.Equal("true", workspace.EnvironmentVariables["PULUMI_DISABLE_AUTOMATIC_PLUGIN_ACQUISITION"]);
         Assert.DoesNotContain(workspace.EnvironmentVariables.Keys, key =>
             key.Contains("SECRET", StringComparison.OrdinalIgnoreCase)
             || key.Contains("STORAGE_KEY", StringComparison.OrdinalIgnoreCase));
@@ -350,6 +352,225 @@ public sealed class AzurePulumiAutomationRunnerTests
         var result = await provider.ProvisionAsync(operation, request);
         Assert.False(result.Succeeded);
         Assert.Equal(ProvisioningFailureCodes.StackLocked, result.FailureCode);
+    }
+
+    [Fact]
+    public void Secret_stack_config_is_not_written_unencrypted_to_stack_settings()
+    {
+        var runner = new AzurePulumiAutomationRunner();
+        var workspace = runner.CreateWorkspace(
+            AzureTarget("engine-aaaaaaaabbbbccccddddeeeeeeeeeeee", ProvisioningStackKind.Engine, "staging"),
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["engineName"] = "engine-one" },
+            new Dictionary<string, string>(StringComparer.Ordinal),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["sqlConnectionSecretValue"] = "seeded-sql",
+                ["signingKeySecretValue"] = "seeded-signing",
+                ["adminPasswordSecretValue"] = "seeded-admin"
+            });
+        Assert.Equal("seeded-sql", workspace.SecretStackConfig!["sqlConnectionSecretValue"]);
+        var options = workspace.ToLocalWorkspaceOptions(runner.CreateProgram(ProvisioningStackKind.Engine));
+        var config = options.StackSettings![workspace.StackName].Config;
+        Assert.NotNull(config);
+        Assert.False(config.ContainsKey("sqlConnectionSecretValue"));
+        Assert.False(config.ContainsKey("signingKeySecretValue"));
+        Assert.False(config.ContainsKey("adminPasswordSecretValue"));
+    }
+
+    [Fact]
+    public void Self_managed_backend_lock_messages_are_detected()
+    {
+        Assert.True(PulumiLockConflict.Matches(
+            new InvalidOperationException(
+                "the stack is currently locked by 1.lock; pulumi created the lock [409]")));
+        Assert.True(PulumiLockConflict.Matches(
+            new InvalidOperationException("lock conflict: another update is currently in progress")));
+        Assert.True(PulumiLockConflict.Matches(
+            new InvalidOperationException("Concurrent update failed with [409] Conflict")));
+        Assert.False(PulumiLockConflict.Matches(new InvalidOperationException("preview failed")));
+    }
+
+    [Fact]
+    public async Task Fresh_create_passes_seed_values_as_pulumi_secret_config()
+    {
+        var automation = new FakePulumiAutomationClient();
+        var secrets = new StaticProvisioningSecretResolver(new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["sqlConnectionSecretValue"] = "seeded-sql",
+            ["signingKeySecretValue"] = "seeded-signing",
+            ["adminPasswordSecretValue"] = "seeded-admin"
+        });
+        var provider = new AzureInfrastructureProvider(
+            new AzurePulumiAutomationRunner(),
+            new AzureWorkloadIdentityCredentials(),
+            automation,
+            secrets: secrets);
+        var operation = new ProvisioningOperation(
+            Guid.NewGuid(),
+            ProvisioningCommand.Provision,
+            ProvisioningOperationState.Running,
+            AzurePulumiAutomationRunner.ProviderId,
+            ProvisioningStackKind.Engine,
+            "engine-aaaaaaaabbbbccccddddeeeeeeeeeeee",
+            "azure-seeds",
+            "azure-seeds-hash",
+            DateTimeOffset.UtcNow);
+        var request = new ProvisioningRequest(
+            ProvisioningCommand.Provision,
+            new EngineSpec(
+                "elsa-server:test",
+                new HashSet<string>(StringComparer.Ordinal) { ProvisioningCapability.ContainerRuntime }),
+            AzureTarget("engine-aaaaaaaabbbbccccddddeeeeeeeeeeee", ProvisioningStackKind.Engine, "staging"),
+            "azure-seeds",
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["engineName"] = "engine-one" });
+        var result = await provider.ProvisionAsync(operation, request);
+        Assert.True(result.Succeeded);
+        Assert.Equal("seeded-sql", automation.LastWorkspace!.SecretStackConfig!["sqlConnectionSecretValue"]);
+        Assert.Equal("seeded-signing", automation.LastWorkspace.SecretStackConfig["signingKeySecretValue"]);
+        Assert.Equal("seeded-admin", automation.LastWorkspace.SecretStackConfig["adminPasswordSecretValue"]);
+        Assert.False(automation.LastWorkspace.StackConfig.ContainsKey("sqlConnectionSecretValue"));
+        var options = automation.LastWorkspace.ToLocalWorkspaceOptions(
+            new AzurePulumiAutomationRunner().CreateProgram(ProvisioningStackKind.Engine));
+        Assert.False(options.StackSettings![automation.LastWorkspace.StackName].Config!
+            .ContainsKey("sqlConnectionSecretValue"));
+    }
+
+    [Fact]
+    public async Task Destroy_uses_the_stack_subscription_from_the_workspace()
+    {
+        var automation = new FakePulumiAutomationClient();
+        var probe = new RecordingResourceGroupAbsenceProbe { Result = ResourceGroupPresence.Absent };
+        var subscription = Guid.Parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").ToString("D");
+        var provider = new AzureInfrastructureProvider(
+            new AzurePulumiAutomationRunner(),
+            new StaticCredentialResolver(new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["AZURE_CLIENT_ID"] = "workload-identity-client",
+                ["ARM_SUBSCRIPTION_ID"] = subscription
+            }),
+            automation,
+            probe);
+        var operation = new ProvisioningOperation(
+            Guid.NewGuid(),
+            ProvisioningCommand.Destroy,
+            ProvisioningOperationState.Running,
+            AzurePulumiAutomationRunner.ProviderId,
+            ProvisioningStackKind.Engine,
+            "engine-aaaaaaaabbbbccccddddeeeeeeeeeeee",
+            "azure-destroy-sub",
+            "azure-destroy-sub-hash",
+            DateTimeOffset.UtcNow);
+        var request = new ProvisioningRequest(
+            ProvisioningCommand.Destroy,
+            new EngineSpec(
+                "elsa-server:test",
+                new HashSet<string>(StringComparer.Ordinal) { ProvisioningCapability.ContainerRuntime }),
+            AzureTarget("engine-aaaaaaaabbbbccccddddeeeeeeeeeeee", ProvisioningStackKind.Engine, "staging"),
+            "azure-destroy-sub",
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["resourceGroupName"] = "elsa-engine-aaaaaaaabbbbccccddddeeeeeeeeeeee"
+            });
+        var result = await provider.DestroyAsync(operation, request);
+        Assert.True(result.Succeeded);
+        Assert.True(result.OwnedResourcesAbsent);
+        Assert.Equal("elsa-engine-aaaaaaaabbbbccccddddeeeeeeeeeeee", probe.LastName);
+        Assert.Equal(subscription, probe.LastSubscription);
+        Assert.Contains(result.Events, value => value.Message == "Owned resource group is absent.");
+    }
+
+    [Fact]
+    public async Task Cancelled_create_then_destroy_certifies_absence()
+    {
+        var automation = new FakePulumiAutomationClient { Stall = TimeSpan.FromSeconds(30) };
+        var probe = new RecordingResourceGroupAbsenceProbe { Result = ResourceGroupPresence.Absent };
+        var secrets = new StaticProvisioningSecretResolver(new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["sqlConnectionSecretValue"] = "seeded-sql",
+            ["signingKeySecretValue"] = "seeded-signing",
+            ["adminPasswordSecretValue"] = "seeded-admin"
+        });
+        var subscription = Guid.Parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").ToString("D");
+        var azure = new AzureInfrastructureProvider(
+            new AzurePulumiAutomationRunner(),
+            new StaticCredentialResolver(new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["AZURE_CLIENT_ID"] = "workload-identity-client",
+                ["ARM_SUBSCRIPTION_ID"] = subscription
+            }),
+            automation,
+            probe,
+            secrets);
+        var store = new ElsaControl.Provisioning.Core.Stores.InMemoryProvisioningStore();
+        var runs = new ProvisioningRunRegistry();
+        var service = new ProvisioningService(store, store, runs);
+        var worker = new ProvisioningOperationWorker(
+            store,
+            store,
+            azure,
+            runs,
+            heartbeat: TimeSpan.FromMilliseconds(25));
+        var engine = AzureTarget("engine-aaaaaaaabbbbccccddddeeeeeeeeeeee", ProvisioningStackKind.Engine, "staging");
+        var spec = new EngineSpec(
+            "elsa-server:test",
+            new HashSet<string>(StringComparer.Ordinal) { ProvisioningCapability.ContainerRuntime });
+        var config = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["engineName"] = "engine-one",
+            ["resourceGroupName"] = "elsa-engine-aaaaaaaabbbbccccddddeeeeeeeeeeee"
+        };
+
+        var create = await service.ProvisionAsync(new ProvisioningRequest(
+            ProvisioningCommand.Provision,
+            spec,
+            engine,
+            "azure-cancel-create",
+            config));
+        var processing = worker.ProcessOnceAsync();
+        await automation.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var cancel = await service.CancelAsync(new ProvisioningRequest(
+            ProvisioningCommand.Cancel,
+            spec,
+            engine,
+            "azure-cancel-signal",
+            config));
+        Assert.Equal(ProvisioningOperationState.Succeeded, cancel.State);
+        await processing;
+        var created = await service.GetOperationAsync(create.OperationId);
+        Assert.Equal(ProvisioningOperationState.Cancelled, created!.State);
+        Assert.True(created.StateLockMayBeHeld);
+
+        await worker.ReconcileInterruptedAsync();
+        Assert.False((await service.GetOperationAsync(create.OperationId))!.StateLockMayBeHeld);
+
+        var destroy = await service.DestroyAsync(new ProvisioningRequest(
+            ProvisioningCommand.Destroy,
+            spec,
+            engine,
+            "azure-cancel-destroy",
+            config));
+        Assert.Equal(ProvisioningOperationState.Queued, destroy.State);
+        Assert.Equal(1, await worker.ProcessOnceAsync());
+        var destroyed = await service.GetOperationAsync(destroy.OperationId);
+        Assert.Equal(ProvisioningOperationState.Succeeded, destroyed!.State);
+        Assert.Contains(automation.Commands, command => command == ProvisioningCommand.Cancel);
+        Assert.Equal(ProvisioningCommand.Destroy, automation.LastCommand);
+        Assert.Equal("elsa-engine-aaaaaaaabbbbccccddddeeeeeeeeeeee", probe.LastName);
+        Assert.Equal(subscription, probe.LastSubscription);
+    }
+
+    private sealed class StaticCredentialResolver(IReadOnlyDictionary<string, string> environment) : ICredentialResolver
+    {
+        public string Kind => CredentialReference.AzureWorkloadIdentityKind;
+
+        public Task<IReadOnlyDictionary<string, string>> ResolveEnvironmentAsync(
+            CredentialReference reference,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ArgumentNullException.ThrowIfNull(reference);
+            return Task.FromResult(environment);
+        }
     }
 
     private static ProvisioningTarget AzureTarget(
