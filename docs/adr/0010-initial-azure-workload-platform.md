@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted. **Superseded for engine workloads by [ADR-0021](0021-pulumi-provisioning-module.md).** Checked-in Bicep remains acceptable for Control host infrastructure until a later decision.
 
 ## Date
 
