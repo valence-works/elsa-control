@@ -1,15 +1,17 @@
 using ElsaControl.Provisioning.Abstractions;
+using ElsaControl.Provisioning.Core.Stores;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 
 namespace ElsaControl.Provisioning.Core;
 
 /// <summary>
-/// Refuses to start when the worker flag is on and the fake provider is
-/// selected outside tests.
+/// Refuses to start when the worker flag is on without a real provider and a
+/// durable store. In-memory is tests-only.
 /// </summary>
 public sealed class ProvisioningProviderGuard(
     IInfrastructureProvider provider,
+    IProvisioningOperationStore store,
     IOptions<ProvisioningOptions> options) : IHostedService
 {
     public Task StartAsync(CancellationToken cancellationToken)
@@ -29,6 +31,12 @@ public sealed class ProvisioningProviderGuard(
         {
             throw new InvalidOperationException(
                 "Provisioning worker is enabled but no real infrastructure provider is registered.");
+        }
+
+        if (store is not IDurableProvisioningStore)
+        {
+            throw new InvalidOperationException(
+                "Provisioning worker is enabled but no durable store is configured.");
         }
 
         return Task.CompletedTask;

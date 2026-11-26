@@ -55,6 +55,24 @@ public sealed class AzureEngineProgramPolicyTests
     }
 
     [Fact]
+    public void Missing_sql_bootstrap_identity_fails_closed()
+    {
+        var values = EngineTestConfig.Values();
+        values.Remove("sqlBootstrapObjectId");
+        var error = Assert.Throws<InvalidOperationException>(() => AzureEngineProgramPolicy.Validate(values));
+        Assert.Equal("Required engine stack config is missing.", error.Message);
+    }
+
+    [Fact]
+    public void Missing_vault_seed_value_fails_closed()
+    {
+        var values = EngineTestConfig.Values();
+        values.Remove("sqlConnectionSecretValue");
+        var error = Assert.Throws<InvalidOperationException>(() => AzureEngineProgramPolicy.Validate(values));
+        Assert.Equal("Required engine stack config is missing.", error.Message);
+    }
+
+    [Fact]
     public void Handoff_without_control_configuration_fails_closed()
     {
         var values = EngineTestConfig.Values();

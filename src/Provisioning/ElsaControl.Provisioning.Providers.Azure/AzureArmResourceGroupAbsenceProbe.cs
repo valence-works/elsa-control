@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Text.Json;
 using Azure.Core;
 using Azure.Identity;
 
@@ -7,7 +8,8 @@ namespace ElsaControl.Provisioning.Providers.Azure;
 
 /// <summary>
 /// Fresh ARM read after Destroy. Tests inject a handler; production uses
-/// workload identity and the process subscription environment.
+/// workload identity and the process subscription environment. Absent only
+/// on ResourceGroupNotFound in that subscription.
 /// </summary>
 public sealed class AzureArmResourceGroupAbsenceProbe : IResourceGroupAbsenceProbe, IDisposable
 {
@@ -78,7 +80,8 @@ public sealed class AzureArmResourceGroupAbsenceProbe : IResourceGroupAbsencePro
                 return ResourceGroupPresence.Unknown;
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
             using var response = await _http.SendAsync(request, cancellationToken).ConfigureAwait(false);
-            return MapStatus(response.StatusCode);
+            var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            return MapResponse(response.StatusCode, body);
         }
         catch (OperationCanceledException)
         {
@@ -90,17 +93,46 @@ public sealed class AzureArmResourceGroupAbsenceProbe : IResourceGroupAbsencePro
         }
     }
 
+    public static ResourceGroupPresence MapResponse(HttpStatusCode statusCode, string? body)
+    {
+        if ((int)statusCode is >= 200 and < 300)
+            return ResourceGroupPresence.Present;
+        if (statusCode == HttpStatusCode.NotFound && HasResourceGroupNotFound(body))
+            return ResourceGroupPresence.Absent;
+        return ResourceGroupPresence.Unknown;
+    }
+
     public static ResourceGroupPresence MapStatus(HttpStatusCode statusCode) =>
-        statusCode == HttpStatusCode.NotFound
-            ? ResourceGroupPresence.Absent
-            : (int)statusCode is >= 200 and < 300
-                ? ResourceGroupPresence.Present
-                : ResourceGroupPresence.Unknown;
+        MapResponse(statusCode, statusCode == HttpStatusCode.NotFound
+            ? """{"error":{"code":"ResourceGroupNotFound"}}"""
+            : null);
 
     public void Dispose()
     {
         if (_ownsHttp)
             _http.Dispose();
+    }
+
+    private static bool HasResourceGroupNotFound(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body))
+            return false;
+        try
+        {
+            using var document = JsonDocument.Parse(body);
+            if (!document.RootElement.TryGetProperty("error", out var error)
+                || !error.TryGetProperty("code", out var code)
+                || code.ValueKind != JsonValueKind.String)
+            {
+                return false;
+            }
+
+            return string.Equals(code.GetString(), "ResourceGroupNotFound", StringComparison.Ordinal);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
     }
 
     private static bool IsResourceGroupName(string value) =>

@@ -4,7 +4,8 @@ namespace ElsaControl.Provisioning.Providers.Azure;
 
 /// <summary>
 /// Automation API workspace settings for one stack. Blob backend with locking,
-/// Key Vault secrets provider, workload-identity environment. No secret values.
+/// Key Vault secrets provider, workload-identity environment. Secret values
+/// travel only as Pulumi secret config, never in request history.
 /// </summary>
 public sealed record PulumiWorkspaceConfiguration(
     string ProjectName,
@@ -12,7 +13,8 @@ public sealed record PulumiWorkspaceConfiguration(
     string BackendUrl,
     string SecretsProviderUrl,
     IReadOnlyDictionary<string, string> EnvironmentVariables,
-    IReadOnlyDictionary<string, string> StackConfig)
+    IReadOnlyDictionary<string, string> StackConfig,
+    IReadOnlyDictionary<string, string>? SecretStackConfig = null)
 {
     public LocalWorkspaceOptions ToLocalWorkspaceOptions(PulumiFn program)
     {
@@ -26,6 +28,11 @@ public sealed record PulumiWorkspaceConfiguration(
         var config = new Dictionary<string, StackSettingsConfigValue>(StringComparer.Ordinal);
         foreach (var pair in StackConfig)
             config[pair.Key] = new StackSettingsConfigValue(pair.Value, isSecure: false);
+        if (SecretStackConfig is not null)
+        {
+            foreach (var pair in SecretStackConfig)
+                config[pair.Key] = new StackSettingsConfigValue(pair.Value, isSecure: true);
+        }
 
         return new LocalWorkspaceOptions
         {

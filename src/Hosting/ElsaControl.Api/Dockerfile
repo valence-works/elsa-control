@@ -79,9 +79,28 @@ RUN tdnf install --assumeyes tar bzip2 icu tzdata libstdc++ openssl-libs \
       --output /tmp/pulumi.tar.gz \
     && echo "${pulumi_sha256}  /tmp/pulumi.tar.gz" | sha256sum --check --status \
     && tar --extract --gzip --file /tmp/pulumi.tar.gz --directory /tmp \
-    && install -m 0755 /tmp/pulumi/pulumi /tmp/pulumi/pulumi-* /usr/local/bin/ \
+    && install -m 0755 /tmp/pulumi/pulumi /tmp/pulumi/pulumi-language-dotnet /usr/local/bin/ \
     && /usr/local/bin/pulumi version >/dev/null \
     && rm -rf /tmp/pulumi.tar.gz /tmp/pulumi
+
+ARG PULUMI_AZURE_NATIVE_VERSION=3.11.0
+ARG PULUMI_AZURE_NATIVE_AMD64_SHA256=751f45b836c65b50860e145a68b74a92830d095fbaca75de7286d9c17aa904de
+ARG PULUMI_AZURE_NATIVE_ARM64_SHA256=eea199477b87743eed916c285d53879b3ae8c722b685602d6f350bb49d816cd1
+ENV PULUMI_HOME=/opt/pulumi \
+    PULUMI_SKIP_UPDATE_CHECK=true
+RUN case "$TARGETARCH" in \
+      amd64) plugin_sha256="$PULUMI_AZURE_NATIVE_AMD64_SHA256"; plugin_arch="amd64" ;; \
+      arm64) plugin_sha256="$PULUMI_AZURE_NATIVE_ARM64_SHA256"; plugin_arch="arm64" ;; \
+      *) echo "Unsupported target architecture" >&2; exit 1 ;; \
+    esac \
+    && curl --fail --silent --show-error --location \
+      "https://github.com/pulumi/pulumi-azure-native/releases/download/v${PULUMI_AZURE_NATIVE_VERSION}/pulumi-resource-azure-native-v${PULUMI_AZURE_NATIVE_VERSION}-linux-${plugin_arch}.tar.gz" \
+      --output /tmp/azure-native.tar.gz \
+    && echo "${plugin_sha256}  /tmp/azure-native.tar.gz" | sha256sum --check --status \
+    && mkdir -p /opt/pulumi/plugins/resource-azure-native-v${PULUMI_AZURE_NATIVE_VERSION} \
+    && tar --extract --gzip --file /tmp/azure-native.tar.gz --directory /opt/pulumi/plugins/resource-azure-native-v${PULUMI_AZURE_NATIVE_VERSION} \
+    && chmod 0755 /opt/pulumi/plugins/resource-azure-native-v${PULUMI_AZURE_NATIVE_VERSION}/pulumi-resource-azure-native \
+    && rm /tmp/azure-native.tar.gz
 COPY --from=runtime /usr/share/dotnet /usr/share/dotnet
 RUN ln -s /usr/share/dotnet/dotnet /usr/bin/dotnet \
     && dotnet --list-runtimes | grep --fixed-strings 'Microsoft.AspNetCore.App 10.' >/dev/null

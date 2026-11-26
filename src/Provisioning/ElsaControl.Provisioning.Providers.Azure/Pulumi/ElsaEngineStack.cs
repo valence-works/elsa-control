@@ -7,22 +7,27 @@ using Pulumi.AzureNative.Authorization;
 using Pulumi.AzureNative.KeyVault;
 using Pulumi.AzureNative.KeyVault.Inputs;
 using Pulumi.AzureNative.ManagedIdentity;
+using Pulumi.AzureNative.Monitor;
+using Pulumi.AzureNative.Monitor.Inputs;
+using Pulumi.AzureNative.OperationalInsights;
 using Pulumi.AzureNative.Resources;
 using Pulumi.AzureNative.Sql;
 using Pulumi.AzureNative.Sql.Inputs;
+using SkuName = Pulumi.AzureNative.KeyVault.SkuName;
 
 namespace ElsaControl.Provisioning.Providers.Azure.Programs;
 
 /// <summary>
 /// <c>elsa-engine</c> program. One stack per engine, named from the immutable
-/// instance ID. Org and slug are tags only. Shared platform outputs are read
-/// through <see cref="StackReference"/> so a second engine does not create a
-/// second environment or registry.
+/// instance ID. Org and slug are tags only. Dedicated isolation: each engine
+/// owns its Container Apps environment and Log Analytics workspace, both
+/// destroyed with the engine. The platform stack is the shared registry only.
 /// </summary>
 public sealed class ElsaEngineStack : Stack
 {
     private const string AcrPullRoleId = "7f951dda-4ed3-4680-a7ca-43fe172d538d";
     private const string KeyVaultSecretsUserRoleId = "4633458b-17de-408a-b874-0445c86b69e6";
+    private const string KeyVaultSecretsOfficerRoleId = "b86a8fe4-44ce-4948-aee5-eccb2c155cd7";
 
     public ElsaEngineStack()
     {
@@ -38,11 +43,10 @@ public sealed class ElsaEngineStack : Stack
                                 ?? ProvisioningEngineResourceGroup.ForInstance(parsed);
         var tags = DefaultTags(values);
         var platform = new StackReference(platformStack);
-        var environmentId = platform.RequireOutput(PulumiStackOutputs.ContainerEnvironmentId).Apply(static value => value.ToString() ?? "");
         var registryId = platform.RequireOutput(PulumiStackOutputs.RegistryId).Apply(static value => value.ToString() ?? "");
         var registryLoginServer = platform.RequireOutput(PulumiStackOutputs.RegistryLoginServer).Apply(static value => value.ToString() ?? "");
-        var environmentKind = platform.RequireOutput(PulumiStackOutputs.ContainerEnvironmentKind)
-            .Apply(static value => value.ToString() ?? Provisioning.Abstractions.ProvisioningCapability.SharedEnvironment);
+        var bootstrapObjectId = values["sqlBootstrapObjectId"];
+        var bootstrapLogin = values["sqlBootstrapLogin"];
 
         var resourceGroup = new ResourceGroup("engine-rg", new ResourceGroupArgs
         {
@@ -76,12 +80,88 @@ public sealed class ElsaEngineStack : Stack
             Tags = tags
         });
 
+        var keyVaultOfficer = new RoleAssignment("engine-kv-officer", new RoleAssignmentArgs
+        {
+            PrincipalId = bootstrapObjectId,
+            PrincipalType = "ServicePrincipal",
+            RoleDefinitionId = $"/providers/Microsoft.Authorization/roleDefinitions/{KeyVaultSecretsOfficerRoleId}",
+            Scope = vault.Id
+        });
+
         var keyVaultSecrets = new RoleAssignment("engine-kv-secrets", new RoleAssignmentArgs
         {
             PrincipalId = identity.PrincipalId,
             PrincipalType = "ServicePrincipal",
             RoleDefinitionId = $"/providers/Microsoft.Authorization/roleDefinitions/{KeyVaultSecretsUserRoleId}",
             Scope = vault.Id
+        });
+
+        var sqlRef = SecretRef(values, "sqlConnectionSecretName", "sql-connection");
+        var signingRef = SecretRef(values, "signingKeySecretName", "identity-signing-key");
+        var adminRef = SecretRef(values, "adminPasswordSecretName", "admin-password");
+        var sqlSecret = SeedVaultSecret("engine-sql-secret", sqlRef, values["sqlConnectionSecretValue"], resourceGroup, vault, keyVaultOfficer);
+        var signingSecret = SeedVaultSecret("engine-signing-secret", signingRef, values["signingKeySecretValue"], resourceGroup, vault, keyVaultOfficer);
+        var adminSecret = SeedVaultSecret("engine-admin-secret", adminRef, values["adminPasswordSecretValue"], resourceGroup, vault, keyVaultOfficer);
+
+        var logs = new Workspace("engine-logs", new WorkspaceArgs
+        {
+            ResourceGroupName = resourceGroup.Name,
+            WorkspaceName = LogName(parsed),
+            Location = location,
+            Sku = new global::Pulumi.AzureNative.OperationalInsights.Inputs.WorkspaceSkuArgs
+            {
+                Name = "PerGB2018"
+            },
+            RetentionInDays = 30,
+            Tags = tags
+        });
+
+        var keys = GetSharedKeys.Invoke(new GetSharedKeysInvokeArgs
+        {
+            ResourceGroupName = resourceGroup.Name,
+            WorkspaceName = logs.Name
+        });
+
+        var environment = new ManagedEnvironment("engine-aca", new ManagedEnvironmentArgs
+        {
+            ResourceGroupName = resourceGroup.Name,
+            EnvironmentName = EnvironmentName(parsed),
+            Location = location,
+            AppLogsConfiguration = new AppLogsConfigurationArgs
+            {
+                Destination = "log-analytics",
+                LogAnalyticsConfiguration = new LogAnalyticsConfigurationArgs
+                {
+                    CustomerId = logs.CustomerId,
+                    SharedKey = keys.Apply(value => Output.CreateSecret(value.PrimarySharedKey ?? ""))
+                }
+            },
+            WorkloadProfiles =
+            {
+                new WorkloadProfileArgs
+                {
+                    Name = "Consumption",
+                    WorkloadProfileType = "Consumption"
+                }
+            },
+            ZoneRedundant = false,
+            Tags = tags
+        });
+
+        _ = new DiagnosticSetting("engine-aca-logs", new DiagnosticSettingArgs
+        {
+            Name = "container-apps",
+            ResourceUri = environment.Id,
+            WorkspaceId = logs.Id,
+            Logs =
+            {
+                new LogSettingsArgs { Category = "ContainerAppConsoleLogs", Enabled = true },
+                new LogSettingsArgs { Category = "ContainerAppSystemLogs", Enabled = true }
+            },
+            Metrics =
+            {
+                new MetricSettingsArgs { Category = "AllMetrics", Enabled = true }
+            }
         });
 
         var server = new Server("engine-sql", new ServerArgs
@@ -97,8 +177,8 @@ public sealed class ElsaEngineStack : Stack
                 AdministratorType = AdministratorType.ActiveDirectory,
                 AzureADOnlyAuthentication = true,
                 PrincipalType = Pulumi.AzureNative.Sql.PrincipalType.Application,
-                Sid = identity.PrincipalId,
-                Login = $"engine-{parsed:N}"[..16]
+                Sid = bootstrapObjectId,
+                Login = bootstrapLogin
             },
             Tags = tags
         });
@@ -109,6 +189,9 @@ public sealed class ElsaEngineStack : Stack
             ServerName = server.Name,
             DatabaseName = "Elsa",
             Location = location,
+            // Dedicated engine DBs stay on Standard S0 on purpose. Serverless
+            // GP_S_Gen5 on always-on engines costs about 10x. Bicep SKU
+            // alignment is a separate follow-up, not this change.
             Sku = new Pulumi.AzureNative.Sql.Inputs.SkuArgs
             {
                 Name = "S0",
@@ -139,6 +222,11 @@ public sealed class ElsaEngineStack : Stack
             EndIpAddress = "0.0.0.0"
         });
 
+        var runtimeUser = EngineSqlContainedUser.Ensure(
+            server.FullyQualifiedDomainName,
+            identity.ClientId,
+            identity.Name);
+
         var cpu = values.GetValueOrDefault("cpu") ?? "0.5";
         var memory = values.GetValueOrDefault("memory") ?? "1Gi";
         var minReplicas = int.Parse(values.GetValueOrDefault("minReplicas") ?? "0");
@@ -146,9 +234,6 @@ public sealed class ElsaEngineStack : Stack
         var revisionSuffix = values.GetValueOrDefault("revisionSuffix")
                              ?? ProvisioningRevisionSuffix.FromFingerprint(values["planFingerprint"]);
         var image = AzureEngineProgramPolicy.ImmutableImage(values);
-        var sqlRef = SecretRef(values, "sqlConnectionSecretName", "sql-connection");
-        var signingRef = SecretRef(values, "signingKeySecretName", "identity-signing-key");
-        var adminRef = SecretRef(values, "adminPasswordSecretName", "admin-password");
         var handoffEnabled = string.Equals(
             values.GetValueOrDefault("managedHandoff"),
             "true",
@@ -156,10 +241,8 @@ public sealed class ElsaEngineStack : Stack
         Output<string>? handoffCallback = null;
         if (handoffEnabled)
         {
-            var defaultDomain = platform.RequireOutput(PulumiStackOutputs.ContainerEnvironmentDefaultDomain)
-                .Apply(static value => value.ToString() ?? "");
             var appName = AppName(parsed);
-            handoffCallback = defaultDomain.Apply(domain =>
+            handoffCallback = environment.DefaultDomain.Apply(domain =>
                 $"https://{appName}.{domain}/managed-elsa/handoff/callback");
         }
 
@@ -182,7 +265,7 @@ public sealed class ElsaEngineStack : Stack
                 Type = Pulumi.AzureNative.App.ManagedServiceIdentityType.UserAssigned,
                 UserAssignedIdentities = identity.Id
             },
-            EnvironmentId = environmentId,
+            EnvironmentId = environment.Id,
             Configuration = new ConfigurationArgs
             {
                 ActiveRevisionsMode = ActiveRevisionsMode.Multiple,
@@ -235,7 +318,7 @@ public sealed class ElsaEngineStack : Stack
                             Cpu = double.Parse(cpu, System.Globalization.CultureInfo.InvariantCulture),
                             Memory = memory
                         },
-                        Env = EnvironmentVariables(values, sqlRef, signingRef, adminRef, handoffCallback),
+                        Env = EnvironmentVariables(values, sqlRef, signingRef, adminRef, handoffCallback, runtimeUser),
                         Probes =
                         {
                             StartupProbe(),
@@ -251,12 +334,18 @@ public sealed class ElsaEngineStack : Stack
             DependsOn =
             {
                 keyVaultSecrets,
+                keyVaultOfficer,
+                sqlSecret,
+                signingSecret,
+                adminSecret,
                 acrPull
             }
         });
+        _ = app;
+        _ = database;
 
         EngineName = Output.Create(values.GetValueOrDefault("engineName") ?? $"engine-{parsed:N}");
-        PlatformEnvironmentKind = environmentKind;
+        PlatformEnvironmentKind = Output.Create("dedicated-container-environment");
         EndpointKind = Output.Create(Provisioning.Abstractions.ProvisioningCapability.Ingress);
         DatabaseKind = Output.Create(Provisioning.Abstractions.ProvisioningCapability.ManagedSql);
         SecretsKind = Output.Create(Provisioning.Abstractions.ProvisioningCapability.Secrets);
@@ -270,8 +359,6 @@ public sealed class ElsaEngineStack : Stack
         PlanFingerprint = Output.Create(values["planFingerprint"]);
         OwnedResourceGroupKind = Output.Create("dedicated-resource-group");
         OwnedResourceGroupName = resourceGroup.Name;
-        _ = app;
-        _ = database;
     }
 
     [Output] public Output<string> EngineName { get; set; }
@@ -309,7 +396,8 @@ public sealed class ElsaEngineStack : Stack
             "handoffAudience", "handoffRuntimeMaximumLifetime", "handoffAllowedRuntimePermissions",
             "sqlWorkflowPackageVersion", "sqlQuartzPackageVersion",
             "elsaVersion", "sqlConnectionSecretName", "signingKeySecretName", "adminPasswordSecretName",
-            "adminUsername"
+            "adminUsername", "sqlBootstrapObjectId", "sqlBootstrapLogin",
+            "sqlConnectionSecretValue", "signingKeySecretValue", "adminPasswordSecretValue"
         };
         var values = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var key in keys)
@@ -344,7 +432,34 @@ public sealed class ElsaEngineStack : Stack
         "sql-engine-" + instanceId.ToString("N")[..16];
 
     private static string AppName(Guid instanceId) =>
-        ("ca-eng-" + instanceId.ToString("N"))[..32];
+        Truncate("ca-eng-" + instanceId.ToString("N"), 32);
+
+    private static string EnvironmentName(Guid instanceId) =>
+        Truncate("aca-eng-" + instanceId.ToString("N"), 32);
+
+    private static string LogName(Guid instanceId) =>
+        Truncate("log-eng-" + instanceId.ToString("N"), 63);
+
+    private static string Truncate(string value, int maxLength) =>
+        value.Length <= maxLength ? value : value[..maxLength];
+
+    private static Pulumi.AzureNative.KeyVault.Secret SeedVaultSecret(
+        string resourceName,
+        string secretName,
+        string value,
+        ResourceGroup resourceGroup,
+        Vault vault,
+        RoleAssignment officer) =>
+        new(
+            resourceName,
+            new Pulumi.AzureNative.KeyVault.SecretArgs
+            {
+                ResourceGroupName = resourceGroup.Name,
+                VaultName = vault.Name,
+                SecretName = secretName,
+                Properties = new SecretPropertiesArgs { Value = Output.CreateSecret(value) }
+            },
+            new CustomResourceOptions { DependsOn = { officer } });
 
     private static string SecretRef(IReadOnlyDictionary<string, string> values, string key, string fallback) =>
         values.GetValueOrDefault(key) ?? fallback;
@@ -365,13 +480,15 @@ public sealed class ElsaEngineStack : Stack
         string sqlRef,
         string signingRef,
         string adminRef,
-        Output<string>? handoffCallback)
+        Output<string>? handoffCallback,
+        Output<string> runtimeUser)
     {
         var env = new InputList<EnvironmentVarArgs>
         {
             new EnvironmentVarArgs { Name = "ASPNETCORE_ENVIRONMENT", Value = "Production" },
             new EnvironmentVarArgs { Name = "ASPNETCORE_HTTP_PORTS", Value = "8080" },
             new EnvironmentVarArgs { Name = "ELSA_TOPOLOGY", Value = AzureEngineProgramPolicy.SupportedTopology },
+            new EnvironmentVarArgs { Name = "ELSA_SQL_RUNTIME_USER", Value = runtimeUser },
             new EnvironmentVarArgs
             {
                 Name = "CShells__Shells__Default__Features__SqliteWorkflowPersistence",

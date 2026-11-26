@@ -82,6 +82,12 @@ public sealed class ProvisioningService(
                 request.StackConfig);
         }
 
+        if (request.Target.StackKind == ProvisioningStackKind.Engine
+            && !ProvisioningStackName.TryParseEngineInstanceId(request.Target.StackName, out _))
+        {
+            throw new InvalidOperationException("Engine stack names must be engine-{instanceId}.");
+        }
+
         foreach (var pair in request.StackConfig)
         {
             if (ProvisioningEventSanitizer.ContainsSecretOrResourceIdentifier(pair.Key)
@@ -91,7 +97,7 @@ public sealed class ProvisioningService(
             }
         }
 
-        var hash = InMemoryProvisioningStore.HashRequest(request);
+        var hash = ProvisioningRequestHash.Compute(request);
         var result = await operations.CreateOrGetAsync(request, hash, _timeProvider.GetUtcNow(), cancellationToken)
             .ConfigureAwait(false);
         if (result.Replayed)

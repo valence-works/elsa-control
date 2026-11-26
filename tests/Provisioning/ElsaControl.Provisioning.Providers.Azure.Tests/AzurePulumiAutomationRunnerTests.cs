@@ -39,7 +39,7 @@ public sealed class AzurePulumiAutomationRunnerTests
     {
         var directory = Path.Combine(Path.GetTempPath(), $"elsa-pulumi-{Guid.NewGuid():N}");
         Directory.CreateDirectory(directory);
-        var runner = new AzurePulumiAutomationRunner();
+        var runner = new AzurePulumiAutomationRunner(allowFileBackend: true);
         var target = new ProvisioningTarget(
             AzurePulumiAutomationRunner.ProviderId,
             ProvisioningStackKind.Platform,
@@ -58,9 +58,29 @@ public sealed class AzurePulumiAutomationRunnerTests
     }
 
     [Fact]
+    public void File_backend_is_refused_outside_tests()
+    {
+        var runner = new AzurePulumiAutomationRunner(allowFileBackend: false);
+        var directory = Path.Combine(Path.GetTempPath(), $"elsa-pulumi-{Guid.NewGuid():N}");
+        var target = new ProvisioningTarget(
+            AzurePulumiAutomationRunner.ProviderId,
+            ProvisioningStackKind.Platform,
+            "staging",
+            new CredentialReference(CredentialReference.AzureWorkloadIdentityKind, "workload-identity-client"),
+            new StateBackendReference(StateBackendReference.FileKind, directory),
+            new SecretsProviderReference(SecretsProviderReference.InMemoryKind, "memory://secrets"));
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            runner.CreateWorkspace(
+                target,
+                new Dictionary<string, string>(StringComparer.Ordinal) { ["environmentName"] = "staging" },
+                new Dictionary<string, string>(StringComparer.Ordinal)));
+        Assert.Equal("File and passphrase Pulumi backends are test-only.", error.Message);
+    }
+
+    [Fact]
     public void Diy_platform_stack_reference_uses_the_literal_organization()
     {
-        var runner = new AzurePulumiAutomationRunner("acme");
+        var runner = new AzurePulumiAutomationRunner();
         var workspace = runner.CreateWorkspace(
             AzureTarget("engine-aaaaaaaabbbbccccddddeeeeeeeeeeee", ProvisioningStackKind.Engine, "staging"),
             new Dictionary<string, string>(StringComparer.Ordinal) { ["engineName"] = "engine-one" },
@@ -195,7 +215,7 @@ public sealed class AzurePulumiAutomationRunnerTests
         var result = await provider.CancelAsync(operation, request);
         Assert.True(result.Succeeded);
         Assert.Equal(ProvisioningFailureCodes.NothingToCancel, result.FailureCode);
-        Assert.Null(automation.LastCommand);
+        Assert.Equal(ProvisioningCommand.Cancel, automation.LastCommand);
     }
 
     [Fact]
@@ -299,7 +319,7 @@ public sealed class AzurePulumiAutomationRunnerTests
         var result = await provider.DestroyAsync(operation, request);
         Assert.False(result.Succeeded);
         Assert.False(result.OwnedResourcesAbsent);
-        Assert.Equal(ProvisioningFailureCodes.ResourceGroupPresent, result.FailureCode);
+        Assert.Equal(ProvisioningFailureCodes.ResourceGroupUnknown, result.FailureCode);
     }
 
     [Fact]

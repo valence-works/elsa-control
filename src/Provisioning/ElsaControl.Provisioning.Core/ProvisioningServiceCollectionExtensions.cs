@@ -13,7 +13,8 @@ public static class ProvisioningServiceCollectionExtensions
     /// is true. The default is off, so the existing Bicep runner is unchanged.
     /// The fake provider is registered only when <paramref name="allowFakeProvider"/>
     /// is true (tests). Otherwise the unconfigured provider is selected until a
-    /// real provider replaces it.
+    /// real provider replaces it. In-memory storage is tests-only; production
+    /// replaces it with the EF durable store on Control's catalog database.
     /// </summary>
     public static IServiceCollection AddProvisioning(
         this IServiceCollection services,
@@ -25,31 +26,23 @@ public static class ProvisioningServiceCollectionExtensions
         ArgumentNullException.ThrowIfNull(configuration);
 
         services.Configure<ProvisioningOptions>(configuration.GetSection(ProvisioningOptions.ConfigurationSection));
-        services.PostConfigure<ProvisioningOptions>(options => options.AllowFakeProvider = allowFakeProvider);
+        services.PostConfigure<ProvisioningOptions>(options =>
+        {
+            options.AllowFakeProvider = allowFakeProvider;
+            if (allowFakeProvider)
+                options.AllowFileBackend = true;
+        });
         services.AddSingleton<ProvisioningRunRegistry>();
 
         var configured = configuration.GetSection(ProvisioningOptions.ConfigurationSection).Get<ProvisioningOptions>()
                          ?? new ProvisioningOptions();
-        if (!string.IsNullOrWhiteSpace(configured.StorePath))
-        {
-            services.AddSingleton(_ => new SqliteProvisioningStore(configured.StorePath));
-            services.AddSingleton<IProvisioningOperationStore>(provider =>
-                provider.GetRequiredService<SqliteProvisioningStore>());
-            services.AddSingleton<IProvisioningEventStore>(provider =>
-                provider.GetRequiredService<SqliteProvisioningStore>());
-            services.AddSingleton<IProvisioningStackLockStore>(provider =>
-                provider.GetRequiredService<SqliteProvisioningStore>());
-        }
-        else
-        {
-            services.AddSingleton<InMemoryProvisioningStore>();
-            services.AddSingleton<IProvisioningOperationStore>(provider =>
-                provider.GetRequiredService<InMemoryProvisioningStore>());
-            services.AddSingleton<IProvisioningEventStore>(provider =>
-                provider.GetRequiredService<InMemoryProvisioningStore>());
-            services.AddSingleton<IProvisioningStackLockStore>(provider =>
-                provider.GetRequiredService<InMemoryProvisioningStore>());
-        }
+        services.AddSingleton<InMemoryProvisioningStore>();
+        services.AddSingleton<IProvisioningOperationStore>(provider =>
+            provider.GetRequiredService<InMemoryProvisioningStore>());
+        services.AddSingleton<IProvisioningEventStore>(provider =>
+            provider.GetRequiredService<InMemoryProvisioningStore>());
+        services.AddSingleton<IProvisioningStackLockStore>(provider =>
+            provider.GetRequiredService<InMemoryProvisioningStore>());
         services.AddSingleton<FakeInfrastructureProvider>();
         services.AddSingleton<UnconfiguredInfrastructureProvider>();
         if (allowFakeProvider)

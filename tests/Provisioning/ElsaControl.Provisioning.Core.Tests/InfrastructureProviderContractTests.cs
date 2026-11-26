@@ -14,13 +14,16 @@ public abstract class InfrastructureProviderContractTests
     public async Task Preview_provision_refresh_cancel_and_destroy_emit_sanitised_events()
     {
         var provider = CreateProvider();
-        var operation = Operation(ProvisioningCommand.Provision, "contract-engine");
+        var operation = Operation(ProvisioningCommand.Provision, ProvisioningFixtures.EngineName());
         var request = ProvisioningFixtures.Request(
             ProvisioningCommand.Provision,
-            ProvisioningFixtures.EngineTarget("contract-engine"),
+            ProvisioningFixtures.EngineTarget(),
             ProvisioningFixtures.EngineSpec(),
             "contract-provision",
-            new Dictionary<string, string>(StringComparer.Ordinal) { ["engineName"] = "contract-engine" });
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["engineName"] = ProvisioningFixtures.EngineName()
+            });
 
         if (provider is FakeInfrastructureProvider fake)
         {
@@ -68,16 +71,16 @@ public abstract class InfrastructureProviderContractTests
     public async Task Destroy_of_an_absent_stack_is_a_no_op_success()
     {
         var provider = CreateProvider();
-        var operation = Operation(ProvisioningCommand.Destroy, "never-created");
+        var operation = Operation(ProvisioningCommand.Destroy, ProvisioningFixtures.EngineName());
         var request = ProvisioningFixtures.Request(
             ProvisioningCommand.Destroy,
-            ProvisioningFixtures.EngineTarget("never-created"),
+            ProvisioningFixtures.EngineTarget(),
             ProvisioningFixtures.EngineSpec(),
             "contract-absent");
         var result = await provider.DestroyAsync(operation, request);
         Assert.True(result.Succeeded);
         if (provider is FakeInfrastructureProvider fake)
-            Assert.False(fake.StackExists("never-created"));
+            Assert.False(fake.StackExists(ProvisioningFixtures.EngineName()));
     }
 
     [Fact]
@@ -95,26 +98,29 @@ public abstract class InfrastructureProviderContractTests
                 ProvisioningFixtures.PlatformTarget(),
                 ProvisioningFixtures.PlatformSpec(),
                 "cancel-platform"));
-        var engineOp = Operation(ProvisioningCommand.Provision, "keep-engine");
+        var engineOp = Operation(ProvisioningCommand.Provision, ProvisioningFixtures.EngineName());
         var engineRequest = ProvisioningFixtures.Request(
             ProvisioningCommand.Provision,
-            ProvisioningFixtures.EngineTarget("keep-engine"),
+            ProvisioningFixtures.EngineTarget(),
             ProvisioningFixtures.EngineSpec(),
             "cancel-engine",
-            new Dictionary<string, string>(StringComparer.Ordinal) { ["engineName"] = "keep-engine" });
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["engineName"] = ProvisioningFixtures.EngineName()
+            });
         await fake.ProvisionAsync(engineOp, engineRequest);
-        Assert.True(fake.StackExists("keep-engine"));
+        Assert.True(fake.StackExists(ProvisioningFixtures.EngineName()));
 
         var cancel = await fake.CancelAsync(
-            Operation(ProvisioningCommand.Cancel, "keep-engine"),
+            Operation(ProvisioningCommand.Cancel, ProvisioningFixtures.EngineName()),
             ProvisioningFixtures.Request(
                 ProvisioningCommand.Cancel,
-                ProvisioningFixtures.EngineTarget("keep-engine"),
+                ProvisioningFixtures.EngineTarget(),
                 ProvisioningFixtures.EngineSpec(),
                 "cancel-idle"));
         Assert.True(cancel.Succeeded);
         Assert.Equal(ProvisioningFailureCodes.NothingToCancel, cancel.FailureCode);
-        Assert.True(fake.StackExists("keep-engine"));
+        Assert.True(fake.StackExists(ProvisioningFixtures.EngineName()));
     }
 
     protected static ProvisioningOperation Operation(
@@ -155,19 +161,25 @@ public sealed class FakeInfrastructureProviderContractTests : InfrastructureProv
 
         var first = await service.ProvisionAsync(ProvisioningFixtures.Request(
             ProvisioningCommand.Provision,
-            ProvisioningFixtures.EngineTarget("held-engine"),
+            ProvisioningFixtures.EngineTarget(),
             ProvisioningFixtures.EngineSpec(),
             "lock-first",
-            new Dictionary<string, string>(StringComparer.Ordinal) { ["engineName"] = "held-engine" }));
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["engineName"] = ProvisioningFixtures.EngineName()
+            }));
         var claimed = await store.ClaimAsync(first.OperationId, DateTimeOffset.UtcNow);
         Assert.Equal(ProvisioningOperationState.Running, claimed!.State);
 
         var second = await service.ProvisionAsync(ProvisioningFixtures.Request(
             ProvisioningCommand.Provision,
-            ProvisioningFixtures.EngineTarget("held-engine"),
+            ProvisioningFixtures.EngineTarget(),
             ProvisioningFixtures.EngineSpec(),
             "lock-second",
-            new Dictionary<string, string>(StringComparer.Ordinal) { ["engineName"] = "held-engine" }));
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["engineName"] = ProvisioningFixtures.EngineName()
+            }));
         Assert.True(second.LockConflict);
         Assert.Equal(ProvisioningOperationState.LockConflict, second.State);
         var conflictEvents = await service.ListEventsAsync(second.OperationId);

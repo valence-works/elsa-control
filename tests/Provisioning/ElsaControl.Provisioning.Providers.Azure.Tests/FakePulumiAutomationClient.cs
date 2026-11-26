@@ -20,6 +20,21 @@ internal sealed class FakePulumiAutomationClient : IPulumiAutomationClient
         cancellationToken.ThrowIfCancellationRequested();
         LastCommand = command;
         LastWorkspace = workspace;
+        if (command == ProvisioningCommand.Cancel)
+        {
+            return Task.FromResult(new ProviderRunResult(
+                true,
+                [
+                    new ProvisioningEvent(
+                        operation.Id,
+                        ProvisioningEventKind.OperationCancelled,
+                        ProvisioningCapability.ContainerRuntime,
+                        "Nothing to cancel.",
+                        DateTimeOffset.UtcNow)
+                ],
+                failureCode: ProvisioningFailureCodes.NothingToCancel));
+        }
+
         if (ThrowLockConflict)
         {
             return Task.FromResult(ProviderRunResult.Fail(

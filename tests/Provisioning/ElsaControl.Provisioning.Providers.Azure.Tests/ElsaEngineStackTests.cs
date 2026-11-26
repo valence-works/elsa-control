@@ -32,7 +32,7 @@ public sealed class ElsaEngineStackTests
         Assert.Equal(
             "engine-" + EngineTestConfig.InstanceId.ToString("N"),
             await stack.EngineName.GetValueAsync());
-        Assert.Equal("shared-container-environment", await stack.PlatformEnvironmentKind.GetValueAsync());
+        Assert.Equal("dedicated-container-environment", await stack.PlatformEnvironmentKind.GetValueAsync());
         Assert.Equal("ingress", await stack.EndpointKind.GetValueAsync());
         Assert.Equal("digest-pinned", await stack.ImageIdentityKind.GetValueAsync());
         Assert.Equal("disabled", await stack.HandoffKind.GetValueAsync());
@@ -40,10 +40,14 @@ public sealed class ElsaEngineStackTests
         Assert.Contains(resources, resource => resource is ResourceGroup);
         Assert.Contains(resources, resource => resource is UserAssignedIdentity);
         Assert.Contains(resources, resource => resource is Vault);
+        Assert.Contains(resources, resource => resource is Secret);
         Assert.Contains(resources, resource => resource is Server);
         Assert.Contains(resources, resource => resource is Database);
+        Assert.Contains(resources, resource => resource is ManagedEnvironment);
+        Assert.Contains(resources, resource => resource is Pulumi.AzureNative.OperationalInsights.Workspace);
         Assert.Contains(resources, resource => resource is ContainerApp);
         Assert.Contains(resources, resource => resource is RoleAssignment);
+        Assert.Equal(3, resources.OfType<Secret>().Count());
         var stackReference = resources.OfType<StackReference>().Single();
         Assert.Equal("organization/elsa-platform/staging", stackReference.GetResourceName());
     }
@@ -61,12 +65,37 @@ public sealed class ElsaEngineStackTests
     [Fact]
     public async Task Second_engine_does_not_create_a_platform_environment()
     {
-        var resources = await Run("engine-one");
-        Assert.DoesNotContain(resources, resource => resource is ManagedEnvironment);
+        var first = await Run("engine-one");
+        var second = await Run("engine-two");
+        Assert.Contains(first, resource => resource is ManagedEnvironment);
+        Assert.Contains(second, resource => resource is ManagedEnvironment);
+        Assert.Contains(first, resource => resource is Pulumi.AzureNative.OperationalInsights.Workspace);
+        Assert.Contains(second, resource => resource is Pulumi.AzureNative.OperationalInsights.Workspace);
         Assert.DoesNotContain(
-            resources,
+            first,
             resource => resource.GetResourceType().Contains("Registry", StringComparison.Ordinal)
                         && resource is not StackReference);
+    }
+
+    [Fact]
+    public async Task Fresh_create_seeds_vault_secrets_before_the_container_app()
+    {
+        var recorded = new List<string>();
+        using var config = PulumiTestConfig.Set(PulumiProjectNames.Engine, EngineTestConfig.Values());
+        var resources = await PulumiDeployment.TestAsync<ElsaEngineStack>(
+            new RecordingMocks(recorded),
+            new TestOptions
+            {
+                IsPreview = false,
+                ProjectName = PulumiProjectNames.Engine,
+                StackName = "engine-" + EngineTestConfig.InstanceId.ToString("N")
+            });
+        var secretIndex = recorded.FindIndex(type => type.Contains("Secret", StringComparison.Ordinal));
+        var appIndex = recorded.FindIndex(type => type.Contains("ContainerApp", StringComparison.Ordinal));
+        Assert.True(secretIndex >= 0);
+        Assert.True(appIndex > secretIndex);
+        Assert.Contains(resources, resource => resource is Secret);
+        Assert.Contains(resources, resource => resource is ContainerApp);
     }
 
     private static async Task<System.Collections.Immutable.ImmutableArray<Pulumi.Resource>> Run(string engineName)

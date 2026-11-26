@@ -20,8 +20,9 @@ public static class AzureProvisioningServiceCollectionExtensions
 
         var options = configuration.GetSection(ProvisioningOptions.ConfigurationSection).Get<ProvisioningOptions>()
                       ?? new ProvisioningOptions();
-        services.AddSingleton(new AzurePulumiAutomationRunner(options.PulumiOrganization));
+        services.AddSingleton(new AzurePulumiAutomationRunner(options.AllowFileBackend));
         services.AddSingleton<ICredentialResolver, AzureWorkloadIdentityCredentials>();
+        services.AddSingleton<IProvisioningSecretResolver, EmptyProvisioningSecretResolver>();
         services.AddSingleton<IPulumiAutomationClient, LocalPulumiAutomationClient>();
         services.AddSingleton<IResourceGroupAbsenceProbe, AzureArmResourceGroupAbsenceProbe>();
         services.AddSingleton<AzureInfrastructureProvider>();

@@ -18,5 +18,6 @@ public static class ProvisioningFailureCodes
     public const string Cancelled = "operation.cancelled";
     public const string Interrupted = "operation.interrupted";
     public const string ResourceGroupPresent = "azure.resource-group.present";
+    public const string ResourceGroupUnknown = "azure.resource-group.unknown";
     public const string FakeProviderForbidden = "provider.fake-forbidden";
 }

@@ -66,10 +66,10 @@ AWS, Google Cloud, and on-prem (Kubernetes, or Docker hosts) are added later as 
 
 | Project | What it is | Stacks |
 |---|---|---|
-| `elsa-platform` | Shared infrastructure: Container Apps environment, registry, networking | One stack per environment, for example `staging` and `production` |
-| `elsa-engine` | Everything that belongs to one customer engine: resource group, SQL, Key Vault, identities, the Container App, ingress | One stack per engine, named from the immutable managed-instance ID, for example `engine-{instanceId}` |
+| `elsa-platform` | Shared infrastructure: commercial registry reference | One stack per environment, for example `staging` and `production` |
+| `elsa-engine` | Everything that belongs to one Dedicated engine: resource group, SQL, Key Vault, identities, per-engine Container Apps environment, per-engine Log Analytics workspace, the Container App, ingress | One stack per engine, named from the immutable managed-instance ID, for example `engine-{instanceId}` |
 
-Each engine stack has its own config and its own state blob. Engine stacks read shared outputs from the environment's platform stack through a fully qualified `StackReference` (`organization/elsa-platform/{env}` on the Blob backend). They do not create a second environment or registry.
+Each engine stack has its own config and its own state blob. Dedicated isolation matches Bicep: each engine owns its Container Apps environment and Log Analytics workspace, both destroyed with the engine. Engine stacks read the shared registry from the environment's platform stack through a fully qualified `StackReference` (`organization/elsa-platform/{env}` on the Blob backend). They do not create a second registry. Queue, lock, and run tables live in Control's own SQL database under schema `provisioning`.
 
 Engine stack names derive only from the immutable managed-instance ID (`engine-{instanceId}`). Org and slug are tags or metadata, never the stack name, so `org/slug` and `org-slug` cannot fold onto one stack. A stack name is never renamed or reused. Control remains the source of lifecycle truth: admission, entitlements, idempotency keys, and leases one level above the module. The module owns run execution: its own queue and worker, and a lock keyed by `(project, stack)` over Pulumi's state lock. The Pulumi runner does not nest under the Bicep executor's lease. A held lock maps to `provider.stack.locked`, never a crash.
 
@@ -158,7 +158,7 @@ Rejected. State is in our Azure Blob backend, with locking.
 - Phase 2 (#1014) ports both programs to Bicep parity with the Automation API runner.
 - Interrupted `Running` / `Cancelling` operations fail closed (`operation.interrupted`) and release the module lock. They are not resumed: the provider may already have created resources.
 - Platform `StackReference` output keys are camelCase. DIY file/Blob stack references use the literal organization `organization`.
-- Secret *values* are still bootstrapped by Control's existing provider-secret phase, as with Bicep. The Pulumi program stores locators only.
+- Fresh engine creates seed Key Vault secrets and grant the runtime identity before the Container App references them. Secret *values* arrive as Pulumi secret config at run time, never in request stack config or in plaintext state. The SQL Entra admin is the governed bootstrap principal; the runtime identity is a contained database user (`db_datareader` / `db_datawriter` / `db_ddladmin`), matching Bicep. Dedicated engine databases stay on Standard S0 on purpose (serverless GP_S_Gen5 on always-on engines costs about 10x); aligning Bicep's SKU is a separate follow-up.
 - Phase 3 feeds engine events into the step ledger (#1015) and wires Hub controls (#1016).
 - Existing Bicep engines are imported or kept until recreate (#1017); mid-flight or Failed Bicep engines stay on the Bicep path.
 - Production cutover is a later, separately authorized phase.

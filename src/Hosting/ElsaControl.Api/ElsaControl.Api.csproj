@@ -10,6 +10,9 @@
     <ProjectReference Include="..\..\Deployment\ElsaControl.Deployment.Core\ElsaControl.Deployment.Core.csproj" />
     <ProjectReference Include="..\..\Deployment\ElsaControl.Deployment.Azure\ElsaControl.Deployment.Azure.csproj" />
     <ProjectReference Include="..\..\Provisioning\ElsaControl.Provisioning.Core\ElsaControl.Provisioning.Core.csproj" />
+    <ProjectReference Include="..\..\Provisioning\ElsaControl.Provisioning.Persistence.EntityFrameworkCore\ElsaControl.Provisioning.Persistence.EntityFrameworkCore.csproj" />
+    <ProjectReference Include="..\..\Provisioning\ElsaControl.Provisioning.Persistence.SqliteMigrations\ElsaControl.Provisioning.Persistence.SqliteMigrations.csproj" />
+    <ProjectReference Include="..\..\Provisioning\ElsaControl.Provisioning.Persistence.SqlServerMigrations\ElsaControl.Provisioning.Persistence.SqlServerMigrations.csproj" />
     <ProjectReference Include="..\..\Provisioning\ElsaControl.Provisioning.Providers.Azure\ElsaControl.Provisioning.Providers.Azure.csproj" />
     <ProjectReference Include="..\..\Deployment\ElsaControl.Deployment.Artifacts\ElsaControl.Deployment.Artifacts.csproj" />
     <ProjectReference Include="..\..\RuntimeBuilder\ElsaControl.RuntimeBuilder.Abstractions\ElsaControl.RuntimeBuilder.Abstractions.csproj" />

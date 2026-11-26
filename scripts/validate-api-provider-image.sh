@@ -63,6 +63,10 @@ if ! docker exec "$container_id" sh -ec '
   test -z "$locks"
   command -v pulumi >/dev/null
   pulumi version >/dev/null
+  test -x /usr/local/bin/pulumi-language-dotnet
+  test ! -e /usr/local/bin/pulumi-language-nodejs
+  test ! -e /usr/local/bin/pulumi-language-python
+  test -x /opt/pulumi/plugins/resource-azure-native-v3.11.0/pulumi-resource-azure-native
 ' >/dev/null 2>&1; then
   fail "application payload is missing the console, Pulumi CLI, or contains npm development artifacts"
 fi

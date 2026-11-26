@@ -84,15 +84,56 @@ internal sealed class PlatformStackReferenceMocks : IMocks
                 .Add("vaultUri", "https://vault.example/");
         }
 
+        if (args.Type is "azure-native:operationalinsights/workspace:Workspace"
+            or "azure-native:operationalinsights:Workspace")
+        {
+            outputs["customerId"] = "workspace-customer";
+        }
+
+        if (args.Type is "azure-native:app/managedEnvironment:ManagedEnvironment"
+            or "azure-native:app:ManagedEnvironment")
+        {
+            outputs["defaultDomain"] = "example.azurecontainerapps.io";
+        }
+
+        if (args.Type is "azure-native:sql/server:Server" or "azure-native:sql:Server")
+        {
+            outputs["fullyQualifiedDomainName"] = "sql.example";
+        }
+
         args.Id ??= $"{args.Name}_id";
         outputs["id"] = args.Id;
         outputs["principalId"] = "principal";
         outputs["tenantId"] = "tenant";
+        outputs["clientId"] = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
         return Task.FromResult<(string?, object)>((args.Id, outputs));
     }
 
-    public Task<object> CallAsync(MockCallArgs args) =>
-        Task.FromResult<object>(ImmutableDictionary<string, object>.Empty);
+    public Task<object> CallAsync(MockCallArgs args)
+    {
+        var token = args.Token ?? string.Empty;
+        if (token.Contains("getSharedKeys", StringComparison.OrdinalIgnoreCase)
+            || token.Contains("listKeys", StringComparison.OrdinalIgnoreCase))
+        {
+            return Task.FromResult<object>(ImmutableDictionary<string, object>.Empty
+                .Add("primarySharedKey", "not-a-real-key"));
+        }
+
+        return Task.FromResult<object>(ImmutableDictionary<string, object>.Empty);
+    }
+}
+
+internal sealed class RecordingMocks(List<string> types) : IMocks
+{
+    private readonly PlatformStackReferenceMocks _inner = new();
+
+    public async Task<(string? id, object state)> NewResourceAsync(MockResourceArgs args)
+    {
+        types.Add(args.Type ?? args.Name ?? "");
+        return await _inner.NewResourceAsync(args);
+    }
+
+    public Task<object> CallAsync(MockCallArgs args) => _inner.CallAsync(args);
 }
 
 internal sealed class PulumiTestConfig : IDisposable
@@ -153,7 +194,12 @@ internal static class EngineTestConfig
             ["memory"] = "1Gi",
             ["minReplicas"] = "0",
             ["maxReplicas"] = "1",
-            ["elsaVersion"] = "3.8"
+            ["elsaVersion"] = "3.8",
+            ["sqlBootstrapObjectId"] = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+            ["sqlBootstrapLogin"] = "elsa-control-bootstrap",
+            ["sqlConnectionSecretValue"] = "seeded-sql",
+            ["signingKeySecretValue"] = "seeded-signing",
+            ["adminPasswordSecretValue"] = "seeded-admin"
         };
 
     public static Dictionary<string, string> Platform(string environmentName = "staging") =>

@@ -47,11 +47,23 @@ public static partial class ProvisioningEventSanitizer
     /// Stack config may include an admitted image repository host. It must
     /// never include secret values, subscription paths, or resource IDs.
     /// </summary>
-    public static bool ContainsSecretOrResourceIdentifier(string value) =>
-        SubscriptionPath().IsMatch(value)
-        || ResourceIdentifier().IsMatch(value)
-        || SecretToken().IsMatch(value)
-        || UrlCredential().IsMatch(value);
+    public static bool ContainsSecretOrResourceIdentifier(string value)
+    {
+        if (IsSecretLocator(value))
+            return false;
+        return SubscriptionPath().IsMatch(value)
+               || ResourceIdentifier().IsMatch(value)
+               || SecretToken().IsMatch(value)
+               || UrlCredential().IsMatch(value);
+    }
+
+    /// <summary>
+    /// <c>secret://name/secret</c> locators are not secret values.
+    /// </summary>
+    public static bool IsSecretLocator(string value) =>
+        value.StartsWith("secret://", StringComparison.OrdinalIgnoreCase)
+        && !value.Contains('=', StringComparison.Ordinal)
+        && !UrlCredential().IsMatch(value);
 
     [GeneratedRegex(@"subscriptions[/\\]", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex SubscriptionPath();
@@ -62,7 +74,7 @@ public static partial class ProvisioningEventSanitizer
     [GeneratedRegex(@"https?://|[\w.-]+\.(azurewebsites|blob\.core|vault\.azure|azurecr)\.", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex Endpoint();
 
-    [GeneratedRegex(@"password|connection string|accountkey|sharedaccesssignature|secret=|secret:", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"password|connection string|accountkey|sharedaccesssignature|secret=", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex SecretToken();
 
     [GeneratedRegex(@"[?&]sig=|://[^/\s?#]+@", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]

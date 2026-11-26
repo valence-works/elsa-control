@@ -5,6 +5,7 @@
 
   <ItemGroup>
     <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" />
     <PackageReference Include="Microsoft.Extensions.Configuration" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
@@ -14,6 +15,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\..\src\Provisioning\ElsaControl.Provisioning.Core\ElsaControl.Provisioning.Core.csproj" />
+    <ProjectReference Include="..\..\..\src\Provisioning\ElsaControl.Provisioning.Persistence.EntityFrameworkCore\ElsaControl.Provisioning.Persistence.EntityFrameworkCore.csproj" />
   </ItemGroup>
 
   <ItemGroup>

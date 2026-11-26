@@ -6,6 +6,20 @@ namespace ElsaControl.Provisioning.Core.Tests;
 public sealed class ProvisioningServiceTests
 {
     [Fact]
+    public async Task Engine_stack_names_that_are_not_engine_guid_are_rejected()
+    {
+        var store = new InMemoryProvisioningStore();
+        var service = new ProvisioningService(store, store);
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.ProvisionAsync(ProvisioningFixtures.Request(
+                ProvisioningCommand.Provision,
+                ProvisioningFixtures.EngineTarget("acme-one"),
+                ProvisioningFixtures.EngineSpec(),
+                "bad-engine-name")));
+        Assert.Equal("Engine stack names must be engine-{instanceId}.", error.Message);
+    }
+
+    [Fact]
     public async Task Provision_enqueues_and_does_not_run_on_the_request_thread()
     {
         var store = new InMemoryProvisioningStore();
@@ -47,27 +61,33 @@ public sealed class ProvisioningServiceTests
 
         await service.ProvisionAsync(ProvisioningFixtures.Request(
             ProvisioningCommand.Provision,
-            ProvisioningFixtures.EngineTarget("acme-one"),
+            ProvisioningFixtures.EngineTarget(ProvisioningFixtures.EngineName(ProvisioningFixtures.EngineA)),
             ProvisioningFixtures.EngineSpec(),
             "svc-engine-one",
-            new Dictionary<string, string>(StringComparer.Ordinal) { ["engineName"] = "acme-one" }));
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["engineName"] = ProvisioningFixtures.EngineName(ProvisioningFixtures.EngineA)
+            }));
         await worker.ProcessOnceAsync();
         await service.ProvisionAsync(ProvisioningFixtures.Request(
             ProvisioningCommand.Provision,
-            ProvisioningFixtures.EngineTarget("acme-two"),
+            ProvisioningFixtures.EngineTarget(ProvisioningFixtures.EngineName(ProvisioningFixtures.EngineB)),
             ProvisioningFixtures.EngineSpec(),
             "svc-engine-two",
-            new Dictionary<string, string>(StringComparer.Ordinal) { ["engineName"] = "acme-two" }));
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["engineName"] = ProvisioningFixtures.EngineName(ProvisioningFixtures.EngineB)
+            }));
         await worker.ProcessOnceAsync();
 
-        var one = provider.GetOutputs("acme-one");
-        var two = provider.GetOutputs("acme-two");
+        var one = provider.GetOutputs(ProvisioningFixtures.EngineName(ProvisioningFixtures.EngineA));
+        var two = provider.GetOutputs(ProvisioningFixtures.EngineName(ProvisioningFixtures.EngineB));
         Assert.NotNull(one);
         Assert.NotNull(two);
         Assert.Equal("shared-container-environment", one!["platformEnvironmentKind"]);
         Assert.Equal("shared-container-environment", two!["platformEnvironmentKind"]);
-        Assert.Equal("acme-one", one["config.engineName"]);
-        Assert.Equal("acme-two", two["config.engineName"]);
+        Assert.Equal(ProvisioningFixtures.EngineName(ProvisioningFixtures.EngineA), one["config.engineName"]);
+        Assert.Equal(ProvisioningFixtures.EngineName(ProvisioningFixtures.EngineB), two["config.engineName"]);
         Assert.NotEqual(one["config.engineName"], two["config.engineName"]);
     }
 
@@ -89,7 +109,7 @@ public sealed class ProvisioningServiceTests
 
         var preview = await service.PreviewAsync(ProvisioningFixtures.Request(
             ProvisioningCommand.Preview,
-            ProvisioningFixtures.EngineTarget("round-engine"),
+            ProvisioningFixtures.EngineTarget(),
             ProvisioningFixtures.EngineSpec(),
             "round-preview"));
         await worker.ProcessOnceAsync();
@@ -97,15 +117,15 @@ public sealed class ProvisioningServiceTests
 
         var provision = await service.ProvisionAsync(ProvisioningFixtures.Request(
             ProvisioningCommand.Provision,
-            ProvisioningFixtures.EngineTarget("round-engine"),
+            ProvisioningFixtures.EngineTarget(),
             ProvisioningFixtures.EngineSpec(),
             "round-provision"));
         await worker.ProcessOnceAsync();
-        Assert.True(provider.StackExists("round-engine"));
+        Assert.True(provider.StackExists(ProvisioningFixtures.EngineName()));
 
         var refresh = await service.RefreshAsync(ProvisioningFixtures.Request(
             ProvisioningCommand.Refresh,
-            ProvisioningFixtures.EngineTarget("round-engine"),
+            ProvisioningFixtures.EngineTarget(),
             ProvisioningFixtures.EngineSpec(),
             "round-refresh"));
         await worker.ProcessOnceAsync();
@@ -113,13 +133,13 @@ public sealed class ProvisioningServiceTests
 
         var destroy = await service.DestroyAsync(ProvisioningFixtures.Request(
             ProvisioningCommand.Destroy,
-            ProvisioningFixtures.EngineTarget("round-engine"),
+            ProvisioningFixtures.EngineTarget(),
             ProvisioningFixtures.EngineSpec(),
             "round-destroy"));
         await worker.ProcessOnceAsync();
         var destroyed = await service.GetOperationAsync(destroy.OperationId);
         Assert.Equal(ProvisioningOperationState.Succeeded, destroyed!.State);
-        Assert.False(provider.StackExists("round-engine"));
+        Assert.False(provider.StackExists(ProvisioningFixtures.EngineName()));
         Assert.NotEqual(preview.OperationId, provision.OperationId);
         Assert.NotEqual(provision.OperationId, destroy.OperationId);
     }
@@ -193,16 +213,19 @@ public sealed class ProvisioningServiceTests
         await worker.ProcessOnceAsync();
         await service.ProvisionAsync(ProvisioningFixtures.Request(
             ProvisioningCommand.Provision,
-            ProvisioningFixtures.EngineTarget("cancel-engine"),
+            ProvisioningFixtures.EngineTarget(),
             ProvisioningFixtures.EngineSpec(),
             "cancel-provision",
-            new Dictionary<string, string>(StringComparer.Ordinal) { ["engineName"] = "cancel-engine" }));
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["engineName"] = ProvisioningFixtures.EngineName()
+            }));
         await worker.ProcessOnceAsync();
-        Assert.True(provider.StackExists("cancel-engine"));
+        Assert.True(provider.StackExists(ProvisioningFixtures.EngineName()));
 
         var cancel = await service.CancelAsync(ProvisioningFixtures.Request(
             ProvisioningCommand.Cancel,
-            ProvisioningFixtures.EngineTarget("cancel-engine"),
+            ProvisioningFixtures.EngineTarget(),
             ProvisioningFixtures.EngineSpec(),
             "cancel-run"));
         Assert.Equal(ProvisioningOperationState.Queued, cancel.State);
@@ -211,7 +234,7 @@ public sealed class ProvisioningServiceTests
         var completed = await service.GetOperationAsync(cancel.OperationId);
         Assert.Equal(ProvisioningOperationState.Succeeded, completed!.State);
         Assert.Equal(ProvisioningFailureCodes.NothingToCancel, completed.FailureCode);
-        Assert.True(provider.StackExists("cancel-engine"));
+        Assert.True(provider.StackExists(ProvisioningFixtures.EngineName()));
         var cancelEvents = await service.ListEventsAsync(cancel.OperationId);
         Assert.Contains(cancelEvents, value => value.Kind == ProvisioningEventKind.OperationSucceeded);
         foreach (var value in cancelEvents)
@@ -267,7 +290,7 @@ public sealed class ProvisioningServiceTests
 
         var engine = await service.ProvisionAsync(ProvisioningFixtures.Request(
             ProvisioningCommand.Provision,
-            ProvisioningFixtures.EngineTarget("staging"),
+            ProvisioningFixtures.EngineTarget(),
             ProvisioningFixtures.EngineSpec(),
             "lock-engine-staging"));
         Assert.False(engine.LockConflict);

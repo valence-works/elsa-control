@@ -687,26 +687,21 @@ class ApiInfrastructureTests(unittest.TestCase):
         )
 
     def test_forwarded_headers_come_only_from_the_application(self) -> None:
-        # Program.cs owns ForwardedHeadersOptions (#859); neither the Control API module
-        # nor Control API source may set the host-level switch. Engine runtimes keep the
-        # Bicep parity setting in container-app.bicep / ElsaEngineStack.
+        # Program.cs owns ForwardedHeadersOptions (#859). The host-level switch is
+        # allowed only in the dedicated engine program (Bicep parity).
         self.assertNotIn("ASPNETCORE_FORWARDEDHEADERS_ENABLED", API_MODULE.read_text())
         self.assertIn("ASPNETCORE_FORWARDEDHEADERS_ENABLED", self.generated_api_module())
-        api_roots = (
-            ROOT / "src" / "Hosting" / "ElsaControl.Api",
-            ROOT / "src" / "Hosting" / "ElsaControl.AppHost",
-        )
-        api_sources = [
-            path
-            for root in api_roots
-            for path in root.rglob("*")
+        engine_program = ROOT / "src" / "Provisioning" / "ElsaControl.Provisioning.Providers.Azure" / "Pulumi" / "ElsaEngineStack.cs"
+        offenders = [
+            str(path)
+            for path in (ROOT / "src").rglob("*")
             if path.is_file()
             and path.suffix in {".cs", ".json", ".bicep", ".bicepparam"}
+            and path.resolve() != engine_program.resolve()
             and not {"bin", "obj"}.intersection(path.parts)
+            and "ASPNETCORE_FORWARDEDHEADERS_ENABLED" in path.read_text(errors="ignore")
         ]
-        self.assertFalse(
-            [str(path) for path in api_sources if "ASPNETCORE_FORWARDEDHEADERS_ENABLED" in path.read_text(errors="ignore")]
-        )
+        self.assertFalse(offenders)
         program = (ROOT / "src" / "Hosting" / "ElsaControl.Api" / "Program.cs").read_text()
         self.assertIn("ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto", program)
         self.assertIn("options.ForwardLimit = 1;", program)

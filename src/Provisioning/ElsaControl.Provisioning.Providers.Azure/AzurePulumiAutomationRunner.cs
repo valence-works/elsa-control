@@ -1,4 +1,5 @@
 using ElsaControl.Provisioning.Abstractions;
+using ElsaControl.Provisioning.Core;
 using ElsaControl.Provisioning.Providers.Azure.Programs;
 using Pulumi.Automation;
 
@@ -12,14 +13,12 @@ public sealed class AzurePulumiAutomationRunner
 {
     public const string ProviderId = "azure";
 
-    public AzurePulumiAutomationRunner(string? pulumiOrganization = null)
+    public AzurePulumiAutomationRunner(bool allowFileBackend = false)
     {
-        PulumiOrganization = string.IsNullOrWhiteSpace(pulumiOrganization)
-            ? PulumiStackReferenceName.DefaultOrganization
-            : pulumiOrganization.Trim();
+        AllowFileBackend = allowFileBackend;
     }
 
-    public string PulumiOrganization { get; }
+    public bool AllowFileBackend { get; }
 
     public PulumiFn CreateProgram(ProvisioningStackKind stackKind) =>
         stackKind switch
@@ -40,7 +39,8 @@ public sealed class AzurePulumiAutomationRunner
     public PulumiWorkspaceConfiguration CreateWorkspace(
         ProvisioningTarget target,
         IReadOnlyDictionary<string, string> stackConfig,
-        IReadOnlyDictionary<string, string> credentialEnvironment)
+        IReadOnlyDictionary<string, string> credentialEnvironment,
+        IReadOnlyDictionary<string, string>? secretStackConfig = null)
     {
         ArgumentNullException.ThrowIfNull(target);
         ArgumentNullException.ThrowIfNull(stackConfig);
@@ -76,14 +76,21 @@ public sealed class AzurePulumiAutomationRunner
             backendUrl,
             secretsUrl,
             environment,
-            config);
+            config,
+            secretStackConfig);
     }
 
-    private static (string BackendUrl, IReadOnlyDictionary<string, string> Environment, string SecretsUrl)
+    private (string BackendUrl, IReadOnlyDictionary<string, string> Environment, string SecretsUrl)
         ResolveBackend(ProvisioningTarget target)
     {
         if (string.Equals(target.StateBackend.Kind, StateBackendReference.FileKind, StringComparison.Ordinal))
         {
+            if (!AllowFileBackend)
+            {
+                throw new InvalidOperationException(
+                    "File and passphrase Pulumi backends are test-only.");
+            }
+
             var file = FileStateBackend.From(target.StateBackend);
             return (file.BackendUrl, file.EnvironmentVariables, "passphrase");
         }

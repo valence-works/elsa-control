@@ -51,6 +51,15 @@ public static class AzureEngineProgramPolicy
             throw new InvalidOperationException("Plan fingerprint is invalid.");
 
         Require(config, "platformStack", out _);
+        Require(config, "sqlBootstrapObjectId", out var bootstrapObjectId);
+        if (!Guid.TryParse(bootstrapObjectId, out var bootstrap) || bootstrap == Guid.Empty)
+            throw new InvalidOperationException("SQL bootstrap identity is invalid.");
+        Require(config, "sqlBootstrapLogin", out var bootstrapLogin);
+        if (bootstrapLogin.Length > 128)
+            throw new InvalidOperationException("SQL bootstrap login is invalid.");
+        Require(config, "sqlConnectionSecretValue", out _);
+        Require(config, "signingKeySecretValue", out _);
+        Require(config, "adminPasswordSecretValue", out _);
 
         var revisionSuffix = Get(config, "revisionSuffix");
         if (!string.IsNullOrWhiteSpace(revisionSuffix))

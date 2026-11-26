@@ -12,6 +12,7 @@ using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.Deployment.Core.Telemetry;
 using ElsaControl.Deployment.Core.Provisioning;
 using ElsaControl.Provisioning.Core;
+using ElsaControl.Provisioning.Persistence.EntityFrameworkCore;
 using ElsaControl.Provisioning.Providers.Azure;
 using ElsaControl.Deployment.Core.Workspace;
 using ElsaControl.Deployment.Azure;
@@ -694,7 +695,16 @@ builder.Services.AddProvisioning(
     allowFakeProvider: provisioningTesting);
 var provisioningWorkerEnabled = builder.Configuration.GetValue("Provisioning:WorkerEnabled", false);
 if (provisioningWorkerEnabled && !provisioningTesting)
+{
+    if (!ProvisioningPersistenceServiceCollectionExtensions.TryGetCatalogStore(builder.Configuration, out _, out _))
+    {
+        throw new InvalidOperationException(
+            "Provisioning worker is enabled but no durable store is configured.");
+    }
+
+    builder.Services.AddProvisioningPersistence(builder.Configuration);
     builder.Services.AddAzureProvisioning(builder.Configuration);
+}
 var webhookDispatchEnabled = builder.Configuration.GetValue("Deployment:WebhookDispatch:Enabled", false);
 if (webhookDispatchEnabled && !builder.Environment.IsEnvironment("Testing"))
     builder.Services.AddHostedService<DeploymentWebhookDispatchHostedService>();
@@ -761,6 +771,12 @@ if (!app.Environment.IsEnvironment("Testing"))
     await using var scope = app.Services.CreateAsyncScope();
     var dbContext = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
     await dbContext.Database.MigrateAsync();
+    if (provisioningWorkerEnabled)
+    {
+        var factory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ProvisioningDbContext>>();
+        await using var provisioning = await factory.CreateDbContextAsync();
+        await provisioning.Database.MigrateAsync();
+    }
 }
 
 app.UseForwardedHeaders();

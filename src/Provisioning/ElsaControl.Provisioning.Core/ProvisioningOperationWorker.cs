@@ -1,5 +1,7 @@
 using ElsaControl.Provisioning.Abstractions;
 using ElsaControl.Provisioning.Core.Stores;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ElsaControl.Provisioning.Core;
 
@@ -12,10 +14,12 @@ public sealed class ProvisioningOperationWorker(
     IProvisioningEventStore events,
     IInfrastructureProvider provider,
     ProvisioningRunRegistry? runs = null,
-    TimeProvider? timeProvider = null)
+    TimeProvider? timeProvider = null,
+    ILogger<ProvisioningOperationWorker>? logger = null)
 {
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
     private readonly ProvisioningRunRegistry _runs = runs ?? new ProvisioningRunRegistry();
+    private readonly ILogger<ProvisioningOperationWorker> _logger = logger ?? NullLogger<ProvisioningOperationWorker>.Instance;
 
     public async Task<int> ProcessOnceAsync(int batchSize = 10, CancellationToken cancellationToken = default)
     {
@@ -121,8 +125,12 @@ public sealed class ProvisioningOperationWorker(
             {
                 await CompleteCancelledAsync(claimed, cancellationToken).ConfigureAwait(false);
             }
-            catch (Exception)
+            catch (Exception exception)
             {
+                _logger.LogError(
+                    "Provisioning provider failed. OperationId={OperationId} ExceptionType={ExceptionType}",
+                    claimed.Id,
+                    exception.GetType().FullName);
                 await FailAsync(claimed, ProvisioningFailureCodes.ProviderFailed, cancellationToken).ConfigureAwait(false);
             }
         }
@@ -138,6 +146,24 @@ public sealed class ProvisioningOperationWorker(
             .ConfigureAwait(false);
         foreach (var operation in interrupted)
         {
+            var request = await operations.GetRequestAsync(operation.Id, CancellationToken.None)
+                .ConfigureAwait(false);
+            if (request is not null)
+            {
+                try
+                {
+                    await provider.CancelAsync(operation, request, CancellationToken.None)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception exception)
+                {
+                    _logger.LogError(
+                        "Provisioning state-lock release failed. OperationId={OperationId} ExceptionType={ExceptionType}",
+                        operation.Id,
+                        exception.GetType().FullName);
+                }
+            }
+
             await events.AppendAsync(
                 [
                     new ProvisioningEvent(

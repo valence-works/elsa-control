@@ -43,6 +43,11 @@ public sealed class ProvisioningEventSanitizerTests
             "valenceruntimeimages.azurecr.io/runtime-combined"));
 
     [Fact]
+    public void Secret_locators_are_admitted() =>
+        Assert.False(ProvisioningEventSanitizer.ContainsSecretOrResourceIdentifier(
+            "secret://vault/database-connection"));
+
+    [Fact]
     public void Capability_kind_secrets_is_not_treated_as_a_secret_value()
     {
         var sanitised = ProvisioningEventSanitizer.Sanitize(

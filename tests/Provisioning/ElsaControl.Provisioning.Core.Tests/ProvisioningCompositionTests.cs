@@ -84,25 +84,46 @@ public sealed class ProvisioningCompositionTests
     }
 
     [Fact]
-    public void Durable_store_is_used_when_a_store_path_is_configured()
+    public async Task Guard_refuses_to_start_when_the_flag_is_on_without_a_durable_store()
     {
-        var path = Path.Combine(Path.GetTempPath(), $"elsa-provisioning-{Guid.NewGuid():N}.sqlite");
-        try
-        {
-            var services = new ServiceCollection();
-            services.AddProvisioning(
-                Configuration(
-                    ("Provisioning:WorkerEnabled", "false"),
-                    ("Provisioning:StorePath", path)),
-                runWorker: false);
-            using var provider = services.BuildServiceProvider();
-            Assert.IsType<Stores.SqliteProvisioningStore>(provider.GetRequiredService<Stores.IProvisioningOperationStore>());
-        }
-        finally
-        {
-            if (File.Exists(path))
-                File.Delete(path);
-        }
+        var services = new ServiceCollection();
+        services.AddProvisioning(
+            Configuration(("Provisioning:WorkerEnabled", "true")),
+            runWorker: true,
+            allowFakeProvider: false);
+        services.AddSingleton<IInfrastructureProvider>(new UnconfiguredInfrastructureProvider());
+        using var provider = services.BuildServiceProvider();
+        // Replace the unconfigured provider with a stand-in that is not fake, still no durable store.
+        var guard = new ProvisioningProviderGuard(
+            new AzureStandIn(),
+            provider.GetRequiredService<Stores.IProvisioningOperationStore>(),
+            Microsoft.Extensions.Options.Options.Create(new ProvisioningOptions
+            {
+                WorkerEnabled = true,
+                AllowFakeProvider = false
+            }));
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            guard.StartAsync(CancellationToken.None));
+        Assert.Equal("Provisioning worker is enabled but no durable store is configured.", error.Message);
+    }
+
+    private sealed class AzureStandIn : IInfrastructureProvider
+    {
+        public string ProviderId => "azure";
+        public IReadOnlySet<string> Capabilities { get; } = new HashSet<string>(StringComparer.Ordinal);
+
+        public Task<ProviderRunResult> PreviewAsync(ProvisioningOperation operation, ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+        public Task<ProviderRunResult> ProvisionAsync(ProvisioningOperation operation, ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+        public Task<ProviderRunResult> UpdateAsync(ProvisioningOperation operation, ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+        public Task<ProviderRunResult> RefreshAsync(ProvisioningOperation operation, ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+        public Task<ProviderRunResult> CancelAsync(ProvisioningOperation operation, ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+        public Task<ProviderRunResult> DestroyAsync(ProvisioningOperation operation, ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
     }
 
     private static IConfiguration Configuration(params (string Key, string Value)[] values) =>

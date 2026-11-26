@@ -38,7 +38,7 @@
     <PackageVersion Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.10" />
     <PackageVersion Include="Microsoft.Extensions.Caching.Memory" Version="10.0.7" />
     <PackageVersion Include="Microsoft.Extensions.Http.Resilience" Version="10.5.0" />
-    <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.8" />
+    <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.10" />
     <PackageVersion Include="Microsoft.Extensions.Options" Version="10.0.10" />
     <PackageVersion Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="10.0.10" />
     <PackageVersion Include="Microsoft.Extensions.ServiceDiscovery" Version="10.5.0" />
@@ -63,6 +63,7 @@
     <PackageVersion Include="OpenTelemetry.Instrumentation.Http" Version="1.15.1" />
     <PackageVersion Include="OpenTelemetry.Instrumentation.Runtime" Version="1.15.1" />
     <PackageVersion Include="System.IdentityModel.Tokens.Jwt" Version="8.16.0" />
+    <PackageVersion Include="Microsoft.Data.SqlClient" Version="6.1.3" />
     <PackageVersion Include="Microsoft.Data.Sqlite" Version="10.0.10" />
     <PackageVersion Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.13" />
     <PackageVersion Include="System.Reflection.MetadataLoadContext" Version="10.0.1" />
@@ -70,6 +71,8 @@
     <!-- Keep patched Pkcs on each dependency graph's existing major line. -->
     <PackageVersion Include="System.Security.Cryptography.Pkcs" Version="8.0.2" Condition="'$(MSBuildProjectName)' == 'ElsaControl.PackageCatalog.Sources.NuGet'" />
     <PackageVersion Include="System.Security.Cryptography.Pkcs" Version="9.0.21" Condition="'$(MSBuildProjectName)' == 'ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore'" />
+    <PackageVersion Include="System.Security.Cryptography.Pkcs" Version="9.0.21" Condition="'$(MSBuildProjectName)' == 'ElsaControl.Provisioning.Persistence.EntityFrameworkCore'" />
+    <PackageVersion Include="System.Security.Cryptography.Pkcs" Version="9.0.21" Condition="'$(MSBuildProjectName)' == 'ElsaControl.Provisioning.Providers.Azure'" />
     <PackageVersion Include="System.Security.Cryptography.Pkcs" Version="10.0.13" Condition="'$(MSBuildProjectName)' == 'ElsaControl.AppHost'" />
     <PackageVersion Include="xunit" Version="2.9.3" />
     <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.4" />

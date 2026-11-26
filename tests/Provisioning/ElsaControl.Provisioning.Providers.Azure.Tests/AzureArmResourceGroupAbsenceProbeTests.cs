@@ -7,9 +7,19 @@ public sealed class AzureArmResourceGroupAbsenceProbeTests
     [Fact]
     public void Status_mapping_is_value_free()
     {
-        Assert.Equal(ResourceGroupPresence.Absent, AzureArmResourceGroupAbsenceProbe.MapStatus(HttpStatusCode.NotFound));
-        Assert.Equal(ResourceGroupPresence.Present, AzureArmResourceGroupAbsenceProbe.MapStatus(HttpStatusCode.OK));
-        Assert.Equal(ResourceGroupPresence.Unknown, AzureArmResourceGroupAbsenceProbe.MapStatus(HttpStatusCode.Forbidden));
+        Assert.Equal(
+            ResourceGroupPresence.Absent,
+            AzureArmResourceGroupAbsenceProbe.MapResponse(
+                HttpStatusCode.NotFound,
+                """{"error":{"code":"ResourceGroupNotFound"}}"""));
+        Assert.Equal(ResourceGroupPresence.Present, AzureArmResourceGroupAbsenceProbe.MapResponse(HttpStatusCode.OK, "{}"));
+        Assert.Equal(ResourceGroupPresence.Unknown, AzureArmResourceGroupAbsenceProbe.MapResponse(HttpStatusCode.Forbidden, "{}"));
+        Assert.Equal(
+            ResourceGroupPresence.Unknown,
+            AzureArmResourceGroupAbsenceProbe.MapResponse(HttpStatusCode.NotFound, """{"error":{"code":"SubscriptionNotFound"}}"""));
+        Assert.Equal(
+            ResourceGroupPresence.Unknown,
+            AzureArmResourceGroupAbsenceProbe.MapResponse(HttpStatusCode.NotFound, "{}"));
     }
 
     [Fact]
@@ -44,10 +54,13 @@ public sealed class AzureArmResourceGroupAbsenceProbeTests
         {
             Assert.Equal(HttpMethod.Get, request.Method);
             Assert.Equal("Bearer", request.Headers.Authorization?.Scheme);
+            var body = statusCode == HttpStatusCode.NotFound
+                ? """{"error":{"code":"ResourceGroupNotFound"}}"""
+                : "{}";
             return Task.FromResult(new HttpResponseMessage(statusCode)
             {
                 RequestMessage = request,
-                Content = new StringContent("{}")
+                Content = new StringContent(body)
             });
         }
     }

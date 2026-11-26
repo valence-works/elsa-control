@@ -29,14 +29,12 @@ public sealed class ElsaPlatformStackTests
 
         var stack = resources.OfType<ElsaPlatformStack>().Single();
         Assert.Equal("staging", await stack.EnvironmentName.GetValueAsync());
-        Assert.Equal("shared-environment", await stack.ContainerEnvironmentKind.GetValueAsync());
         Assert.Equal("shared-registry", await stack.RegistryKind.GetValueAsync());
         Assert.Equal("runtimeimages", await stack.RegistryName.GetValueAsync());
-        Assert.Equal("example.azurecontainerapps.io", await stack.ContainerEnvironmentDefaultDomain.GetValueAsync());
         Assert.Contains(resources, resource => resource is ResourceGroup);
-        Assert.Contains(resources, resource => resource is Workspace);
-        Assert.Contains(resources, resource => resource is ManagedEnvironment);
-        Assert.Contains(resources, resource => resource is DiagnosticSetting);
+        Assert.DoesNotContain(resources, resource => resource is Workspace);
+        Assert.DoesNotContain(resources, resource => resource is ManagedEnvironment);
+        Assert.DoesNotContain(resources, resource => resource is DiagnosticSetting);
         Assert.DoesNotContain(
             resources,
             resource => resource.GetResourceType().Contains("Registry", StringComparison.OrdinalIgnoreCase)
@@ -56,8 +54,8 @@ public sealed class ElsaPlatformStackTests
         }
 
         Assert.Equal(
-            PulumiStackOutputs.ContainerEnvironmentId,
-            typeof(ElsaPlatformStack).GetProperty(nameof(ElsaPlatformStack.ContainerEnvironmentId))!
+            PulumiStackOutputs.RegistryId,
+            typeof(ElsaPlatformStack).GetProperty(nameof(ElsaPlatformStack.RegistryId))!
                 .GetCustomAttribute<OutputAttribute>()!.Name);
     }
 }

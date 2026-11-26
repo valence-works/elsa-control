@@ -1,15 +1,11 @@
 using System.Collections.Concurrent;
-using System.Security.Cryptography;
-using System.Text;
-using System.Text.Json;
 using ElsaControl.Provisioning.Abstractions;
 
 namespace ElsaControl.Provisioning.Core.Stores;
 
 /// <summary>
-/// Module-owned tables in process. Request envelopes live here, not in a
-/// static buffer. Durable SQLite is used when a store path is configured.
-/// Locks are keyed by (project, stack).
+/// Module-owned tables in process. Tests only. Production uses the EF store
+/// on Control's catalog SQL database. Locks are keyed by (project, stack).
 /// </summary>
 public sealed class InMemoryProvisioningStore :
     IProvisioningOperationStore,
@@ -304,27 +300,8 @@ public sealed class InMemoryProvisioningStore :
         return failed;
     }
 
-    public static string HashRequest(ProvisioningRequest request)
-    {
-        ArgumentNullException.ThrowIfNull(request);
-        var payload = JsonSerializer.Serialize(new
-        {
-            request.Command,
-            request.Target.ProviderId,
-            request.Target.StackKind,
-            Project = ProvisioningProjects.For(request.Target.StackKind),
-            StackName = StackName(request),
-            request.Target.PlatformStackName,
-            request.Spec.RuntimeImage,
-            Capabilities = request.Spec.RequiredCapabilities.Order(StringComparer.Ordinal),
-            request.Spec.DatabaseKind,
-            request.Spec.SecretsKind,
-            request.Spec.EndpointKind,
-            request.Spec.ScaleKind,
-            Config = request.StackConfig.OrderBy(pair => pair.Key, StringComparer.Ordinal)
-        });
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload)));
-    }
+    public static string HashRequest(ProvisioningRequest request) =>
+        ProvisioningRequestHash.Compute(request);
 
     private static string StackName(ProvisioningRequest request) =>
         ProvisioningStackName.Canonicalize(request.Target.StackName);

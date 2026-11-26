@@ -1,5 +1,7 @@
 using System.Collections.Immutable;
 using ElsaControl.Provisioning.Abstractions;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Pulumi.Automation;
 using Pulumi.Automation.Commands.Exceptions;
 
@@ -9,8 +11,12 @@ namespace ElsaControl.Provisioning.Providers.Azure;
 /// Automation API client. Uses the pinned CLI in the host image. Tests that
 /// must not require the CLI inject a different <see cref="IPulumiAutomationClient"/>.
 /// </summary>
-public sealed class LocalPulumiAutomationClient : IPulumiAutomationClient
+public sealed class LocalPulumiAutomationClient(ILogger<LocalPulumiAutomationClient>? logger = null)
+    : IPulumiAutomationClient
 {
+    private readonly ILogger<LocalPulumiAutomationClient> _logger =
+        logger ?? NullLogger<LocalPulumiAutomationClient>.Instance;
+
     public async Task<ProviderRunResult> RunAsync(
         ProvisioningCommand command,
         ProvisioningOperation operation,
@@ -41,6 +47,15 @@ public sealed class LocalPulumiAutomationClient : IPulumiAutomationClient
                     .ConfigureAwait(false);
             }
 
+            if (workspace.SecretStackConfig is not null)
+            {
+                foreach (var pair in workspace.SecretStackConfig)
+                {
+                    await stack.SetConfigAsync(pair.Key, new ConfigValue(pair.Value, isSecret: true), cancellationToken)
+                        .ConfigureAwait(false);
+                }
+            }
+
             var events = new List<ProvisioningEvent>();
             void OnEvent(Pulumi.Automation.Events.EngineEvent engineEvent)
             {
@@ -64,12 +79,26 @@ public sealed class LocalPulumiAutomationClient : IPulumiAutomationClient
                     await stack.RefreshAsync(new RefreshOptions { OnEvent = OnEvent }, cancellationToken)
                         .ConfigureAwait(false);
                     break;
+                case ProvisioningCommand.Cancel:
+                    await stack.CancelAsync(cancellationToken).ConfigureAwait(false);
+                    break;
                 case ProvisioningCommand.Destroy:
                     await stack.DestroyAsync(new DestroyOptions { OnEvent = OnEvent }, cancellationToken)
                         .ConfigureAwait(false);
                     break;
                 default:
                     return ProviderRunResult.Fail([], ProvisioningFailureCodes.NotImplemented);
+            }
+
+            if (command == ProvisioningCommand.Cancel)
+            {
+                var cancelled = new ProvisioningEvent(
+                    operation.Id,
+                    ProvisioningEventKind.OperationCancelled,
+                    ProvisioningCapability.ContainerRuntime,
+                    "Update cancelled.",
+                    DateTimeOffset.UtcNow);
+                return ProviderRunResult.Ok([cancelled]);
             }
 
             if (events.Count == 0)
@@ -90,8 +119,22 @@ public sealed class LocalPulumiAutomationClient : IPulumiAutomationClient
         {
             throw;
         }
-        catch (ConcurrentUpdateException)
+        catch (Exception exception) when (IsNothingToCancel(exception, command))
         {
+            var nothing = new ProvisioningEvent(
+                operation.Id,
+                ProvisioningEventKind.OperationCancelled,
+                ProvisioningCapability.ContainerRuntime,
+                "Nothing to cancel.",
+                DateTimeOffset.UtcNow);
+            return new ProviderRunResult(true, [nothing], failureCode: ProvisioningFailureCodes.NothingToCancel);
+        }
+        catch (Exception exception) when (IsLockConflict(exception))
+        {
+            _logger.LogError(
+                "Provisioning stack lock conflict. OperationId={OperationId} ExceptionType={ExceptionType}",
+                operation.Id,
+                exception.GetType().FullName);
             var locked = new ProvisioningEvent(
                 operation.Id,
                 ProvisioningEventKind.LockConflicted,
@@ -100,8 +143,12 @@ public sealed class LocalPulumiAutomationClient : IPulumiAutomationClient
                 DateTimeOffset.UtcNow);
             return ProviderRunResult.Fail([locked], ProvisioningFailureCodes.StackLocked);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            _logger.LogError(
+                "Provisioning provider failed. OperationId={OperationId} ExceptionType={ExceptionType}",
+                operation.Id,
+                exception.GetType().FullName);
             var failed = new ProvisioningEvent(
                 operation.Id,
                 ProvisioningEventKind.ResourceFailed,
@@ -110,6 +157,43 @@ public sealed class LocalPulumiAutomationClient : IPulumiAutomationClient
                 DateTimeOffset.UtcNow);
             return ProviderRunResult.Fail([failed], ProvisioningFailureCodes.ProviderFailed);
         }
+    }
+
+    private static bool IsLockConflict(Exception exception)
+    {
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is ConcurrentUpdateException)
+                return true;
+            var name = current.GetType().Name;
+            if (name.Contains("ConcurrentUpdate", StringComparison.OrdinalIgnoreCase))
+                return true;
+            var message = current.Message;
+            if (message.Contains("currently locked", StringComparison.OrdinalIgnoreCase)
+                || message.Contains("lock conflict", StringComparison.OrdinalIgnoreCase)
+                || message.Contains("[409]", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsNothingToCancel(Exception exception, ProvisioningCommand command)
+    {
+        if (command != ProvisioningCommand.Cancel)
+            return false;
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            var name = current.GetType().Name;
+            if (name.Contains("NoUpdate", StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (current.Message.Contains("no update in progress", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
     }
 
     private static Dictionary<string, string> SafeOutputs(IImmutableDictionary<string, OutputValue> outputs)

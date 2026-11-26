@@ -1,7 +1,7 @@
 namespace ElsaControl.Provisioning.Providers.Azure;
 
 /// <summary>
-/// Fail-closed stand-in. A missing probe must not certify absence.
+/// Fail-closed stand-in. A missing probe must not certify absence or presence.
 /// </summary>
 public sealed class UnknownResourceGroupAbsenceProbe : IResourceGroupAbsenceProbe
 {

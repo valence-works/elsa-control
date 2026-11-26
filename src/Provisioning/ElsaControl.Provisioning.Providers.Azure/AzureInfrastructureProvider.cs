@@ -12,10 +12,12 @@ public sealed class AzureInfrastructureProvider(
     ICredentialResolver credentials,
     IPulumiAutomationClient automation,
     IResourceGroupAbsenceProbe? absence = null,
+    IProvisioningSecretResolver? secrets = null,
     TimeProvider? timeProvider = null) : IInfrastructureProvider
 {
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
     private readonly IResourceGroupAbsenceProbe _absence = absence ?? new UnknownResourceGroupAbsenceProbe();
+    private readonly IProvisioningSecretResolver _secrets = secrets ?? new EmptyProvisioningSecretResolver();
 
     public string ProviderId => AzurePulumiAutomationRunner.ProviderId;
 
@@ -62,23 +64,8 @@ public sealed class AzureInfrastructureProvider(
     public Task<ProviderRunResult> CancelAsync(
         ProvisioningOperation operation,
         ProvisioningRequest request,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(operation);
-        ArgumentNullException.ThrowIfNull(request);
-        cancellationToken.ThrowIfCancellationRequested();
-        var now = _timeProvider.GetUtcNow();
-        var nothing = new ProvisioningEvent(
-            operation.Id,
-            ProvisioningEventKind.OperationCancelled,
-            ResourceKind(request),
-            "Nothing to cancel.",
-            now);
-        return Task.FromResult(new ProviderRunResult(
-            true,
-            [nothing],
-            failureCode: ProvisioningFailureCodes.NothingToCancel));
-    }
+        CancellationToken cancellationToken = default) =>
+        RunAsync(ProvisioningCommand.Cancel, operation, request, cancellationToken);
 
     public async Task<ProviderRunResult> DestroyAsync(
         ProvisioningOperation operation,
@@ -101,30 +88,41 @@ public sealed class AzureInfrastructureProvider(
                 operation.Id,
                 ProvisioningEventKind.ResourceFailed,
                 "resource-group",
-                "Owned resource group is not absent.",
+                "Owned resource group presence is unknown.",
                 _timeProvider.GetUtcNow());
-            return ProviderRunResult.Fail([..result.Events, unresolved], ProvisioningFailureCodes.ResourceGroupPresent);
+            return ProviderRunResult.Fail([..result.Events, unresolved], ProvisioningFailureCodes.ResourceGroupUnknown);
         }
 
         var presence = await _absence.ObserveAsync(groupName, cancellationToken).ConfigureAwait(false);
-        if (presence != ResourceGroupPresence.Absent)
+        if (presence == ResourceGroupPresence.Absent)
         {
-            var failed = new ProvisioningEvent(
+            var receipt = new ProvisioningEvent(
+                operation.Id,
+                ProvisioningEventKind.ResourceSucceeded,
+                "resource-group",
+                "Owned resource group is absent.",
+                _timeProvider.GetUtcNow());
+            return ProviderRunResult.Ok([..result.Events, receipt], result.Outputs, ownedResourcesAbsent: true);
+        }
+
+        if (presence == ResourceGroupPresence.Present)
+        {
+            var present = new ProvisioningEvent(
                 operation.Id,
                 ProvisioningEventKind.ResourceFailed,
                 "resource-group",
-                "Owned resource group is not absent.",
+                "Owned resource group is still present.",
                 _timeProvider.GetUtcNow());
-            return ProviderRunResult.Fail([..result.Events, failed], ProvisioningFailureCodes.ResourceGroupPresent);
+            return ProviderRunResult.Fail([..result.Events, present], ProvisioningFailureCodes.ResourceGroupPresent);
         }
 
-        var receipt = new ProvisioningEvent(
+        var unknown = new ProvisioningEvent(
             operation.Id,
-            ProvisioningEventKind.ResourceSucceeded,
+            ProvisioningEventKind.ResourceFailed,
             "resource-group",
-            "Owned resource group is absent.",
+            "Owned resource group presence is unknown.",
             _timeProvider.GetUtcNow());
-        return ProviderRunResult.Ok([..result.Events, receipt], result.Outputs, ownedResourcesAbsent: true);
+        return ProviderRunResult.Fail([..result.Events, unknown], ProvisioningFailureCodes.ResourceGroupUnknown);
     }
 
     private async Task<ProviderRunResult> RunAsync(
@@ -138,14 +136,17 @@ public sealed class AzureInfrastructureProvider(
         cancellationToken.ThrowIfCancellationRequested();
 
         if (command is not (ProvisioningCommand.Preview or ProvisioningCommand.Provision
-            or ProvisioningCommand.Update or ProvisioningCommand.Refresh or ProvisioningCommand.Destroy))
+            or ProvisioningCommand.Update or ProvisioningCommand.Refresh
+            or ProvisioningCommand.Cancel or ProvisioningCommand.Destroy))
         {
             return NotImplemented(operation, request);
         }
 
         var environment = await credentials.ResolveEnvironmentAsync(request.Target.Credentials, cancellationToken)
             .ConfigureAwait(false);
-        var workspace = runner.CreateWorkspace(request.Target, request.StackConfig, environment);
+        var secretConfig = await _secrets.ResolveSecretConfigAsync(request.StackConfig, cancellationToken)
+            .ConfigureAwait(false);
+        var workspace = runner.CreateWorkspace(request.Target, request.StackConfig, environment, secretConfig);
         var program = runner.CreateProgram(request.Target.StackKind);
         return await automation.RunAsync(command, operation, workspace, program, cancellationToken)
             .ConfigureAwait(false);
