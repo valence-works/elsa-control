@@ -22,6 +22,7 @@ public sealed class AzureProvisioningCompositionTests
         services.AddAzureProvisioning(configuration);
         using var provider = services.BuildServiceProvider();
         Assert.IsType<AzureInfrastructureProvider>(provider.GetRequiredService<IInfrastructureProvider>());
+        Assert.IsType<AzureArmResourceGroupAbsenceProbe>(provider.GetRequiredService<IResourceGroupAbsenceProbe>());
         Assert.NotEqual(
             FakeInfrastructureProvider.Id,
             provider.GetRequiredService<IInfrastructureProvider>().ProviderId);

@@ -51,9 +51,31 @@ public sealed class AzurePulumiAutomationRunnerTests
             target,
             new Dictionary<string, string>(StringComparer.Ordinal) { ["environmentName"] = "staging" },
             new Dictionary<string, string>(StringComparer.Ordinal));
-        Assert.StartsWith("file://", workspace.BackendUrl, StringComparison.Ordinal);
+        Assert.Equal(new Uri(directory).AbsoluteUri, workspace.BackendUrl);
+        Assert.StartsWith("file:///", workspace.BackendUrl, StringComparison.Ordinal);
         Assert.Equal("passphrase", workspace.SecretsProviderUrl);
         Assert.True(FileStateBackend.From(target.StateBackend).LockingEnabled);
+    }
+
+    [Fact]
+    public void Diy_platform_stack_reference_uses_the_literal_organization()
+    {
+        var runner = new AzurePulumiAutomationRunner("acme");
+        var workspace = runner.CreateWorkspace(
+            AzureTarget("engine-aaaaaaaabbbbccccddddeeeeeeeeeeee", ProvisioningStackKind.Engine, "staging"),
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["engineName"] = "engine-one" },
+            new Dictionary<string, string>(StringComparer.Ordinal));
+        Assert.Equal("organization/elsa-platform/staging", workspace.StackConfig["platformStack"]);
+        Assert.Equal(
+            "control/elsa-platform/staging",
+            runner.CreateWorkspace(
+                AzureTarget("engine-aaaaaaaabbbbccccddddeeeeeeeeeeee", ProvisioningStackKind.Engine, "staging"),
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["engineName"] = "engine-one",
+                    ["platformStack"] = "control/elsa-platform/staging"
+                },
+                new Dictionary<string, string>(StringComparer.Ordinal)).StackConfig["platformStack"]);
     }
 
     [Fact]
@@ -242,6 +264,38 @@ public sealed class AzurePulumiAutomationRunnerTests
                 new HashSet<string>(StringComparer.Ordinal) { ProvisioningCapability.ContainerRuntime }),
             AzureTarget("engine-aaaaaaaabbbbccccddddeeeeeeeeeeee", ProvisioningStackKind.Engine, "staging"),
             "azure-destroy-present");
+        var result = await provider.DestroyAsync(operation, request);
+        Assert.False(result.Succeeded);
+        Assert.False(result.OwnedResourcesAbsent);
+        Assert.Equal(ProvisioningFailureCodes.ResourceGroupPresent, result.FailureCode);
+        Assert.Equal("elsa-engine-aaaaaaaabbbbccccddddeeeeeeeeeeee", probe.LastName);
+    }
+
+    [Fact]
+    public async Task Destroy_does_not_certify_absence_without_a_probe()
+    {
+        var automation = new FakePulumiAutomationClient();
+        var provider = new AzureInfrastructureProvider(
+            new AzurePulumiAutomationRunner(),
+            new AzureWorkloadIdentityCredentials(),
+            automation);
+        var operation = new ProvisioningOperation(
+            Guid.NewGuid(),
+            ProvisioningCommand.Destroy,
+            ProvisioningOperationState.Running,
+            AzurePulumiAutomationRunner.ProviderId,
+            ProvisioningStackKind.Engine,
+            "engine-aaaaaaaabbbbccccddddeeeeeeeeeeee",
+            "azure-destroy-unknown",
+            "azure-destroy-unknown-hash",
+            DateTimeOffset.UtcNow);
+        var request = new ProvisioningRequest(
+            ProvisioningCommand.Destroy,
+            new EngineSpec(
+                "elsa-server:test",
+                new HashSet<string>(StringComparer.Ordinal) { ProvisioningCapability.ContainerRuntime }),
+            AzureTarget("engine-aaaaaaaabbbbccccddddeeeeeeeeeeee", ProvisioningStackKind.Engine, "staging"),
+            "azure-destroy-unknown");
         var result = await provider.DestroyAsync(operation, request);
         Assert.False(result.Succeeded);
         Assert.False(result.OwnedResourcesAbsent);

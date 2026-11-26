@@ -274,6 +274,36 @@ public sealed class InMemoryProvisioningStore :
             return Task.FromResult(_locks.TryGetValue(lockKey, out var holder) ? holder : (Guid?)null);
     }
 
+    public async Task<IReadOnlyList<ProvisioningOperation>> FailInterruptedAsync(
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        Guid[] interrupted;
+        lock (_gate)
+        {
+            interrupted = _operations.Values
+                .Where(operation => ProvisioningOperationStateMachine.HoldsStackLock(operation.State))
+                .Select(operation => operation.Id)
+                .ToArray();
+        }
+
+        var failed = new List<ProvisioningOperation>();
+        foreach (var id in interrupted)
+        {
+            var completed = await CompleteAsync(
+                id,
+                ProvisioningOperationState.Failed,
+                now,
+                ProvisioningFailureCodes.Interrupted,
+                CancellationToken.None).ConfigureAwait(false);
+            if (completed is not null)
+                failed.Add(completed);
+        }
+
+        return failed;
+    }
+
     public static string HashRequest(ProvisioningRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);

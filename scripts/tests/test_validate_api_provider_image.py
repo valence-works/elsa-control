@@ -116,7 +116,7 @@ esac
     def test_failed_payload_probe_fails_closed_before_health_and_cleans(self) -> None:
         result = self.run_smoke(FAKE_PAYLOAD_EXIT="1")
         self.assertNotEqual(0, result.returncode)
-        self.assertIn("application payload is missing the console or contains npm development artifacts", result.stderr)
+        self.assertIn("application payload is missing the console, Pulumi CLI, or contains npm development artifacts", result.stderr)
         self.assertNotIn("untrusted application payload detail", result.stdout + result.stderr)
         calls = self.log.read_text()
         self.assertNotIn("curl --fail", calls)

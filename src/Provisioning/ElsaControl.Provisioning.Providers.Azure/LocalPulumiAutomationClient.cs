@@ -34,7 +34,7 @@ public sealed class LocalPulumiAutomationClient : IPulumiAutomationClient
 
         try
         {
-            var stack = await LocalWorkspace.CreateOrSelectStackAsync(args, cancellationToken).ConfigureAwait(false);
+            using var stack = await LocalWorkspace.CreateOrSelectStackAsync(args, cancellationToken).ConfigureAwait(false);
             foreach (var pair in workspace.StackConfig)
             {
                 await stack.SetConfigAsync(pair.Key, new ConfigValue(pair.Value), cancellationToken)

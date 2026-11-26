@@ -31,6 +31,17 @@ public sealed class ProvisioningEventSanitizerTests
         Assert.False(ProvisioningEventSanitizer.ContainsSensitiveToken(sanitised.ResourceKind));
     }
 
+    [Theory]
+    [InlineData("https://example.blob.core.windows.net/file?sig=not-a-real-signature")]
+    [InlineData("https://user:not-a-password@registry.example/path")]
+    public void Url_credentials_are_rejected(string value) =>
+        Assert.True(ProvisioningEventSanitizer.ContainsSecretOrResourceIdentifier(value));
+
+    [Fact]
+    public void Image_repository_hosts_are_admitted() =>
+        Assert.False(ProvisioningEventSanitizer.ContainsSecretOrResourceIdentifier(
+            "valenceruntimeimages.azurecr.io/runtime-combined"));
+
     [Fact]
     public void Capability_kind_secrets_is_not_treated_as_a_secret_value()
     {

@@ -23,7 +23,7 @@ public static class AzureProvisioningServiceCollectionExtensions
         services.AddSingleton(new AzurePulumiAutomationRunner(options.PulumiOrganization));
         services.AddSingleton<ICredentialResolver, AzureWorkloadIdentityCredentials>();
         services.AddSingleton<IPulumiAutomationClient, LocalPulumiAutomationClient>();
-        services.AddSingleton<IResourceGroupAbsenceProbe, RecordingResourceGroupAbsenceProbe>();
+        services.AddSingleton<IResourceGroupAbsenceProbe, AzureArmResourceGroupAbsenceProbe>();
         services.AddSingleton<AzureInfrastructureProvider>();
         services.AddSingleton<IInfrastructureProvider>(provider =>
             provider.GetRequiredService<AzureInfrastructureProvider>());

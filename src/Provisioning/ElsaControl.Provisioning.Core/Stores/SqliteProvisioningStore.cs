@@ -52,30 +52,6 @@ public sealed class SqliteProvisioningStore :
 
         lock (_gate)
         {
-            using var existing = _connection.CreateCommand();
-            existing.CommandText = "SELECT id, state, request_hash, failure_code FROM operations WHERE idempotency_key = $key LIMIT 1;";
-            existing.Parameters.AddWithValue("$key", request.IdempotencyKey);
-            using var reader = existing.ExecuteReader();
-            if (reader.Read())
-            {
-                var existingHash = reader.GetString(2);
-                if (!string.Equals(existingHash, requestHash, StringComparison.Ordinal))
-                {
-                    throw new InvalidOperationException(
-                        "Idempotency key is already bound to a different provisioning request.");
-                }
-
-                var state = Enum.Parse<ProvisioningOperationState>(reader.GetString(1));
-                return Task.FromResult(new ProvisioningEnqueueResult(
-                    Guid.Parse(reader.GetString(0)),
-                    state,
-                    Replayed: true,
-                    LockConflict: state == ProvisioningOperationState.LockConflict,
-                    reader.IsDBNull(3) ? null : reader.GetString(3)));
-            }
-
-            reader.Close();
-
             var stackName = ProvisioningStackName.Canonicalize(request.Target.StackName);
             var lockKey = ProvisioningStackLockKey.Format(request.Target.StackKind, stackName);
             var lockHeld = LockHeld(lockKey) || HasLockHoldingOperation(lockKey);
@@ -96,7 +72,9 @@ public sealed class SqliteProvisioningStore :
                 completedAt: lockConflict ? now : null,
                 failureCode: lockConflict ? ProvisioningFailureCodes.LockConflict : null);
 
-            InsertOperation(operation, request);
+            if (!TryInsertOperation(operation, request))
+                return Task.FromResult(ReadIdempotentResult(request.IdempotencyKey, requestHash));
+
             return Task.FromResult(new ProvisioningEnqueueResult(
                 operation.Id,
                 operation.State,
@@ -198,13 +176,15 @@ public sealed class SqliteProvisioningStore :
                 return Task.FromResult<ProvisioningOperation?>(conflicted);
             }
 
+            using var transaction = _connection.BeginTransaction();
             var running = ProvisioningOperationStateMachine.Transition(
                 operation,
                 ProvisioningOperationState.Running,
                 now);
-            UpdateOperation(running);
+            UpdateOperation(running, transaction);
             if (operation.Command != ProvisioningCommand.Cancel)
-                SetLock(lockKey, operation.Id);
+                SetLock(lockKey, operation.Id, transaction);
+            transaction.Commit();
             return Task.FromResult<ProvisioningOperation?>(running);
         }
     }
@@ -223,15 +203,17 @@ public sealed class SqliteProvisioningStore :
             if (operation is null)
                 return Task.FromResult<ProvisioningOperation?>(null);
 
+            using var transaction = _connection.BeginTransaction();
             var completed = ProvisioningOperationStateMachine.Transition(operation, state, now, failureCode);
-            UpdateOperation(completed);
+            UpdateOperation(completed, transaction);
             var lockKey = ProvisioningStackLockKey.Format(operation.StackKind, operation.StackName);
             if (ProvisioningOperationStateMachine.IsTerminal(completed.State)
-                && Holder(lockKey) == operationId)
+                && Holder(lockKey, transaction) == operationId)
             {
-                ClearLock(lockKey);
+                ClearLock(lockKey, transaction);
             }
 
+            transaction.Commit();
             return Task.FromResult<ProvisioningOperation?>(completed);
         }
     }
@@ -337,6 +319,41 @@ public sealed class SqliteProvisioningStore :
             return Task.FromResult(Holder(ProvisioningStackLockKey.Format(kind, stackName)));
     }
 
+    public async Task<IReadOnlyList<ProvisioningOperation>> FailInterruptedAsync(
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        List<Guid> interrupted;
+        lock (_gate)
+        {
+            using var command = _connection.CreateCommand();
+            command.CommandText = """
+                SELECT id FROM operations
+                WHERE state IN ('Running', 'Cancelling');
+                """;
+            interrupted = [];
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+                interrupted.Add(Guid.Parse(reader.GetString(0)));
+        }
+
+        var failed = new List<ProvisioningOperation>();
+        foreach (var id in interrupted)
+        {
+            var completed = await CompleteAsync(
+                id,
+                ProvisioningOperationState.Failed,
+                now,
+                ProvisioningFailureCodes.Interrupted,
+                CancellationToken.None).ConfigureAwait(false);
+            if (completed is not null)
+                failed.Add(completed);
+        }
+
+        return failed;
+    }
+
     public void Dispose() => _connection.Dispose();
 
     private void EnsureSchema()
@@ -375,7 +392,32 @@ public sealed class SqliteProvisioningStore :
         command.ExecuteNonQuery();
     }
 
-    private void InsertOperation(ProvisioningOperation operation, ProvisioningRequest request)
+    private ProvisioningEnqueueResult ReadIdempotentResult(string idempotencyKey, string requestHash)
+    {
+        using var existing = _connection.CreateCommand();
+        existing.CommandText = "SELECT id, state, request_hash, failure_code FROM operations WHERE idempotency_key = $key LIMIT 1;";
+        existing.Parameters.AddWithValue("$key", idempotencyKey);
+        using var reader = existing.ExecuteReader();
+        if (!reader.Read())
+            throw new InvalidOperationException("Idempotent provisioning request could not be loaded.");
+
+        var existingHash = reader.GetString(2);
+        if (!string.Equals(existingHash, requestHash, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "Idempotency key is already bound to a different provisioning request.");
+        }
+
+        var state = Enum.Parse<ProvisioningOperationState>(reader.GetString(1));
+        return new ProvisioningEnqueueResult(
+            Guid.Parse(reader.GetString(0)),
+            state,
+            Replayed: true,
+            LockConflict: state == ProvisioningOperationState.LockConflict,
+            reader.IsDBNull(3) ? null : reader.GetString(3));
+    }
+
+    private bool TryInsertOperation(ProvisioningOperation operation, ProvisioningRequest request)
     {
         using var command = _connection.CreateCommand();
         command.CommandText = """
@@ -385,15 +427,17 @@ public sealed class SqliteProvisioningStore :
               failure_code, request_json)
             VALUES (
               $id, $command, $state, $provider, $kind, $stack, $lock,
-              $idem, $hash, $accepted, $started, $completed, $failure, $request);
+              $idem, $hash, $accepted, $started, $completed, $failure, $request)
+            ON CONFLICT(idempotency_key) DO NOTHING;
             """;
         BindOperation(command, operation, SerializeRequest(request));
-        command.ExecuteNonQuery();
+        return command.ExecuteNonQuery() == 1;
     }
 
-    private void UpdateOperation(ProvisioningOperation operation)
+    private void UpdateOperation(ProvisioningOperation operation, SqliteTransaction? transaction = null)
     {
         using var command = _connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             UPDATE operations
             SET state = $state, started_at = $started, completed_at = $completed, failure_code = $failure
@@ -448,17 +492,19 @@ public sealed class SqliteProvisioningStore :
         return command.ExecuteScalar() is not null;
     }
 
-    private Guid? Holder(string lockKey)
+    private Guid? Holder(string lockKey, SqliteTransaction? transaction = null)
     {
         using var command = _connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = "SELECT operation_id FROM locks WHERE lock_key = $lock;";
         command.Parameters.AddWithValue("$lock", lockKey);
         return command.ExecuteScalar() is string id ? Guid.Parse(id) : null;
     }
 
-    private void SetLock(string lockKey, Guid operationId)
+    private void SetLock(string lockKey, Guid operationId, SqliteTransaction? transaction = null)
     {
         using var command = _connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             INSERT INTO locks (lock_key, operation_id) VALUES ($lock, $id)
             ON CONFLICT(lock_key) DO UPDATE SET operation_id = excluded.operation_id;
@@ -468,9 +514,10 @@ public sealed class SqliteProvisioningStore :
         command.ExecuteNonQuery();
     }
 
-    private void ClearLock(string lockKey)
+    private void ClearLock(string lockKey, SqliteTransaction? transaction = null)
     {
         using var command = _connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = "DELETE FROM locks WHERE lock_key = $lock;";
         command.Parameters.AddWithValue("$lock", lockKey);
         command.ExecuteNonQuery();

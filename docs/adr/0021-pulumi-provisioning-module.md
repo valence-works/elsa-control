@@ -156,6 +156,9 @@ Rejected. State is in our Azure Blob backend, with locking.
 
 - Phase 1 lands this ADR and a non-production skeleton of Abstractions, Core, and Providers.Azure.
 - Phase 2 (#1014) ports both programs to Bicep parity with the Automation API runner.
+- Interrupted `Running` / `Cancelling` operations fail closed (`operation.interrupted`) and release the module lock. They are not resumed: the provider may already have created resources.
+- Platform `StackReference` output keys are camelCase. DIY file/Blob stack references use the literal organization `organization`.
+- Secret *values* are still bootstrapped by Control's existing provider-secret phase, as with Bicep. The Pulumi program stores locators only.
 - Phase 3 feeds engine events into the step ledger (#1015) and wires Hub controls (#1016).
 - Existing Bicep engines are imported or kept until recreate (#1017); mid-flight or Failed Bicep engines stay on the Bicep path.
 - Production cutover is a later, separately authorized phase.

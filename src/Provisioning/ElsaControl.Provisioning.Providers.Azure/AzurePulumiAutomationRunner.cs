@@ -60,7 +60,9 @@ public sealed class AzurePulumiAutomationRunner
             && !config.ContainsKey("platformStack")
             && target.PlatformStackName is not null)
         {
-            config["platformStack"] = PulumiStackReferenceName.Platform(target.PlatformStackName, PulumiOrganization);
+            config["platformStack"] = PulumiStackReferenceName.Platform(
+                target.PlatformStackName,
+                ProvisioningStackReference.DefaultOrganization);
         }
 
         if (target.StackKind == ProvisioningStackKind.Engine && !config.ContainsKey("engineName"))

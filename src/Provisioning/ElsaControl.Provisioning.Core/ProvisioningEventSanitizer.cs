@@ -50,7 +50,8 @@ public static partial class ProvisioningEventSanitizer
     public static bool ContainsSecretOrResourceIdentifier(string value) =>
         SubscriptionPath().IsMatch(value)
         || ResourceIdentifier().IsMatch(value)
-        || SecretToken().IsMatch(value);
+        || SecretToken().IsMatch(value)
+        || UrlCredential().IsMatch(value);
 
     [GeneratedRegex(@"subscriptions[/\\]", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex SubscriptionPath();
@@ -63,4 +64,7 @@ public static partial class ProvisioningEventSanitizer
 
     [GeneratedRegex(@"password|connection string|accountkey|sharedaccesssignature|secret=|secret:", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex SecretToken();
+
+    [GeneratedRegex(@"[?&]sig=|://[^/\s?#]+@", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex UrlCredential();
 }

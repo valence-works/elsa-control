@@ -29,6 +29,8 @@ public sealed class FakeInfrastructureProvider : IInfrastructureProvider, ICrede
     public IReadOnlyDictionary<string, string> EnvironmentVariables { get; } =
         new Dictionary<string, string>(StringComparer.Ordinal);
 
+    public TimeSpan Stall { get; set; }
+
     public IReadOnlySet<string> Capabilities { get; } = new HashSet<string>(StringComparer.Ordinal)
     {
         ProvisioningCapability.ContainerRuntime,
@@ -144,7 +146,7 @@ public sealed class FakeInfrastructureProvider : IInfrastructureProvider, ICrede
         }
     }
 
-    private Task<ProviderRunResult> RunAsync(
+    private async Task<ProviderRunResult> RunAsync(
         ProvisioningOperation operation,
         ProvisioningRequest request,
         bool mutate,
@@ -153,6 +155,8 @@ public sealed class FakeInfrastructureProvider : IInfrastructureProvider, ICrede
         ArgumentNullException.ThrowIfNull(operation);
         ArgumentNullException.ThrowIfNull(request);
         cancellationToken.ThrowIfCancellationRequested();
+        if (Stall > TimeSpan.Zero)
+            await Task.Delay(Stall, cancellationToken).ConfigureAwait(false);
 
         var missing = request.Spec.RequiredCapabilities.Where(capability => !Capabilities.Contains(capability)).ToArray();
         if (missing.Length > 0)
@@ -163,7 +167,7 @@ public sealed class FakeInfrastructureProvider : IInfrastructureProvider, ICrede
                 ProvisioningCapability.ContainerRuntime,
                 "Required capability is not available.",
                 _timeProvider.GetUtcNow());
-            return Task.FromResult(ProviderRunResult.Fail([failed], ProvisioningFailureCodes.CapabilityMissing));
+            return ProviderRunResult.Fail([failed], ProvisioningFailureCodes.CapabilityMissing);
         }
 
         lock (_gate)
@@ -176,7 +180,7 @@ public sealed class FakeInfrastructureProvider : IInfrastructureProvider, ICrede
                     ResourceKind(request),
                     "Operation cancelled.",
                     _timeProvider.GetUtcNow());
-                return Task.FromResult(ProviderRunResult.Fail([cancelled], ProvisioningFailureCodes.Cancelled));
+                return ProviderRunResult.Fail([cancelled], ProvisioningFailureCodes.Cancelled);
             }
 
             IReadOnlyDictionary<string, string>? platformOutputs = null;
@@ -191,7 +195,7 @@ public sealed class FakeInfrastructureProvider : IInfrastructureProvider, ICrede
                         ProvisioningCapability.SharedEnvironment,
                         "Platform stack is absent.",
                         _timeProvider.GetUtcNow());
-                    return Task.FromResult(ProviderRunResult.Fail([missingPlatform], ProvisioningFailureCodes.PlatformAbsent));
+                    return ProviderRunResult.Fail([missingPlatform], ProvisioningFailureCodes.PlatformAbsent);
                 }
 
                 platformOutputs = platform.Outputs;
@@ -207,7 +211,7 @@ public sealed class FakeInfrastructureProvider : IInfrastructureProvider, ICrede
                 Event(operation.Id, ProvisioningEventKind.ResourceStarted, ResourceKind(request), "Apply started.", now),
                 Event(operation.Id, ProvisioningEventKind.ResourceSucceeded, ResourceKind(request), "Apply completed.", now)
             };
-            return Task.FromResult(ProviderRunResult.Ok(events, outputs));
+            return ProviderRunResult.Ok(events, outputs);
         }
     }
 

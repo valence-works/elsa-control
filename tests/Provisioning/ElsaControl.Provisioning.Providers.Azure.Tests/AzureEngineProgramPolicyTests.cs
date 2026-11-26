@@ -32,6 +32,29 @@ public sealed class AzureEngineProgramPolicyTests
     }
 
     [Fact]
+    public void Image_construction_trims_repository_and_digest()
+    {
+        var values = EngineTestConfig.Values();
+        values["imageRepository"] = " valenceruntimeimages.azurecr.io/runtime-combined ";
+        values["imageDigest"] = " " + new string('a', 64) + " ";
+        var image = AzureEngineProgramPolicy.ImmutableImage(values);
+        Assert.Equal(
+            "valenceruntimeimages.azurecr.io/runtime-combined@sha256:" + new string('a', 64),
+            image);
+    }
+
+    [Fact]
+    public void Digit_leading_fingerprint_gets_a_letter_prefixed_revision_suffix()
+    {
+        var suffix = ElsaControl.Provisioning.Core.ProvisioningRevisionSuffix.FromFingerprint(new string('1', 64));
+        Assert.Equal("r" + new string('1', 23), suffix);
+        ElsaControl.Provisioning.Core.ProvisioningRevisionSuffix.Validate(suffix);
+        ElsaControl.Provisioning.Core.ProvisioningRevisionSuffix.Validate("release-a");
+        Assert.Throws<InvalidOperationException>(() =>
+            ElsaControl.Provisioning.Core.ProvisioningRevisionSuffix.Validate("1abc"));
+    }
+
+    [Fact]
     public void Handoff_without_control_configuration_fails_closed()
     {
         var values = EngineTestConfig.Values();

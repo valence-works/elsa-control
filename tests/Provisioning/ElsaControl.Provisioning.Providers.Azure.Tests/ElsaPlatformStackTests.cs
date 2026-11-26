@@ -1,3 +1,4 @@
+using System.Reflection;
 using ElsaControl.Provisioning.Providers.Azure;
 using ElsaControl.Provisioning.Providers.Azure.Programs;
 using Pulumi;
@@ -31,6 +32,7 @@ public sealed class ElsaPlatformStackTests
         Assert.Equal("shared-environment", await stack.ContainerEnvironmentKind.GetValueAsync());
         Assert.Equal("shared-registry", await stack.RegistryKind.GetValueAsync());
         Assert.Equal("runtimeimages", await stack.RegistryName.GetValueAsync());
+        Assert.Equal("example.azurecontainerapps.io", await stack.ContainerEnvironmentDefaultDomain.GetValueAsync());
         Assert.Contains(resources, resource => resource is ResourceGroup);
         Assert.Contains(resources, resource => resource is Workspace);
         Assert.Contains(resources, resource => resource is ManagedEnvironment);
@@ -39,5 +41,23 @@ public sealed class ElsaPlatformStackTests
             resources,
             resource => resource.GetResourceType().Contains("Registry", StringComparison.OrdinalIgnoreCase)
                         && resource is not DiagnosticSetting);
+    }
+
+    [Fact]
+    public void Platform_outputs_are_registered_under_camelCase_keys()
+    {
+        foreach (var property in typeof(ElsaPlatformStack).GetProperties())
+        {
+            var output = property.GetCustomAttribute<OutputAttribute>();
+            if (output is null)
+                continue;
+            var expected = char.ToLowerInvariant(property.Name[0]) + property.Name[1..];
+            Assert.Equal(expected, output.Name);
+        }
+
+        Assert.Equal(
+            PulumiStackOutputs.ContainerEnvironmentId,
+            typeof(ElsaPlatformStack).GetProperty(nameof(ElsaPlatformStack.ContainerEnvironmentId))!
+                .GetCustomAttribute<OutputAttribute>()!.Name);
     }
 }

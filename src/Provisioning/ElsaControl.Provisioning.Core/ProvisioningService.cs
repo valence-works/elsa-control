@@ -91,14 +91,14 @@ public sealed class ProvisioningService(
             }
         }
 
-        if (command == ProvisioningCommand.Cancel)
-            _runs.TryCancel(request.Target.StackKind, ProvisioningStackName.Canonicalize(request.Target.StackName));
-
         var hash = InMemoryProvisioningStore.HashRequest(request);
         var result = await operations.CreateOrGetAsync(request, hash, _timeProvider.GetUtcNow(), cancellationToken)
             .ConfigureAwait(false);
         if (result.Replayed)
             return result;
+
+        if (command == ProvisioningCommand.Cancel)
+            _runs.TryCancel(request.Target.StackKind, ProvisioningStackName.Canonicalize(request.Target.StackName));
 
         var kind = result.LockConflict
             ? ProvisioningEventKind.LockConflicted

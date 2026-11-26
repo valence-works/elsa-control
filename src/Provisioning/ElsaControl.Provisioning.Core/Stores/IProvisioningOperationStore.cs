@@ -32,4 +32,8 @@ public interface IProvisioningOperationStore
         ProvisioningStackKind kind,
         string stackName,
         CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<ProvisioningOperation>> FailInterruptedAsync(
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default);
 }

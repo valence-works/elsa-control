@@ -27,6 +27,7 @@ internal sealed class EmptyMocks : IMocks
             or "azure-native:app:ManagedEnvironment")
         {
             outputs["id"] = args.Id ?? $"{args.Name}_id";
+            outputs["defaultDomain"] = "example.azurecontainerapps.io";
         }
 
         args.Id ??= $"{args.Name}_id";
@@ -71,6 +72,7 @@ internal sealed class PlatformStackReferenceMocks : IMocks
                 .Add("resourceGroupName", "rg-elsa-platform-staging")
                 .Add("registryName", "runtimeimages")
                 .Add("containerEnvironmentId", "env_id")
+                .Add("containerEnvironmentDefaultDomain", "example.azurecontainerapps.io")
                 .Add("registryId", "registry_id")
                 .Add("registryLoginServer", "registry.example");
             outputs["secretOutputNames"] = ImmutableArray<string>.Empty;

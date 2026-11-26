@@ -16,6 +16,7 @@ public static class ProvisioningFailureCodes
     public const string CapabilityMissing = "provider.capability-missing";
     public const string PlatformAbsent = "platform.absent";
     public const string Cancelled = "operation.cancelled";
+    public const string Interrupted = "operation.interrupted";
     public const string ResourceGroupPresent = "azure.resource-group.present";
     public const string FakeProviderForbidden = "provider.fake-forbidden";
 }

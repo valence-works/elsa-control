@@ -1,3 +1,5 @@
+using ElsaControl.Provisioning.Core;
+using ElsaControl.Provisioning.Providers.Azure;
 using Pulumi;
 using Pulumi.AzureNative.App;
 using Pulumi.AzureNative.App.Inputs;
@@ -33,12 +35,14 @@ public sealed class ElsaEngineStack : Stack
         var location = values["location"];
         var platformStack = values["platformStack"];
         var resourceGroupName = values.GetValueOrDefault("resourceGroupName")
-                                ?? $"elsa-engine-{parsed:N}";
+                                ?? ProvisioningEngineResourceGroup.ForInstance(parsed);
         var tags = DefaultTags(values);
         var platform = new StackReference(platformStack);
-        var environmentId = platform.RequireOutput("containerEnvironmentId").Apply(static value => value.ToString() ?? "");
-        var registryId = platform.RequireOutput("registryId").Apply(static value => value.ToString() ?? "");
-        var registryLoginServer = platform.RequireOutput("registryLoginServer").Apply(static value => value.ToString() ?? "");
+        var environmentId = platform.RequireOutput(PulumiStackOutputs.ContainerEnvironmentId).Apply(static value => value.ToString() ?? "");
+        var registryId = platform.RequireOutput(PulumiStackOutputs.RegistryId).Apply(static value => value.ToString() ?? "");
+        var registryLoginServer = platform.RequireOutput(PulumiStackOutputs.RegistryLoginServer).Apply(static value => value.ToString() ?? "");
+        var environmentKind = platform.RequireOutput(PulumiStackOutputs.ContainerEnvironmentKind)
+            .Apply(static value => value.ToString() ?? Provisioning.Abstractions.ProvisioningCapability.SharedEnvironment);
 
         var resourceGroup = new ResourceGroup("engine-rg", new ResourceGroupArgs
         {
@@ -72,7 +76,7 @@ public sealed class ElsaEngineStack : Stack
             Tags = tags
         });
 
-        _ = new RoleAssignment("engine-kv-secrets", new RoleAssignmentArgs
+        var keyVaultSecrets = new RoleAssignment("engine-kv-secrets", new RoleAssignmentArgs
         {
             PrincipalId = identity.PrincipalId,
             PrincipalType = "ServicePrincipal",
@@ -139,11 +143,33 @@ public sealed class ElsaEngineStack : Stack
         var memory = values.GetValueOrDefault("memory") ?? "1Gi";
         var minReplicas = int.Parse(values.GetValueOrDefault("minReplicas") ?? "0");
         var maxReplicas = int.Parse(values.GetValueOrDefault("maxReplicas") ?? "1");
-        var revisionSuffix = values.GetValueOrDefault("revisionSuffix") ?? values["planFingerprint"][..24];
+        var revisionSuffix = values.GetValueOrDefault("revisionSuffix")
+                             ?? ProvisioningRevisionSuffix.FromFingerprint(values["planFingerprint"]);
         var image = AzureEngineProgramPolicy.ImmutableImage(values);
         var sqlRef = SecretRef(values, "sqlConnectionSecretName", "sql-connection");
         var signingRef = SecretRef(values, "signingKeySecretName", "identity-signing-key");
         var adminRef = SecretRef(values, "adminPasswordSecretName", "admin-password");
+        var handoffEnabled = string.Equals(
+            values.GetValueOrDefault("managedHandoff"),
+            "true",
+            StringComparison.OrdinalIgnoreCase);
+        Output<string>? handoffCallback = null;
+        if (handoffEnabled)
+        {
+            var defaultDomain = platform.RequireOutput(PulumiStackOutputs.ContainerEnvironmentDefaultDomain)
+                .Apply(static value => value.ToString() ?? "");
+            var appName = AppName(parsed);
+            handoffCallback = defaultDomain.Apply(domain =>
+                $"https://{appName}.{domain}/managed-elsa/handoff/callback");
+        }
+
+        var acrPull = new RoleAssignment("engine-acr-pull", new RoleAssignmentArgs
+        {
+            PrincipalId = identity.PrincipalId,
+            PrincipalType = "ServicePrincipal",
+            RoleDefinitionId = $"/providers/Microsoft.Authorization/roleDefinitions/{AcrPullRoleId}",
+            Scope = registryId
+        });
 
         var app = new ContainerApp("engine-app", new ContainerAppArgs
         {
@@ -209,7 +235,7 @@ public sealed class ElsaEngineStack : Stack
                             Cpu = double.Parse(cpu, System.Globalization.CultureInfo.InvariantCulture),
                             Memory = memory
                         },
-                        Env = EnvironmentVariables(values, sqlRef, signingRef, adminRef),
+                        Env = EnvironmentVariables(values, sqlRef, signingRef, adminRef, handoffCallback),
                         Probes =
                         {
                             StartupProbe(),
@@ -220,19 +246,17 @@ public sealed class ElsaEngineStack : Stack
                 }
             },
             Tags = tags
-        });
-
-        _ = new RoleAssignment("engine-acr-pull", new RoleAssignmentArgs
+        }, new CustomResourceOptions
         {
-            PrincipalId = identity.PrincipalId,
-            PrincipalType = "ServicePrincipal",
-            RoleDefinitionId = $"/providers/Microsoft.Authorization/roleDefinitions/{AcrPullRoleId}",
-            Scope = registryId
+            DependsOn =
+            {
+                keyVaultSecrets,
+                acrPull
+            }
         });
 
         EngineName = Output.Create(values.GetValueOrDefault("engineName") ?? $"engine-{parsed:N}");
-        PlatformEnvironmentKind = platform.RequireOutput("containerEnvironmentKind")
-            .Apply(static value => value.ToString() ?? Provisioning.Abstractions.ProvisioningCapability.SharedEnvironment);
+        PlatformEnvironmentKind = environmentKind;
         EndpointKind = Output.Create(Provisioning.Abstractions.ProvisioningCapability.Ingress);
         DatabaseKind = Output.Create(Provisioning.Abstractions.ProvisioningCapability.ManagedSql);
         SecretsKind = Output.Create(Provisioning.Abstractions.ProvisioningCapability.Secrets);
@@ -281,7 +305,9 @@ public sealed class ElsaEngineStack : Stack
             "instanceId", "location", "isolation", "topology", "imageRepository", "imageDigest",
             "planFingerprint", "platformStack", "engineName", "organizationSlug", "engineSlug",
             "resourceGroupName", "cpu", "memory", "minReplicas", "maxReplicas", "revisionSuffix",
-            "managedHandoff", "handoffConfigured", "sqlWorkflowPackageVersion", "sqlQuartzPackageVersion",
+            "managedHandoff", "handoffConfigured", "handoffControlBaseUrl", "handoffControlContinuationUrl",
+            "handoffAudience", "handoffRuntimeMaximumLifetime", "handoffAllowedRuntimePermissions",
+            "sqlWorkflowPackageVersion", "sqlQuartzPackageVersion",
             "elsaVersion", "sqlConnectionSecretName", "signingKeySecretName", "adminPasswordSecretName",
             "adminUsername"
         };
@@ -338,7 +364,8 @@ public sealed class ElsaEngineStack : Stack
         IReadOnlyDictionary<string, string> values,
         string sqlRef,
         string signingRef,
-        string adminRef)
+        string adminRef,
+        Output<string>? handoffCallback)
     {
         var env = new InputList<EnvironmentVarArgs>
         {
@@ -395,6 +422,72 @@ public sealed class ElsaEngineStack : Stack
                 Name = "CShells__Shells__Default__Features__DefaultAdminUser__AdminUsername",
                 Value = adminUsername
             });
+        }
+
+        if (string.Equals(values.GetValueOrDefault("managedHandoff"), "true", StringComparison.OrdinalIgnoreCase)
+            && handoffCallback is not null)
+        {
+            env.Add(new EnvironmentVarArgs { Name = "ManagedElsa__Handoff__Enabled", Value = "true" });
+            env.Add(new EnvironmentVarArgs
+            {
+                Name = "ManagedElsa__Handoff__ControlBaseUrl",
+                Value = values["handoffControlBaseUrl"]
+            });
+            env.Add(new EnvironmentVarArgs
+            {
+                Name = "ManagedElsa__Handoff__ControlContinuationUrl",
+                Value = values["handoffControlContinuationUrl"]
+            });
+            env.Add(new EnvironmentVarArgs
+            {
+                Name = "ManagedElsa__Handoff__InstanceId",
+                Value = values["instanceId"]
+            });
+            env.Add(new EnvironmentVarArgs
+            {
+                Name = "ManagedElsa__Handoff__Audience",
+                Value = values["handoffAudience"]
+            });
+            env.Add(new EnvironmentVarArgs
+            {
+                Name = "ManagedElsa__Handoff__CallbackUri",
+                Value = handoffCallback
+            });
+            env.Add(new EnvironmentVarArgs
+            {
+                Name = "ManagedElsa__Handoff__UpstreamAuthenticationScheme",
+                Value = "Jwt-or-ApiKey"
+            });
+            env.Add(new EnvironmentVarArgs { Name = "ManagedElsa__Handoff__SuccessPath", Value = "/" });
+            env.Add(new EnvironmentVarArgs
+            {
+                Name = "ManagedElsa__Handoff__StateLifetime",
+                Value = "00:05:00"
+            });
+            env.Add(new EnvironmentVarArgs
+            {
+                Name = "ManagedElsa__Handoff__RuntimeMaximumLifetime",
+                Value = values["handoffRuntimeMaximumLifetime"]
+            });
+            env.Add(new EnvironmentVarArgs
+            {
+                Name = "ASPNETCORE_FORWARDEDHEADERS_ENABLED",
+                Value = "true"
+            });
+            var permissions = values["handoffAllowedRuntimePermissions"]
+                .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+            for (var index = 0; index < permissions.Length; index++)
+            {
+                env.Add(new EnvironmentVarArgs
+                {
+                    Name = $"ManagedElsa__Handoff__AllowedRuntimePermissions__{index}",
+                    Value = permissions[index]
+                });
+            }
+        }
+        else
+        {
+            env.Add(new EnvironmentVarArgs { Name = "ManagedElsa__Handoff__Enabled", Value = "false" });
         }
 
         if (values.TryGetValue("sqlWorkflowPackageVersion", out var workflowVersion)

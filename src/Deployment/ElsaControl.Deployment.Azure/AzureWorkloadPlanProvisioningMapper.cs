@@ -1,3 +1,4 @@
+using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Provisioning.Abstractions;
 using ElsaControl.Provisioning.Core;
 
@@ -42,7 +43,8 @@ public static class AzureWorkloadPlanProvisioningMapper
         string? organizationSlug = null,
         string? engineSlug = null,
         AzureWorkloadCapacity? capacity = null,
-        bool handoffConfigured = false)
+        bool handoffConfigured = false,
+        AzureManagedHandoffOptions? handoff = null)
     {
         ArgumentNullException.ThrowIfNull(plan);
         if (instanceId == Guid.Empty)
@@ -58,25 +60,30 @@ public static class AzureWorkloadPlanProvisioningMapper
             throw new ArgumentException("Image identity must be a repository without a tag.", nameof(plan));
         if (plan.Fingerprint.Length != 64 || !plan.Fingerprint.All(Uri.IsHexDigit))
             throw new ArgumentException("Plan fingerprint is invalid.", nameof(plan));
+        if (capacity is not null && capacity != plan.Capacity)
+            throw new ArgumentException("Capacity override must match the fingerprinted plan capacity.", nameof(capacity));
+        var effectiveCapacity = capacity ?? plan.Capacity;
+        if (plan.ManagedHandoff && effectiveCapacity is not { MinReplicas: 1, MaxReplicas: 1 })
+            throw new ArgumentException("Managed handoff requires exactly one replica.", nameof(plan));
 
-        var size = AzureContainerAppsCapacity.Map(capacity ?? plan.Capacity);
+        var size = AzureContainerAppsCapacity.Map(effectiveCapacity);
         var config = new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["instanceId"] = instanceId.ToString("D").ToLowerInvariant(),
             ["location"] = plan.Location.Trim().ToLowerInvariant(),
             ["isolation"] = AzureWorkloadPlanTranslator.SupportedIsolation,
             ["topology"] = AzureWorkloadPlanTranslator.SupportedTopology,
-            ["imageRepository"] = plan.ImageRepository,
-            ["imageDigest"] = plan.ImageDigest.ToLowerInvariant(),
+            ["imageRepository"] = plan.ImageRepository.Trim(),
+            ["imageDigest"] = plan.ImageDigest.Trim().ToLowerInvariant(),
             ["planFingerprint"] = plan.Fingerprint.ToLowerInvariant(),
             ["platformStack"] = platformStackName.Trim(),
-            ["resourceGroupName"] = AzureProviderResourceAssignmentNaming.ResourceGroupName("elsa-engine", instanceId),
-            ["revisionSuffix"] = plan.Fingerprint.ToLowerInvariant()[..24],
+            ["resourceGroupName"] = ProvisioningEngineResourceGroup.ForInstance(instanceId),
+            ["revisionSuffix"] = ProvisioningRevisionSuffix.FromFingerprint(plan.Fingerprint),
             ["elsaVersion"] = plan.ElsaVersion,
             ["managedHandoff"] = plan.ManagedHandoff ? "true" : "false",
             ["handoffConfigured"] = handoffConfigured ? "true" : "false",
-            ["minReplicas"] = (capacity ?? plan.Capacity)?.MinReplicas.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "0",
-            ["maxReplicas"] = (capacity ?? plan.Capacity)?.MaxReplicas.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "1"
+            ["minReplicas"] = effectiveCapacity?.MinReplicas.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "0",
+            ["maxReplicas"] = effectiveCapacity?.MaxReplicas.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "1"
         };
         if (size is not null)
         {
@@ -93,6 +100,16 @@ public static class AzureWorkloadPlanProvisioningMapper
         if (!string.IsNullOrWhiteSpace(engineSlug))
             config["engineSlug"] = engineSlug.Trim();
         config["engineName"] = EngineStackName(instanceId);
+        if (handoffConfigured && handoff is not null)
+        {
+            handoff.Validate();
+            config["handoffControlBaseUrl"] = handoff.ControlBaseUrl;
+            config["handoffControlContinuationUrl"] = handoff.ControlContinuationUrl;
+            config["handoffAudience"] = ElsaInstanceIdentityBinding.AudienceFor(instanceId);
+            config["handoffRuntimeMaximumLifetime"] = handoff.RuntimeMaximumLifetimeValue;
+            config["handoffAllowedRuntimePermissions"] = string.Join(',', handoff.AllowedRuntimePermissions);
+        }
+
         return config;
     }
 }

@@ -18,6 +18,19 @@ public static class ProvisioningStackName
         return EnginePrefix + instanceId.ToString("N").ToLowerInvariant();
     }
 
+    public static bool TryParseEngineInstanceId(string stackName, out Guid instanceId)
+    {
+        instanceId = Guid.Empty;
+        if (string.IsNullOrWhiteSpace(stackName)
+            || !stackName.StartsWith(EnginePrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return Guid.TryParseExact(stackName[EnginePrefix.Length..], "N", out instanceId)
+               && instanceId != Guid.Empty;
+    }
+
     public static string ForPlatform(string environmentName)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(environmentName);

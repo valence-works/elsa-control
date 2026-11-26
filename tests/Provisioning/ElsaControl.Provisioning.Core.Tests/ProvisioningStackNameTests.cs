@@ -37,6 +37,21 @@ public sealed class ProvisioningStackNameTests
         Assert.Throws<ArgumentException>(() => ProvisioningStackName.ForEngine(Guid.Empty));
 
     [Fact]
+    public void Engine_stack_name_round_trips_to_the_instance_id()
+    {
+        var instanceId = Guid.Parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        Assert.True(ProvisioningStackName.TryParseEngineInstanceId(
+            ProvisioningStackName.ForEngine(instanceId),
+            out var parsed));
+        Assert.Equal(instanceId, parsed);
+        Assert.Equal(
+            ProvisioningEngineResourceGroup.ForInstance(instanceId),
+            ProvisioningEngineResourceGroup.Resolve(
+                ProvisioningStackName.ForEngine(instanceId),
+                new Dictionary<string, string>(StringComparer.Ordinal)));
+    }
+
+    [Fact]
     public void Platform_stack_reference_is_fully_qualified()
     {
         Assert.Equal(

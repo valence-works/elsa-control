@@ -1,4 +1,5 @@
 using ElsaControl.Provisioning.Abstractions;
+using ElsaControl.Provisioning.Core;
 
 namespace ElsaControl.Provisioning.Providers.Azure;
 
@@ -14,7 +15,7 @@ public sealed class AzureInfrastructureProvider(
     TimeProvider? timeProvider = null) : IInfrastructureProvider
 {
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
-    private readonly IResourceGroupAbsenceProbe _absence = absence ?? new RecordingResourceGroupAbsenceProbe();
+    private readonly IResourceGroupAbsenceProbe _absence = absence ?? new UnknownResourceGroupAbsenceProbe();
 
     public string ProviderId => AzurePulumiAutomationRunner.ProviderId;
 
@@ -89,9 +90,22 @@ public sealed class AzureInfrastructureProvider(
         if (!result.Succeeded)
             return result;
 
-        var groupName = request.StackConfig.TryGetValue("resourceGroupName", out var configured)
-            ? configured
-            : operation.StackName;
+        string groupName;
+        try
+        {
+            groupName = ProvisioningEngineResourceGroup.Resolve(operation.StackName, request.StackConfig);
+        }
+        catch (InvalidOperationException)
+        {
+            var unresolved = new ProvisioningEvent(
+                operation.Id,
+                ProvisioningEventKind.ResourceFailed,
+                "resource-group",
+                "Owned resource group is not absent.",
+                _timeProvider.GetUtcNow());
+            return ProviderRunResult.Fail([..result.Events, unresolved], ProvisioningFailureCodes.ResourceGroupPresent);
+        }
+
         var presence = await _absence.ObserveAsync(groupName, cancellationToken).ConfigureAwait(false);
         if (presence != ResourceGroupPresence.Absent)
         {

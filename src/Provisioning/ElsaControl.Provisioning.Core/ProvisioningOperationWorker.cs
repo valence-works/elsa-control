@@ -113,6 +113,8 @@ public sealed class ProvisioningOperationWorker(
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
+                await FailAsync(claimed, ProvisioningFailureCodes.Interrupted, CancellationToken.None)
+                    .ConfigureAwait(false);
                 throw;
             }
             catch (OperationCanceledException)
@@ -126,6 +128,29 @@ public sealed class ProvisioningOperationWorker(
         }
 
         return processed;
+    }
+
+    public async Task ReconcileInterruptedAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var interrupted = await operations
+            .FailInterruptedAsync(_timeProvider.GetUtcNow(), CancellationToken.None)
+            .ConfigureAwait(false);
+        foreach (var operation in interrupted)
+        {
+            await events.AppendAsync(
+                [
+                    new ProvisioningEvent(
+                        operation.Id,
+                        ProvisioningEventKind.OperationFailed,
+                        operation.StackKind == ProvisioningStackKind.Platform
+                            ? ProvisioningCapability.SharedEnvironment
+                            : ProvisioningCapability.ContainerRuntime,
+                        "Operation interrupted.",
+                        _timeProvider.GetUtcNow())
+                ],
+                CancellationToken.None).ConfigureAwait(false);
+        }
     }
 
     private static ProvisioningOperationState TerminalState(
@@ -191,6 +216,10 @@ public sealed class ProvisioningOperationWorker(
 
     private async Task FailAsync(ProvisioningOperation operation, string failureCode, CancellationToken cancellationToken)
     {
+        var current = await operations.GetAsync(operation.Id, CancellationToken.None).ConfigureAwait(false);
+        if (current is null || ProvisioningOperationStateMachine.IsTerminal(current.State))
+            return;
+
         await operations.CompleteAsync(
             operation.Id,
             ProvisioningOperationState.Failed,

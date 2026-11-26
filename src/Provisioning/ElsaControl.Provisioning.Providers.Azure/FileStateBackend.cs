@@ -11,9 +11,7 @@ public sealed class FileStateBackend : IStateBackend
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);
         DirectoryPath = Path.GetFullPath(directory.Trim());
-        BackendUrl = new Uri(DirectoryPath).AbsoluteUri.Replace("file:///", "file://", StringComparison.Ordinal);
-        if (!BackendUrl.StartsWith("file://", StringComparison.Ordinal))
-            BackendUrl = "file://" + DirectoryPath;
+        BackendUrl = new Uri(DirectoryPath).AbsoluteUri;
     }
 
     public string Kind => StateBackendReference.FileKind;

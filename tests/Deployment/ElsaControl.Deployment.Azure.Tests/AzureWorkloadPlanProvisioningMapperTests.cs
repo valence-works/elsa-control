@@ -34,7 +34,8 @@ public sealed class AzureWorkloadPlanProvisioningMapperTests
         Assert.Equal("prod", config["engineSlug"]);
         Assert.Equal("engine-aaaaaaaabbbbccccddddeeeeeeeeeeee", config["engineName"]);
         Assert.DoesNotContain("acme", AzureWorkloadPlanProvisioningMapper.EngineStackName(instanceId), StringComparison.Ordinal);
-        Assert.Equal(plan.Fingerprint[..24], config["revisionSuffix"]);
+        Assert.Equal(ProvisioningRevisionSuffix.FromFingerprint(plan.Fingerprint), config["revisionSuffix"]);
+        Assert.StartsWith("r", config["revisionSuffix"], StringComparison.Ordinal);
         foreach (var pair in config)
         {
             Assert.False(ProvisioningEventSanitizer.ContainsSecretOrResourceIdentifier(pair.Key));
@@ -71,23 +72,43 @@ public sealed class AzureWorkloadPlanProvisioningMapperTests
     public void Handoff_stays_off_unless_control_configured_it()
     {
         var instanceId = Guid.Parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
-        var declared = AzureWorkloadPlanProvisioningMapper.StackConfig(
+        var unsupported = Assert.Throws<ArgumentException>(() => AzureWorkloadPlanProvisioningMapper.StackConfig(
             Plan() with { ManagedHandoff = true },
             instanceId,
+            "organization/elsa-platform/staging"));
+        Assert.Equal("plan", unsupported.ParamName);
+        var handoffPlan = Plan() with
+        {
+            ManagedHandoff = true,
+            Capacity = new AzureWorkloadCapacity(1, 1, 500, 1024)
+        };
+        var declared = AzureWorkloadPlanProvisioningMapper.StackConfig(
+            handoffPlan,
+            instanceId,
             "organization/elsa-platform/staging",
-            capacity: new AzureWorkloadCapacity(1, 1, 500, 1024),
             handoffConfigured: false);
         Assert.Equal("true", declared["managedHandoff"]);
         Assert.Equal("false", declared["handoffConfigured"]);
         var configured = AzureWorkloadPlanProvisioningMapper.StackConfig(
-            Plan() with { ManagedHandoff = true },
+            handoffPlan,
             instanceId,
             "organization/elsa-platform/staging",
-            capacity: new AzureWorkloadCapacity(1, 1, 500, 1024),
             handoffConfigured: true);
         Assert.Equal("true", configured["handoffConfigured"]);
         Assert.Equal("1", configured["minReplicas"]);
         Assert.Equal("1", configured["maxReplicas"]);
+    }
+
+    [Fact]
+    public void Capacity_override_must_match_the_fingerprinted_capacity()
+    {
+        var instanceId = Guid.Parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        var error = Assert.Throws<ArgumentException>(() => AzureWorkloadPlanProvisioningMapper.StackConfig(
+            Plan(),
+            instanceId,
+            "organization/elsa-platform/staging",
+            capacity: new AzureWorkloadCapacity(1, 2, 1000, 2048)));
+        Assert.Equal("capacity", error.ParamName);
     }
 
     private static AzureWorkloadPlan Plan() =>

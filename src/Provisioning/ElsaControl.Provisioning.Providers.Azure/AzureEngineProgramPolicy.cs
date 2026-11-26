@@ -1,4 +1,5 @@
 using ElsaControl.Provisioning.Abstractions;
+using ElsaControl.Provisioning.Core;
 
 namespace ElsaControl.Provisioning.Providers.Azure;
 
@@ -51,6 +52,10 @@ public static class AzureEngineProgramPolicy
 
         Require(config, "platformStack", out _);
 
+        var revisionSuffix = Get(config, "revisionSuffix");
+        if (!string.IsNullOrWhiteSpace(revisionSuffix))
+            ProvisioningRevisionSuffix.Validate(revisionSuffix);
+
         var handoff = Get(config, "managedHandoff");
         if (string.Equals(handoff, "true", StringComparison.OrdinalIgnoreCase))
         {
@@ -58,16 +63,23 @@ public static class AzureEngineProgramPolicy
                 throw new InvalidOperationException("Managed handoff is declared but not configured.");
             if (Get(config, "minReplicas") != "1" || Get(config, "maxReplicas") != "1")
                 throw new InvalidOperationException("Managed handoff requires exactly one replica.");
+            Require(config, "handoffControlBaseUrl", out _);
+            Require(config, "handoffControlContinuationUrl", out _);
+            Require(config, "handoffAudience", out _);
+            Require(config, "handoffRuntimeMaximumLifetime", out _);
+            Require(config, "handoffAllowedRuntimePermissions", out var permissions);
+            if (permissions.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).Length == 0)
+                throw new InvalidOperationException("Managed handoff requires runtime permissions.");
         }
     }
 
     public static string ImmutableImage(IReadOnlyDictionary<string, string> config)
     {
         Validate(config);
-        var digest = config["imageDigest"];
+        var digest = config["imageDigest"].Trim();
         if (digest.StartsWith(ImageDigestPrefix, StringComparison.OrdinalIgnoreCase))
             digest = digest[ImageDigestPrefix.Length..];
-        return $"{config["imageRepository"]}@{ImageDigestPrefix}{digest.ToLowerInvariant()}";
+        return $"{config["imageRepository"].Trim()}@{ImageDigestPrefix}{digest.ToLowerInvariant()}";
     }
 
     private static void Require(IReadOnlyDictionary<string, string> config, string key, out string value)
@@ -78,5 +90,5 @@ public static class AzureEngineProgramPolicy
     }
 
     private static string? Get(IReadOnlyDictionary<string, string> config, string key) =>
-        config.TryGetValue(key, out var value) ? value : null;
+        config.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value) ? value.Trim() : null;
 }

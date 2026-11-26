@@ -140,6 +140,25 @@ public sealed class ProvisioningServiceTests
     }
 
     [Fact]
+    public async Task Stack_config_rejects_credential_bearing_urls()
+    {
+        var store = new InMemoryProvisioningStore();
+        var service = new ProvisioningService(store, store);
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.ProvisionAsync(ProvisioningFixtures.Request(
+                ProvisioningCommand.Provision,
+                ProvisioningFixtures.PlatformTarget(),
+                ProvisioningFixtures.PlatformSpec(),
+                "sas-config",
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["artifact"] = "https://example.blob.core.windows.net/file?sig=not-a-real-signature"
+                })));
+        Assert.Equal("Stack config must not contain secrets or cloud identifiers.", error.Message);
+        Assert.Empty(await store.ListRunnableAsync(10));
+    }
+
+    [Fact]
     public async Task Identical_idempotency_key_replays()
     {
         var store = new InMemoryProvisioningStore();
@@ -282,5 +301,59 @@ public sealed class ProvisioningServiceTests
             "lock-cancel-second"));
         Assert.True(second.LockConflict);
         Assert.Equal(ProvisioningOperationState.LockConflict, second.State);
+    }
+
+    [Fact]
+    public async Task Replayed_cancel_does_not_signal_a_later_run()
+    {
+        var store = new InMemoryProvisioningStore();
+        var runs = new ProvisioningRunRegistry();
+        var service = new ProvisioningService(store, store, runs);
+        var cancelRequest = ProvisioningFixtures.Request(
+            ProvisioningCommand.Cancel,
+            ProvisioningFixtures.PlatformTarget("replay-cancel"),
+            ProvisioningFixtures.PlatformSpec("replay-cancel"),
+            "replay-cancel-key");
+        var first = await service.CancelAsync(cancelRequest);
+        Assert.False(first.Replayed);
+
+        var provision = await service.ProvisionAsync(ProvisioningFixtures.Request(
+            ProvisioningCommand.Provision,
+            ProvisioningFixtures.PlatformTarget("replay-cancel"),
+            ProvisioningFixtures.PlatformSpec("replay-cancel"),
+            "replay-cancel-provision"));
+        var claimed = await store.ClaimAsync(provision.OperationId, DateTimeOffset.UtcNow);
+        using var cts = new CancellationTokenSource();
+        using var registration = runs.Register(claimed!, cts);
+
+        var replayed = await service.CancelAsync(cancelRequest);
+        Assert.True(replayed.Replayed);
+        Assert.False(cts.IsCancellationRequested);
+    }
+
+    [Fact]
+    public async Task Host_cancellation_fails_the_running_operation_and_releases_the_lock()
+    {
+        var store = new InMemoryProvisioningStore();
+        var runs = new ProvisioningRunRegistry();
+        var provider = new FakeInfrastructureProvider { Stall = TimeSpan.FromSeconds(30) };
+        var service = new ProvisioningService(store, store, runs);
+        var worker = new ProvisioningOperationWorker(store, store, provider, runs);
+        var provision = await service.ProvisionAsync(ProvisioningFixtures.Request(
+            ProvisioningCommand.Provision,
+            ProvisioningFixtures.PlatformTarget("interrupt"),
+            ProvisioningFixtures.PlatformSpec("interrupt"),
+            "interrupt-provision"));
+
+        using var cts = new CancellationTokenSource();
+        var processing = worker.ProcessOnceAsync(cancellationToken: cts.Token);
+        await Task.Delay(50);
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => processing);
+
+        var completed = await service.GetOperationAsync(provision.OperationId);
+        Assert.Equal(ProvisioningOperationState.Failed, completed!.State);
+        Assert.Equal(ProvisioningFailureCodes.Interrupted, completed.FailureCode);
+        Assert.Null(await store.GetHolderAsync(ProvisioningStackKind.Platform, "interrupt"));
     }
 }
