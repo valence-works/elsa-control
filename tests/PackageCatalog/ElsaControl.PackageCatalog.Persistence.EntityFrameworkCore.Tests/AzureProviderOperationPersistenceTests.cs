@@ -1226,6 +1226,48 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
     }
 
     [Fact]
+    public async Task Arm_observation_failure_class_cannot_overwrite_terminal_with_transient()
+    {
+        var now = DateTimeOffset.Parse("2026-11-26T18:00:00Z");
+        var lifecycleOperationId = Guid.NewGuid();
+        using var db = CreateContext();
+        db.ElsaInstanceOperations.Add(new ElsaInstanceOperationEntity
+        {
+            Id = lifecycleOperationId,
+            OrganizationId = _organizationId,
+            WorkspaceId = _workspaceId,
+            Action = ElsaInstanceOperationAction.Create,
+            IdempotencyScope = "instance/failure-class",
+            IdempotencyKey = "failure-class-stamp",
+            RequestHash = new string('a', 64),
+            ExpectedVersion = 1,
+            State = ElsaInstanceOperationState.Failed,
+            AttemptNumber = 1,
+            FailureClass = ElsaInstanceOperationFailureClass.Transient,
+            AcceptedAt = now,
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        await db.SaveChangesAsync();
+        var store = new AzureProviderOperationStore(db);
+        var created = await store.CreateOrGetAsync(Request() with
+        {
+            IdempotencyKey = AzureProviderOperationValidation.LifecycleIdempotencyKey(lifecycleOperationId)
+        }, now);
+
+        await store.RecordArmObservationClockAsync(
+            _workspaceId, created.Id, now.AddMinutes(1), 60, "azure.retrying", ElsaInstanceOperationFailureClass.Transient);
+        await store.RecordArmObservationClockAsync(
+            _workspaceId, created.Id, now.AddMinutes(2), 60, "azure.quota-exceeded", ElsaInstanceOperationFailureClass.Terminal);
+        await store.RecordArmObservationClockAsync(
+            _workspaceId, created.Id, now.AddMinutes(3), 60, "azure.retrying", ElsaInstanceOperationFailureClass.Transient);
+
+        db.ChangeTracker.Clear();
+        var stored = await db.ElsaInstanceOperations.SingleAsync(x => x.Id == lifecycleOperationId);
+        Assert.Equal(ElsaInstanceOperationFailureClass.Terminal, stored.FailureClass);
+    }
+
+    [Fact]
     public async Task ControlRoom_metadata_only_checkpoint_must_not_count_as_provider_progress()
     {
         var now = DateTimeOffset.Parse("2026-10-03T10:00:00Z");

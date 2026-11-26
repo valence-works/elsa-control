@@ -365,6 +365,58 @@ public sealed class CloudBffAuthorizationTests
     }
 
     [Fact]
+    public async Task Bff_passes_retry_allowed_actions_and_the_retry_post_through()
+    {
+        await using var app = CreateBffApplication(configureServices: services =>
+        {
+            services.AddSingleton<IEngineProvisioningModule, TestProvisioningModule>();
+            services.RemoveAll<IGovernedReleaseCatalogStore>();
+            services.AddSingleton<IGovernedReleaseCatalogStore>(new StaticReleaseCatalogStore());
+        });
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var owner = CreateBffClient(app);
+        var workspaceId = (await owner.GetControlJsonAsync<MeWorkspacesResponse>("/api/me/workspaces"))!
+            .Workspaces.Single().Id;
+        await EnableManagedHostingAsync(app, workspaceId);
+
+        using var createRequest = new HttpRequestMessage(HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/instances")
+        {
+            Content = JsonContent.Create(
+                new ManagedElsaInstanceCreateRequest("BFF retry", "bff-retry-runtime", Intent()),
+                options: ControlApiTestApplication.JsonOptions)
+        };
+        createRequest.Headers.Add("Idempotency-Key", "bff-retry-create");
+        using var create = await owner.SendAsync(createRequest);
+        Assert.Equal(HttpStatusCode.Accepted, create.StatusCode);
+        var created = await create.Content.ReadControlJsonAsync<ManagedElsaInstanceAcceptedResponse>();
+        Assert.NotNull(created);
+        await FailCreateAsync(app, created!);
+
+        using var overview = await owner.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/overview");
+        var overviewBody = await overview.Content.ReadControlJsonAsync<ManagedElsaInstanceOverviewResponse>();
+        Assert.Equal(HttpStatusCode.OK, overview.StatusCode);
+        Assert.True(overviewBody!.AllowedActions.Retry.Allowed);
+        Assert.Null(overviewBody.AllowedActions.Retry.ReasonCode);
+
+        using var retryRequest = new HttpRequestMessage(HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/operations")
+        {
+            Content = JsonContent.Create(
+                new ManagedElsaInstanceOperationRequest(ElsaInstanceOperationAction.Retry),
+                options: ControlApiTestApplication.JsonOptions)
+        };
+        retryRequest.Headers.TryAddWithoutValidation("If-Match", created.Instance.ETag);
+        retryRequest.Headers.Add("Idempotency-Key", "bff-retry-setup");
+        using var retry = await owner.SendAsync(retryRequest);
+        var retryBody = await retry.Content.ReadControlJsonAsync<ManagedElsaInstanceAcceptedResponse>();
+        Assert.Equal(HttpStatusCode.Accepted, retry.StatusCode);
+        Assert.Equal(ElsaInstanceOperationAction.Retry, retryBody!.Operation.Action);
+        Assert.Equal(created.Instance.InstanceId, retryBody.Operation.InstanceId);
+    }
+
+    [Fact]
     public async Task Bff_owner_can_complete_the_narrow_delete_flow_while_a_reader_is_denied()
     {
         await using var app = CreateBffApplication(configureServices: services =>
@@ -775,6 +827,24 @@ public sealed class CloudBffAuthorizationTests
         });
         await database.SaveChangesAsync();
         return account.Id;
+    }
+
+    private static async Task FailCreateAsync(
+        ControlApiTestApplication app,
+        ManagedElsaInstanceAcceptedResponse created)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        var completedAtTicks = DateTimeOffset.UtcNow.UtcTicks;
+        var failed = ElsaInstanceOperationState.Failed.ToString();
+        var observed = ElsaObservedLifecycle.Failed.ToString();
+        var desired = ElsaDesiredLifecycle.Running.ToString();
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"UPDATE ElsaInstanceOperations SET State = {failed}, CompletedAt = {completedAtTicks}, FailureCode = {ManagedElsaReasonCodeCatalog.StagingLeverFailedCreate} WHERE Id = {created.Operation.Id}");
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"UPDATE ElsaInstanceLifecycleOutbox SET QuarantinedAt = {completedAtTicks}, QuarantineCode = {"outbox.invalid"} WHERE OperationId = {created.Operation.Id} AND QuarantinedAt IS NULL");
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"UPDATE ElsaInstances SET DesiredLifecycle = {desired}, ObservedLifecycle = {observed} WHERE Id = {created.Instance.InstanceId}");
     }
 
     private static async Task EnableManagedHostingAsync(ControlApiTestApplication app, Guid workspaceId)

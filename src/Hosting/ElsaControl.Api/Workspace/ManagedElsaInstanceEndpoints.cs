@@ -555,6 +555,18 @@ public static class ManagedElsaInstanceEndpoints
             if (request.ExpectedVersion is { } bodyVersion && expectedVersion.Value != bodyVersion)
                 return Problem("instance.version-conflict", "If-Match and expectedVersion do not agree.", StatusCodes.Status412PreconditionFailed);
             var access = context.GetWorkspaceAccess();
+            if (!WorkspaceRolePolicy.Allows(access.Role, WorkspaceOperation.MutateWorkspaceResource))
+            {
+                return request.Action == ElsaInstanceOperationAction.Retry
+                    ? Problem(
+                        ManagedElsaInstanceOverviewEndpoints.RetryPermissionRequiredCode,
+                        "Retry permission is required.",
+                        StatusCodes.Status403Forbidden)
+                    : Problem(
+                        "instance.permission-required",
+                        "The caller cannot mutate this workspace resource.",
+                        StatusCodes.Status403Forbidden);
+            }
 
             if (request.Action == ElsaInstanceOperationAction.Delete)
             {
@@ -609,7 +621,7 @@ public static class ManagedElsaInstanceEndpoints
                             return Problem(
                                 retryDecision.ReasonCode!,
                                 "The requested operation is not valid for the current instance state.",
-                                StatusCodes.Status409Conflict);
+                                ManagedElsaInstanceOverviewEndpoints.RetryDenialStatusCode(retryDecision.ReasonCode!));
                     }
                 }
             }
@@ -674,7 +686,7 @@ public static class ManagedElsaInstanceEndpoints
             {
                 return Problem("instance.operation-invalid", "The requested operation is invalid.", StatusCodes.Status422UnprocessableEntity);
             }
-        }).RequireWorkspaceAccess(WorkspaceOperation.MutateWorkspaceResource).AllowCloudBff().AllowHubBff();
+        }).RequireWorkspaceAccess().AllowCloudBff().AllowHubBff();
 
         group.MapGet("/{instanceId:guid}/operations", async (
             Guid workspaceId,

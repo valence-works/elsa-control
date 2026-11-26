@@ -1,3 +1,4 @@
+using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Instances;
 
 namespace ElsaControl.Deployment.Azure;
@@ -114,6 +115,20 @@ public interface IAzureProviderOperationStore
         string? reasonCode,
         CancellationToken cancellationToken = default) =>
         RecordArmObservationClockAsync(workspaceId, operationId, observedAt, backoffSeconds, cancellationToken);
+
+    /// <summary>
+    /// Records the ARM observation clock, an optional operator-visible reason,
+    /// and a customer-safe failure class without bumping the provider version.
+    /// </summary>
+    Task RecordArmObservationClockAsync(
+        Guid workspaceId,
+        Guid operationId,
+        DateTimeOffset observedAt,
+        int backoffSeconds,
+        string? reasonCode,
+        ElsaInstanceOperationFailureClass? failureClass,
+        CancellationToken cancellationToken = default) =>
+        RecordArmObservationClockAsync(workspaceId, operationId, observedAt, backoffSeconds, reasonCode, cancellationToken);
 
     /// <summary>
     /// Atomically claims one automatic resume slot when the stored count still

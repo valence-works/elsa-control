@@ -1532,6 +1532,105 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
     }
 
     [Fact]
+    public async Task Quota_exceeded_failed_create_is_provider_rejected_on_overview_and_route()
+    {
+        var app = await PrepareApplicationAsync();
+        var client = app.CreateTrustedWorkspaceClient("overview-retry-quota-owner");
+        var (workspaceId, created) = await CreateAcceptedInstanceAsync(app, client, "overview-retry-quota");
+        await FailCreateAsync(app, created, ElsaInstanceOperationFailureClass.Terminal);
+
+        await AssertRetryDecisionMatchesRouteAsync(
+            client, workspaceId, created.Instance.InstanceId, created.Instance.ETag,
+            "overview-retry-quota", allowed: false,
+            reasonCode: ManagedElsaInstanceOverviewEndpoints.RetryProviderRejectedCode);
+
+        using var overviewResponse = await client.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/overview");
+        var overview = JsonSerializer.Deserialize<ManagedElsaInstanceOverviewResponse>(
+            await overviewResponse.Content.ReadAsStringAsync(), ControlApiTestApplication.JsonOptions);
+        Assert.True(overview!.AllowedActions.Delete.Allowed);
+        Assert.Null(overview.AllowedActions.Delete.ReasonCode);
+        Assert.DoesNotContain("QuotaExceeded", await overviewResponse.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(ElsaInstanceOperationFailureClass.Transient)]
+    [InlineData(ElsaInstanceOperationFailureClass.Unclassified)]
+    [InlineData(null)]
+    public async Task Transient_crash_loop_and_unclassified_failed_creates_stay_retryable(
+        ElsaInstanceOperationFailureClass? failureClass)
+    {
+        var app = await PrepareApplicationAsync();
+        var slug = failureClass?.ToString().ToLowerInvariant() ?? "null";
+        var client = app.CreateTrustedWorkspaceClient($"overview-retry-{slug}-owner");
+        var (workspaceId, created) = await CreateAcceptedInstanceAsync(app, client, $"overview-retry-{slug}");
+        await FailCreateAsync(app, created, failureClass);
+
+        await AssertRetryDecisionMatchesRouteAsync(
+            client, workspaceId, created.Instance.InstanceId, created.Instance.ETag,
+            $"overview-retry-{slug}", allowed: true, reasonCode: null);
+    }
+
+    [Fact]
+    public async Task Failed_retry_is_offered_again_unless_the_failure_was_terminal()
+    {
+        var app = await PrepareApplicationAsync();
+        var client = app.CreateTrustedWorkspaceClient("overview-retry-again-owner");
+        var (workspaceId, created) = await CreateAcceptedInstanceAsync(app, client, "overview-retry-again");
+        await FailCreateAsync(app, created);
+
+        using var first = await SendRetryAsync(
+            client, workspaceId, created.Instance.InstanceId, created.Instance.ETag, "overview-retry-again-first");
+        var firstBody = await first.Content.ReadControlJsonAsync<ManagedElsaInstanceAcceptedResponse>();
+        Assert.Equal(HttpStatusCode.Accepted, first.StatusCode);
+        await FailRetryAsync(app, created.Instance.InstanceId, firstBody!.Operation.Id, ElsaInstanceOperationFailureClass.Transient);
+        var etag = await ReadInstanceETagAsync(client, workspaceId, created.Instance.InstanceId);
+
+        using var overviewAfterTransient = await client.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/overview");
+        var transientOverview = JsonSerializer.Deserialize<ManagedElsaInstanceOverviewResponse>(
+            await overviewAfterTransient.Content.ReadAsStringAsync(), ControlApiTestApplication.JsonOptions);
+        Assert.True(transientOverview!.AllowedActions.Retry.Allowed);
+        Assert.Null(transientOverview.AllowedActions.Retry.ReasonCode);
+
+        using var second = await SendRetryAsync(
+            client, workspaceId, created.Instance.InstanceId, etag, "overview-retry-again-terminal");
+        var secondBody = await second.Content.ReadControlJsonAsync<ManagedElsaInstanceAcceptedResponse>();
+        Assert.Equal(HttpStatusCode.Accepted, second.StatusCode);
+        await FailRetryAsync(app, created.Instance.InstanceId, secondBody!.Operation.Id, ElsaInstanceOperationFailureClass.Terminal);
+        var rejectedEtag = await ReadInstanceETagAsync(client, workspaceId, created.Instance.InstanceId);
+
+        await AssertRetryDecisionMatchesRouteAsync(
+            client, workspaceId, created.Instance.InstanceId, rejectedEtag,
+            "overview-retry-again-rejected", allowed: false,
+            reasonCode: ManagedElsaInstanceOverviewEndpoints.RetryProviderRejectedCode);
+    }
+
+    [Fact]
+    public async Task Two_identical_retry_requests_share_one_operation()
+    {
+        var app = await PrepareApplicationAsync();
+        var client = app.CreateTrustedWorkspaceClient("overview-retry-concurrent-owner");
+        var (workspaceId, created) = await CreateAcceptedInstanceAsync(app, client, "overview-retry-concurrent");
+        await FailCreateAsync(app, created);
+
+        var firstTask = SendRetryAsync(
+            client, workspaceId, created.Instance.InstanceId, created.Instance.ETag, "overview-retry-concurrent");
+        var secondTask = SendRetryAsync(
+            client, workspaceId, created.Instance.InstanceId, created.Instance.ETag, "overview-retry-concurrent");
+        await Task.WhenAll(firstTask, secondTask);
+        using var first = await firstTask;
+        using var second = await secondTask;
+
+        Assert.Equal(HttpStatusCode.Accepted, first.StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, second.StatusCode);
+        var firstBody = await first.Content.ReadControlJsonAsync<ManagedElsaInstanceAcceptedResponse>();
+        var secondBody = await second.Content.ReadControlJsonAsync<ManagedElsaInstanceAcceptedResponse>();
+        Assert.Equal(firstBody!.Operation.Id, secondBody!.Operation.Id);
+        Assert.Equal(2, await CountOperationsAsync(app));
+    }
+
+    [Fact]
     public async Task Retry_in_flight_is_denied_on_overview_and_the_route()
     {
         var app = await PrepareApplicationAsync();
@@ -1648,6 +1747,21 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
         using var retry = await SendRetryAsync(
             reader, workspaceId, created.Instance.InstanceId, created.Instance.ETag, "overview-retry-reader");
         Assert.Equal(HttpStatusCode.Forbidden, retry.StatusCode);
+        Assert.Contains(
+            ManagedElsaInstanceOverviewEndpoints.RetryPermissionRequiredCode,
+            await retry.Content.ReadAsStringAsync(),
+            StringComparison.Ordinal);
+
+        using var ownerRetry = await SendRetryAsync(
+            owner, workspaceId, created.Instance.InstanceId, created.Instance.ETag, "overview-retry-reader-owner");
+        Assert.Equal(HttpStatusCode.Accepted, ownerRetry.StatusCode);
+        using var replay = await SendRetryAsync(
+            reader, workspaceId, created.Instance.InstanceId, created.Instance.ETag, "overview-retry-reader-owner");
+        Assert.Equal(HttpStatusCode.Forbidden, replay.StatusCode);
+        Assert.Contains(
+            ManagedElsaInstanceOverviewEndpoints.RetryPermissionRequiredCode,
+            await replay.Content.ReadAsStringAsync(),
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1736,7 +1850,10 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
             "ready",
             "degraded-failed-restart",
             "commercial-gate",
-            "permission"
+            "permission",
+            "provider-rejected",
+            "failed-retry",
+            "failed-retry-terminal"
         };
 
     [Theory]
@@ -2104,15 +2221,18 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
         Guid operationId,
         ElsaInstanceOperationState state,
         string? failureCode,
-        bool completed)
+        bool completed,
+        ElsaInstanceOperationFailureClass? failureClass = null)
     {
         await using var scope = app.Services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
         long? completedAtTicks = completed ? DateTimeOffset.UtcNow.UtcTicks : null;
+        var failureClassValue = failureClass?.ToString();
         await db.Database.ExecuteSqlInterpolatedAsync($"""
             UPDATE ElsaInstanceOperations
             SET State = {state.ToString()},
                 FailureCode = {failureCode},
+                FailureClass = {failureClassValue},
                 CompletedAt = {completedAtTicks}
             WHERE Id = {operationId}
             """);
@@ -2230,17 +2350,36 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
 
     private static async Task FailCreateAsync(
         ControlApiTestApplication app,
-        ManagedElsaInstanceAcceptedResponse created)
+        ManagedElsaInstanceAcceptedResponse created,
+        ElsaInstanceOperationFailureClass? failureClass = null)
     {
         await SetOperationStateAsync(
             app,
             created.Operation.Id,
             ElsaInstanceOperationState.Failed,
             ManagedElsaReasonCodeCatalog.StagingLeverFailedCreate,
-            completed: true);
+            completed: true,
+            failureClass);
         await QuarantineOutboxAsync(app, created.Operation.Id);
         await SetLifecycleAsync(
             app, created.Instance.InstanceId, ElsaObservedLifecycle.Failed, ElsaDesiredLifecycle.Running);
+    }
+
+    private static async Task FailRetryAsync(
+        ControlApiTestApplication app,
+        Guid instanceId,
+        Guid operationId,
+        ElsaInstanceOperationFailureClass failureClass)
+    {
+        await SetOperationStateAsync(
+            app,
+            operationId,
+            ElsaInstanceOperationState.Failed,
+            ManagedElsaReasonCodeCatalog.StagingLeverFailedCreate,
+            completed: true,
+            failureClass);
+        await QuarantineOutboxAsync(app, operationId);
+        await SetLifecycleAsync(app, instanceId, ElsaObservedLifecycle.Failed, ElsaDesiredLifecycle.Running);
     }
 
     private static Task<HttpResponseMessage> SendRetryAsync(
@@ -2286,13 +2425,21 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
             return;
         }
 
-        if (reasonCode == ManagedElsaInstanceOverviewEndpoints.RetryPermissionRequiredCode)
+        var expectedStatus = reasonCode switch
         {
-            Assert.Equal(HttpStatusCode.Forbidden, retry.StatusCode);
-            return;
-        }
-
-        Assert.Equal(HttpStatusCode.Conflict, retry.StatusCode);
+            ManagedElsaInstanceOverviewEndpoints.RetryPermissionRequiredCode => HttpStatusCode.Forbidden,
+            ElsaInstanceCommercialOperation.EntitlementRequired
+                or ElsaInstanceCommercialOperation.EntitlementExpired
+                or ElsaInstanceCommercialOperation.SubscriptionStateRequired
+                or ElsaInstanceCommercialOperation.LifecycleConstrained
+                or ElsaInstanceCommercialOperation.InstanceLimitReached
+                or ElsaInstanceCommercialOperation.BindingRequired
+                or ElsaInstanceCommercialOperation.EntitlementSafeExitSuperseded
+                or ElsaInstanceCommercialOperation.SharedAllowanceExceeded
+                or ElsaInstanceCommercialOperation.ShardCapacity => HttpStatusCode.UnprocessableEntity,
+            _ => HttpStatusCode.Conflict
+        };
+        Assert.Equal(expectedStatus, retry.StatusCode);
         Assert.Contains(reasonCode!, retryText, StringComparison.Ordinal);
     }
 
@@ -2420,6 +2567,40 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
                 var reader = app.CreateTrustedWorkspaceClient($"{slug}-reader");
                 return (workspaceId, created, created.Instance.ETag, false,
                     ManagedElsaInstanceOverviewEndpoints.RetryPermissionRequiredCode, reader);
+            }
+            case "provider-rejected":
+            {
+                var (workspaceId, created) = await CreateAcceptedInstanceAsync(app, owner, slug);
+                await FailCreateAsync(app, created, ElsaInstanceOperationFailureClass.Terminal);
+                return (workspaceId, created, created.Instance.ETag, false,
+                    ManagedElsaInstanceOverviewEndpoints.RetryProviderRejectedCode, owner);
+            }
+            case "failed-retry":
+            {
+                var (workspaceId, created) = await CreateAcceptedInstanceAsync(app, owner, slug);
+                await FailCreateAsync(app, created);
+                using var first = await SendRetryAsync(
+                    owner, workspaceId, created.Instance.InstanceId, created.Instance.ETag, $"{slug}-first");
+                var firstBody = await first.Content.ReadControlJsonAsync<ManagedElsaInstanceAcceptedResponse>();
+                Assert.Equal(HttpStatusCode.Accepted, first.StatusCode);
+                await FailRetryAsync(app, created.Instance.InstanceId, firstBody!.Operation.Id,
+                    ElsaInstanceOperationFailureClass.Transient);
+                var etag = await ReadInstanceETagAsync(owner, workspaceId, created.Instance.InstanceId);
+                return (workspaceId, created, etag, true, null, owner);
+            }
+            case "failed-retry-terminal":
+            {
+                var (workspaceId, created) = await CreateAcceptedInstanceAsync(app, owner, slug);
+                await FailCreateAsync(app, created);
+                using var first = await SendRetryAsync(
+                    owner, workspaceId, created.Instance.InstanceId, created.Instance.ETag, $"{slug}-first");
+                var firstBody = await first.Content.ReadControlJsonAsync<ManagedElsaInstanceAcceptedResponse>();
+                Assert.Equal(HttpStatusCode.Accepted, first.StatusCode);
+                await FailRetryAsync(app, created.Instance.InstanceId, firstBody!.Operation.Id,
+                    ElsaInstanceOperationFailureClass.Terminal);
+                var etag = await ReadInstanceETagAsync(owner, workspaceId, created.Instance.InstanceId);
+                return (workspaceId, created, etag, false,
+                    ManagedElsaInstanceOverviewEndpoints.RetryProviderRejectedCode, owner);
             }
             default:
                 throw new ArgumentOutOfRangeException(nameof(scenario), scenario, "Unknown retry parity scenario.");

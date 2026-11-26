@@ -1321,6 +1321,7 @@ internal sealed class ElsaInstanceOperationConfiguration : IEntityTypeConfigurat
         builder.Property(x => x.DesiredStateRevisionId).HasMaxLength(128);
         builder.Property(x => x.ResolvedPlanId).HasMaxLength(128);
         builder.Property(x => x.FailureCode).HasMaxLength(128);
+        builder.Property(x => x.FailureClass).HasConversion<string>().HasMaxLength(32);
         // Kept as a compatibility-shaped projection for the future worker seam,
         // but CatalogDbContext collapses it to a stable safe code at write time.
         builder.Property(x => x.FailureSummary).HasMaxLength(128);

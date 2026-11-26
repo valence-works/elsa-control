@@ -1351,7 +1351,16 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
         DateTimeOffset observedAt,
         int backoffSeconds,
         CancellationToken cancellationToken = default) =>
-        RecordArmObservationClockAsync(workspaceId, operationId, observedAt, backoffSeconds, null, cancellationToken);
+        RecordArmObservationClockAsync(workspaceId, operationId, observedAt, backoffSeconds, null, null, cancellationToken);
+
+    public Task RecordArmObservationClockAsync(
+        Guid workspaceId,
+        Guid operationId,
+        DateTimeOffset observedAt,
+        int backoffSeconds,
+        string? reasonCode,
+        CancellationToken cancellationToken = default) =>
+        RecordArmObservationClockAsync(workspaceId, operationId, observedAt, backoffSeconds, reasonCode, null, cancellationToken);
 
     public async Task RecordArmObservationClockAsync(
         Guid workspaceId,
@@ -1359,6 +1368,7 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
         DateTimeOffset observedAt,
         int backoffSeconds,
         string? reasonCode,
+        ElsaInstanceOperationFailureClass? failureClass,
         CancellationToken cancellationToken = default)
     {
         var entity = await db.AzureProviderOperations.SingleOrDefaultAsync(
@@ -1369,6 +1379,10 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
         entity.ArmObservationBackoffSeconds = backoffSeconds;
         if (AzureProviderOperationValidation.IsSafeCode(reasonCode))
             entity.LastObservationReasonCode = reasonCode;
+        Guid? lifecycleId = AzureProviderOperationValidation.TryParseLifecycleOperationId(
+            entity.IdempotencyKey, out var parsedLifecycleId)
+            ? parsedLifecycleId
+            : null;
         try
         {
             await db.SaveChangesAsync(cancellationToken);
@@ -1377,6 +1391,30 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
         {
             db.ChangeTracker.Clear();
         }
+
+        if (failureClass is { } classified && lifecycleId is { } lifecycleOperationId)
+            await StampLifecycleFailureClassAsync(workspaceId, lifecycleOperationId, classified, cancellationToken);
+    }
+
+    private async Task StampLifecycleFailureClassAsync(
+        Guid workspaceId,
+        Guid lifecycleOperationId,
+        ElsaInstanceOperationFailureClass incoming,
+        CancellationToken cancellationToken)
+    {
+        var incomingName = incoming.ToString();
+        var terminal = nameof(ElsaInstanceOperationFailureClass.Terminal);
+        var transient = nameof(ElsaInstanceOperationFailureClass.Transient);
+        var unclassified = nameof(ElsaInstanceOperationFailureClass.Unclassified);
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE ElsaInstanceOperations
+            SET FailureClass = CASE
+                WHEN FailureClass = {terminal} OR {incomingName} = {terminal} THEN {terminal}
+                WHEN FailureClass = {transient} OR {incomingName} = {transient} THEN {transient}
+                ELSE {unclassified}
+            END
+            WHERE WorkspaceId = {workspaceId} AND Id = {lifecycleOperationId}
+            """, cancellationToken);
     }
 
     public async Task<AzureProviderOperation?> IncrementAutoResumeCountAsync(

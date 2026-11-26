@@ -1187,6 +1187,33 @@ public sealed class ElsaInstancePersistenceTests
         Assert.Equal("operation.failed", stored.FailureSummary);
     }
 
+    [Fact]
+    public async Task Operation_failure_class_round_trips_as_a_customer_safe_enum()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var workspace = new Workspace { Name = "Failure class workspace" };
+        db.Workspaces.Add(workspace);
+        await db.SaveChangesAsync();
+
+        var operation = NewOperation(workspace, null, ElsaInstanceOperationState.Failed, "failure-class");
+        operation.FailureCode = "operation.failed";
+        operation.FailureClass = ElsaInstanceOperationFailureClass.Terminal;
+        db.ElsaInstanceOperations.Add(operation);
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var stored = await db.ElsaInstanceOperations.SingleAsync(x => x.Id == operation.Id);
+        Assert.Equal(ElsaInstanceOperationFailureClass.Terminal, stored.FailureClass);
+        var raw = await db.Database.SqlQueryRaw<string>(
+                "SELECT FailureClass AS Value FROM ElsaInstanceOperations WHERE Id = {0}",
+                operation.Id)
+            .SingleAsync();
+        Assert.Equal(nameof(ElsaInstanceOperationFailureClass.Terminal), raw);
+    }
+
     private static CatalogDbContext CreateMigratedContext(SqliteConnection connection)
     {
         var options = new DbContextOptionsBuilder<CatalogDbContext>()

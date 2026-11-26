@@ -46,6 +46,7 @@ public static class ManagedElsaInstanceOverviewEndpoints
     internal const string RetryRecoveryRequiredCode = "instance.retry.recovery-required";
     internal const string RetryNotFailedCreateCode = "instance.retry.not-failed-create";
     internal const string RetryPermissionRequiredCode = "instance.retry.permission-required";
+    internal const string RetryProviderRejectedCode = "instance.retry.provider-rejected";
     internal const int DefaultActivityLimit = 25;
     internal const int MaxActivityLimit = 100;
     private const int ActivityLookupWindow = 500;
@@ -765,9 +766,12 @@ public static class ManagedElsaInstanceOverviewEndpoints
         instance.ObservedLifecycle == ElsaObservedLifecycle.Failed &&
         lastOperation is
         {
-            Action: ElsaInstanceOperationAction.Create,
+            Action: ElsaInstanceOperationAction.Create or ElsaInstanceOperationAction.Retry,
             State: ElsaInstanceOperationState.Failed
         };
+
+    internal static bool IsProviderRejectedFailure(ElsaInstanceOperationSummary? lastOperation) =>
+        lastOperation?.FailureClass == ElsaInstanceOperationFailureClass.Terminal;
 
     /// <summary>
     /// One customer-safe Retry rule for overview <c>allowedActions.retry</c>
@@ -794,9 +798,30 @@ public static class ManagedElsaInstanceOverviewEndpoints
             return new(false, RetryInFlightCode);
         if (!IsTerminalFailedCreate(instance, lastOperation))
             return new(false, RetryNotFailedCreateCode);
+        if (IsProviderRejectedFailure(lastOperation))
+            return new(false, RetryProviderRejectedCode);
         if (!commercialGate.Allowed)
             return new(false, commercialGate.Code);
         return new(true, null);
+    }
+
+    internal static int RetryDenialStatusCode(string reasonCode)
+    {
+        if (reasonCode == RetryPermissionRequiredCode)
+            return StatusCodes.Status403Forbidden;
+        if (reasonCode == ElsaInstanceCommercialOperation.SharedAllowanceMoveInProgress)
+            return StatusCodes.Status409Conflict;
+        if (reasonCode is ElsaInstanceCommercialOperation.EntitlementRequired
+            or ElsaInstanceCommercialOperation.EntitlementExpired
+            or ElsaInstanceCommercialOperation.SubscriptionStateRequired
+            or ElsaInstanceCommercialOperation.LifecycleConstrained
+            or ElsaInstanceCommercialOperation.InstanceLimitReached
+            or ElsaInstanceCommercialOperation.BindingRequired
+            or ElsaInstanceCommercialOperation.EntitlementSafeExitSuperseded
+            or ElsaInstanceCommercialOperation.SharedAllowanceExceeded
+            or ElsaInstanceCommercialOperation.ShardCapacity)
+            return StatusCodes.Status422UnprocessableEntity;
+        return StatusCodes.Status409Conflict;
     }
 
     internal static bool TryReadMajor(string releaseLine, out int major)
