@@ -191,6 +191,8 @@ public static class ManagedElsaInstanceOverviewEndpoints
                 access.OrganizationId, ElsaInstanceOperationAction.Restart, cancellationToken: cancellationToken);
             var applyGate = await commercialGate.EvaluateAsync(
                 access.OrganizationId, ElsaInstanceOperationAction.UpdateIntent, cancellationToken: cancellationToken);
+            var deleteGate = await commercialGate.EvaluateAsync(
+                access.OrganizationId, ElsaInstanceOperationAction.Delete, cancellationToken: cancellationToken);
             var response = ManagedElsaInstanceOverviewProjection.ToOverview(
                 instance,
                 workspaceId,
@@ -201,7 +203,8 @@ public static class ManagedElsaInstanceOverviewEndpoints
                 lastOperation,
                 health,
                 restartGate,
-                applyGate);
+                applyGate,
+                deleteGate);
             context.Response.Headers.ETag = StrongETag(instance.Version);
             return Results.Ok(response);
         }).RequireWorkspaceAccess().AllowCloudBff().AllowHubBff();
@@ -695,6 +698,21 @@ public static class ManagedElsaInstanceOverviewEndpoints
         return ElsaInstanceStateMachine.CanRestart(instance) ? null : InstanceNotReadyCode;
     }
 
+    // Delete is a safe exit: Failed/provisioning stay allowed. Only a tombstone
+    // or deleting intent is denied here. Active non-Delete work is not a denial
+    // because POST …/delete waits behind or supersedes that predecessor.
+    internal static string? CustomerDeleteDenialCode(ElsaInstance instance)
+    {
+        if (instance.ObservedLifecycle == ElsaObservedLifecycle.Deleted ||
+            instance.Intent.DesiredLifecycle == ElsaDesiredLifecycle.Deleting)
+            return InstanceDeletingCode;
+        return null;
+    }
+
+    internal static bool HasBlockingCustomerDelete(ElsaInstanceOperationSummary? activeOperation) =>
+        activeOperation is { Action: ElsaInstanceOperationAction.Delete } &&
+        ElsaInstanceOperationGuard.IsBlocking(activeOperation.State);
+
     internal static bool TryReadMajor(string releaseLine, out int major)
     {
         var firstPart = releaseLine.Split('.', 2)[0];
@@ -714,7 +732,8 @@ internal static class ManagedElsaInstanceOverviewProjection
         ElsaInstanceOperationSummary? lastOperation,
         ManagedLifecycleOperationalHealthResult health,
         ElsaInstanceCommercialGateDecision restartGate,
-        ElsaInstanceCommercialGateDecision applyGate)
+        ElsaInstanceCommercialGateDecision applyGate,
+        ElsaInstanceCommercialGateDecision deleteGate)
     {
         var observed = ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(instance, activeOperation);
         var healthy = ManagedElsaInstanceCustomerProjection.IsCustomerHealthy(
@@ -733,6 +752,8 @@ internal static class ManagedElsaInstanceOverviewProjection
         var hasActiveOperation = activeOperation is not null &&
                                  ElsaInstanceOperationGuard.IsBlocking(activeOperation.State);
         var mutationDenial = ManagedElsaInstanceOverviewEndpoints.CustomerMutationDenialCode(instance);
+        var deleteDenial = ManagedElsaInstanceOverviewEndpoints.CustomerDeleteDenialCode(instance);
+        var hasBlockingDelete = ManagedElsaInstanceOverviewEndpoints.HasBlockingCustomerDelete(activeOperation);
 
         return new ManagedElsaInstanceOverviewResponse(
             new ManagedElsaInstanceOverviewSummaryResponse(
@@ -787,7 +808,8 @@ internal static class ManagedElsaInstanceOverviewProjection
             new ManagedElsaInstanceOverviewAllowedActionsResponse(
                 ActionDecision(canMutate, hasActiveOperation, mutationDenial, restartGate),
                 ActionDecision(canMutate, hasActiveOperation, mutationDenial, applyGate),
-                new ManagedElsaInstanceOverviewActionDecisionResponse(canOpen, canOpen ? null : unavailableReason)));
+                new ManagedElsaInstanceOverviewActionDecisionResponse(canOpen, canOpen ? null : unavailableReason),
+                ActionDecision(canMutate, hasBlockingDelete, deleteDenial, deleteGate)));
     }
 
     internal static ManagedElsaInstanceActivityItemResponse ToActivityItem(
@@ -984,7 +1006,8 @@ public sealed record ManagedElsaInstanceOverviewLastOperationResponse(
 public sealed record ManagedElsaInstanceOverviewAllowedActionsResponse(
     ManagedElsaInstanceOverviewActionDecisionResponse Restart,
     ManagedElsaInstanceOverviewActionDecisionResponse ApplyRelease,
-    ManagedElsaInstanceOverviewActionDecisionResponse Open);
+    ManagedElsaInstanceOverviewActionDecisionResponse Open,
+    ManagedElsaInstanceOverviewActionDecisionResponse Delete);
 
 public sealed record ManagedElsaInstanceOverviewActionDecisionResponse(bool Allowed, string? ReasonCode);
 
