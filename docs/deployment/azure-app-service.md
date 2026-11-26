@@ -1349,6 +1349,23 @@ Do not attach fabricated `provider.reconciliation.retry-safe` evidence. The
 reset is gated by the same flag, `sk_test_` prefix, instance allowlist, and
 smoke-owner deny as the fire endpoint.
 
+The same fail-closed gate also injects two QA states without a hand Azure
+edit. Production cannot enable them: committed `appsettings` keep
+`Staging:RecoveryLifecycleLever:Enabled` false, the deploy script refuses
+non-empty lever settings unless the target is staging, and the runtime
+requires a Stripe `sk_test_` secret. Allowlist the instance first, then as
+an admin (never Cloud BFF):
+
+- Terminal Failed Create: start a Create, then
+  `POST /api/staging/lifecycle-lever/instances/{id}/terminal-failed-create`.
+  The active Create becomes Failed, observed lifecycle Failed, no
+  RecoveryRequired, and the Create outbox is quarantined.
+- Leftover Failed Delete (Deleting intent, no RecoveryRequired): on a Ready
+  instance,
+  `POST /api/staging/lifecycle-lever/instances/{id}/terminal-failed-delete`.
+  Control accepts a Delete, fails it in the same transaction, writes no
+  outbox, and leaves desired+observed Deleting so customer Delete can retry.
+
 Set the **`test` GitHub environment** variables
 `STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED`,
 `STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS`, and

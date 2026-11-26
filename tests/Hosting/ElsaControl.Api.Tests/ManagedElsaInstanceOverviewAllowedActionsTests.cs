@@ -62,13 +62,31 @@ public sealed class ManagedElsaInstanceOverviewAllowedActionsTests
     }
 
     [Fact]
-    public void Deleting_intent_denies_delete_with_instance_deleting()
+    public void Leftover_deleting_intent_without_an_active_operation_is_retryable()
     {
         var instance = Instance(ElsaObservedLifecycle.Deleting, desired: ElsaDesiredLifecycle.Deleting);
         var decision = Overview(instance).AllowedActions.Delete;
 
-        Assert.False(decision.Allowed);
-        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.InstanceDeletingCode, decision.ReasonCode);
+        Assert.True(decision.Allowed);
+        Assert.Null(decision.ReasonCode);
+        Assert.Null(ManagedElsaInstanceOverviewEndpoints.CustomerDeleteDenialCode(instance, null));
+    }
+
+    [Fact]
+    public void Leftover_failed_delete_with_deleting_intent_is_retryable()
+    {
+        var instance = Instance(ElsaObservedLifecycle.Deleting, desired: ElsaDesiredLifecycle.Deleting);
+        var failedDelete = Operation(
+            instance.Id,
+            ElsaInstanceOperationAction.Delete,
+            ElsaInstanceOperationState.Failed);
+        var decision = Overview(instance, lastOperation: failedDelete).AllowedActions.Delete;
+
+        Assert.False(ManagedElsaInstanceOverviewEndpoints.HasBlockingCustomerDelete(failedDelete));
+        Assert.False(ManagedElsaInstanceOverviewEndpoints.IsResumableCustomerDelete(failedDelete));
+        Assert.Null(ManagedElsaInstanceOverviewEndpoints.CustomerDeleteDenialCode(instance, failedDelete));
+        Assert.True(decision.Allowed);
+        Assert.Null(decision.ReasonCode);
     }
 
     [Fact]

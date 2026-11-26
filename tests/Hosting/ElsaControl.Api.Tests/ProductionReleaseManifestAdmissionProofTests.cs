@@ -57,6 +57,7 @@ public sealed class ProductionReleaseManifestAdmissionProofTests
         "Deployment:QueueWorker",
         "Deployment:WebhookDispatch",
         "Deployment:EngineVerification",
+        "Provisioning",
         "Billing:Lifecycle",
         "Sync:Scheduled",
         "ManagedElsa:Handoff",
@@ -72,6 +73,7 @@ public sealed class ProductionReleaseManifestAdmissionProofTests
         ("Deployment:AzureProvider:InstanceLifecycle:Enabled", false),
         ("Deployment:WebhookDispatch:Enabled", false),
         ("Deployment:EngineVerification:Enabled", true),
+        ("Provisioning:WorkerEnabled", false),
         ("Sync:Scheduled:Enabled", false),
         ("ManagedElsa:Handoff:Enabled", false)
     ];

@@ -65,6 +65,72 @@ public static class StagingRecoveryLifecycleLeverEndpoints
             .WithTags("Staging Lifecycle Lever");
 
         endpoints.MapPost(
+                "/api/staging/lifecycle-lever/instances/{instanceId:guid}/terminal-failed-create",
+                async (
+                    Guid instanceId,
+                    HttpContext context,
+                    IOptions<ControlIdentityOptions> identityOptions,
+                    StagingRecoveryLifecycleLever lever,
+                    CancellationToken cancellationToken) =>
+                {
+                    try
+                    {
+                        var result = await lever.FireFailedCreateAsync(
+                            instanceId,
+                            OperatorSubject(context.User, identityOptions.Value),
+                            cancellationToken);
+                        return ToHttpResult(result);
+                    }
+                    catch (ElsaInstanceLifecycleConflictException exception)
+                    {
+                        return Conflict(exception, "The state machine refused the terminal failed-create transition.");
+                    }
+                    catch (ElsaInstanceStateConflictException)
+                    {
+                        return InvalidState("The state machine refused the terminal failed-create transition.");
+                    }
+                    catch (Exception exception) when (IsPersistenceFailure(exception))
+                    {
+                        return PersistenceUnavailable();
+                    }
+                })
+            .RequireAuthorization(AdminAuthorization.Policy)
+            .WithTags("Staging Lifecycle Lever");
+
+        endpoints.MapPost(
+                "/api/staging/lifecycle-lever/instances/{instanceId:guid}/terminal-failed-delete",
+                async (
+                    Guid instanceId,
+                    HttpContext context,
+                    IOptions<ControlIdentityOptions> identityOptions,
+                    StagingRecoveryLifecycleLever lever,
+                    CancellationToken cancellationToken) =>
+                {
+                    try
+                    {
+                        var result = await lever.FireFailedDeleteAsync(
+                            instanceId,
+                            OperatorSubject(context.User, identityOptions.Value),
+                            cancellationToken);
+                        return ToHttpResult(result);
+                    }
+                    catch (ElsaInstanceLifecycleConflictException exception)
+                    {
+                        return Conflict(exception, "The state machine refused the terminal failed-delete transition.");
+                    }
+                    catch (ElsaInstanceStateConflictException)
+                    {
+                        return InvalidState("The state machine refused the terminal failed-delete transition.");
+                    }
+                    catch (Exception exception) when (IsPersistenceFailure(exception))
+                    {
+                        return PersistenceUnavailable();
+                    }
+                })
+            .RequireAuthorization(AdminAuthorization.Policy)
+            .WithTags("Staging Lifecycle Lever");
+
+        endpoints.MapPost(
                 "/api/staging/lifecycle-lever/instances/{instanceId:guid}/reset",
                 async (
                     Guid instanceId,

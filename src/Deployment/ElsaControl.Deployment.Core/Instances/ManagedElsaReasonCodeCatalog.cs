@@ -105,6 +105,8 @@ public static class ManagedElsaReasonCodeCatalog
     public const string AzurePromotionUncertain = "azure.promotion.uncertain";
     public const string AzurePromotionRollbackUncertain = "azure.promotion.rollback-uncertain";
     public const string StagingLeverRecoveryRequired = "staging.lever.recovery-required";
+    public const string StagingLeverFailedCreate = "staging.lever.failed-create";
+    public const string StagingLeverFailedDelete = "staging.lever.failed-delete";
     public const string StagingLeverFired = "staging.lever.fired";
     public const string StagingLeverReset = "staging.lever.reset";
     public const string DeletionLocalAbsent = "deletion.local.absent";
@@ -211,6 +213,8 @@ public static class ManagedElsaReasonCodeCatalog
             new(AzureRecoveryPlanMismatch, ManagedElsaReasonClass.NeedsPerson),
             new(AzureRecoveryStateInvalid, ManagedElsaReasonClass.NeedsPerson),
             new(StagingLeverRecoveryRequired, ManagedElsaReasonClass.NeedsPerson),
+            new(StagingLeverFailedCreate, ManagedElsaReasonClass.NeedsPerson),
+            new(StagingLeverFailedDelete, ManagedElsaReasonClass.NeedsPerson),
             new(StagingLeverFired, ManagedElsaReasonClass.HealthyHandOff),
             new(StagingLeverReset, ManagedElsaReasonClass.HealthyHandOff),
             new(DeletionLocalAbsent, ManagedElsaReasonClass.HealthyHandOff),

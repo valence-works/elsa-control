@@ -3334,7 +3334,9 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         var systemOnlyRoutes = new[]
         {
             "POST /api/staging/lifecycle-lever/instances/{instanceId:guid}/recovery-required",
-            "POST /api/staging/lifecycle-lever/instances/{instanceId:guid}/reset"
+            "POST /api/staging/lifecycle-lever/instances/{instanceId:guid}/reset",
+            "POST /api/staging/lifecycle-lever/instances/{instanceId:guid}/terminal-failed-create",
+            "POST /api/staging/lifecycle-lever/instances/{instanceId:guid}/terminal-failed-delete"
         };
         var classified = customerOrOperatorRoutes
             .Concat(systemOnlyRoutes)

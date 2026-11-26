@@ -931,7 +931,7 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
     }
 
     [Fact]
-    public async Task Delete_is_denied_while_deleting()
+    public async Task Delete_is_allowed_for_leftover_deleting_intent_and_matches_the_delete_route()
     {
         var app = await PrepareApplicationAsync();
         var client = app.CreateTrustedWorkspaceClient("overview-delete-deleting-owner");
@@ -939,13 +939,185 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
         await SetLifecycleAsync(
             app, created.Instance.InstanceId, ElsaObservedLifecycle.Deleting, ElsaDesiredLifecycle.Deleting);
 
-        var overview = await client.GetControlJsonAsync<ManagedElsaInstanceOverviewResponse>(
-            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/overview");
+        await AssertDeleteDecisionMatchesRouteAsync(
+            client, workspaceId, created.Instance.InstanceId, created.Instance.ETag,
+            "overview-delete-deleting", allowed: true, reasonCode: null);
+    }
 
+    [Fact]
+    public async Task Delete_is_allowed_after_a_terminal_failed_delete_and_matches_the_delete_route()
+    {
+        var app = await PrepareApplicationAsync();
+        var client = app.CreateTrustedWorkspaceClient("overview-delete-failed-delete-owner");
+        var (workspaceId, created) = await CreateReadyInstanceAsync(app, client, "overview-delete-failed-delete");
+
+        using var firstConfirmationResponse = await client.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations",
+            content: null);
+        var firstConfirmation = await firstConfirmationResponse.Content
+            .ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        Assert.Equal(HttpStatusCode.OK, firstConfirmationResponse.StatusCode);
+        using var firstDelete = await SendDeleteAsync(
+            client,
+            workspaceId,
+            created.Instance.InstanceId,
+            created.Instance.ETag,
+            "overview-delete-failed-delete-first",
+            firstConfirmation!.ConfirmationId);
+        var firstDeleteBody = await firstDelete.Content
+            .ReadControlJsonAsync<ManagedElsaInstanceDeleteAcceptedResponse>();
+        Assert.Equal(HttpStatusCode.Accepted, firstDelete.StatusCode);
+        Assert.NotNull(firstDeleteBody);
+        await SetOperationStateAsync(
+            app,
+            firstDeleteBody!.OperationId,
+            ElsaInstanceOperationState.Failed,
+            ManagedElsaReasonCodeCatalog.StagingLeverFailedDelete,
+            completed: true);
+        await QuarantineOutboxAsync(app, firstDeleteBody.OperationId);
+        var acceptedEtag = firstDelete.Headers.ETag?.ToString()
+            ?? throw new InvalidOperationException("Delete acceptance ETag is missing.");
+
+        await AssertDeleteDecisionMatchesRouteAsync(
+            client, workspaceId, created.Instance.InstanceId, acceptedEtag,
+            "overview-delete-failed-delete", allowed: true, reasonCode: null);
+    }
+
+    [Fact]
+    public async Task Delete_is_allowed_for_a_terminal_failed_create_and_matches_the_delete_route()
+    {
+        var app = await PrepareApplicationAsync();
+        var client = app.CreateTrustedWorkspaceClient("overview-delete-failed-create-owner");
+        var (workspaceId, created) = await CreateAcceptedInstanceAsync(app, client, "overview-delete-failed-create");
+        await SetOperationStateAsync(
+            app,
+            created.Operation.Id,
+            ElsaInstanceOperationState.Failed,
+            ManagedElsaReasonCodeCatalog.StagingLeverFailedCreate,
+            completed: true);
+        await QuarantineOutboxAsync(app, created.Operation.Id);
+        await SetLifecycleAsync(
+            app, created.Instance.InstanceId, ElsaObservedLifecycle.Failed, ElsaDesiredLifecycle.Running);
+
+        await AssertDeleteDecisionMatchesRouteAsync(
+            client, workspaceId, created.Instance.InstanceId, created.Instance.ETag,
+            "overview-delete-failed-create", allowed: true, reasonCode: null);
+    }
+
+    [Fact]
+    public async Task Delete_after_a_rejected_create_matches_the_delete_route()
+    {
+        var app = await PrepareApplicationAsync();
+        var client = app.CreateTrustedWorkspaceClient("overview-delete-rejected-owner");
+        var (workspaceId, created) = await CreateAcceptedInstanceAsync(app, client, "overview-delete-rejected");
+        await SetOperationStateAsync(
+            app, created.Operation.Id, ElsaInstanceOperationState.Failed,
+            ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected, completed: true);
+        await QuarantineOutboxAsync(app, created.Operation.Id);
+        await SetLifecycleAsync(
+            app, created.Instance.InstanceId, ElsaObservedLifecycle.Failed, ElsaDesiredLifecycle.Running);
+
+        await AssertDeleteDecisionMatchesRouteAsync(
+            client, workspaceId, created.Instance.InstanceId, created.Instance.ETag,
+            "overview-delete-rejected", allowed: true, reasonCode: null);
+    }
+
+    [Fact]
+    public async Task Delete_behind_an_uncertain_create_matches_the_delete_route()
+    {
+        var app = await PrepareApplicationAsync();
+        var client = app.CreateTrustedWorkspaceClient("overview-delete-uncertain-owner");
+        var (workspaceId, created) = await CreateAcceptedInstanceAsync(app, client, "overview-delete-uncertain");
+        await ParkRecoveryRequiredAsync(
+            app, created.Operation.Id, "u", ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain);
+
+        using var overviewResponse = await client.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/overview");
+        var overviewJson = await overviewResponse.Content.ReadAsStringAsync();
+        var overview = JsonSerializer.Deserialize<ManagedElsaInstanceOverviewResponse>(
+            overviewJson, ControlApiTestApplication.JsonOptions);
+        Assert.Equal(HttpStatusCode.OK, overviewResponse.StatusCode);
+        Assert.True(overview!.AllowedActions.Delete.Allowed);
+        Assert.Null(overview.AllowedActions.Delete.ReasonCode);
+        AssertExactCustomerDtoShape(overviewJson, "overview");
+
+        using var confirmation = await client.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations",
+            content: null);
+        Assert.Equal(HttpStatusCode.OK, confirmation.StatusCode);
+        var confirmationBody = await confirmation.Content
+            .ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        using var deletion = await SendDeleteAsync(
+            client,
+            workspaceId,
+            created.Instance.InstanceId,
+            created.Instance.ETag,
+            "overview-delete-uncertain",
+            confirmationBody!.ConfirmationId);
+        var deletionText = await deletion.Content.ReadAsStringAsync();
+        Assert.True(deletion.StatusCode == HttpStatusCode.Accepted, deletionText);
+        var accepted = await deletion.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteAcceptedResponse>();
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, accepted!.State);
+
+        using var waitingResponse = await client.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/overview");
+        var waiting = JsonSerializer.Deserialize<ManagedElsaInstanceOverviewResponse>(
+            await waitingResponse.Content.ReadAsStringAsync(), ControlApiTestApplication.JsonOptions);
+        Assert.Equal(HttpStatusCode.OK, waitingResponse.StatusCode);
+        Assert.Equal(ElsaInstanceOperationAction.Delete, waiting!.ActiveOperation!.Action);
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, waiting.ActiveOperation.State);
+        Assert.False(waiting.AllowedActions.Delete.Allowed);
+        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.OperationActiveCode, waiting.AllowedActions.Delete.ReasonCode);
+    }
+
+    [Fact]
+    public async Task Blocking_delete_denies_overview_and_the_delete_route()
+    {
+        var app = await PrepareApplicationAsync();
+        var client = app.CreateTrustedWorkspaceClient("overview-delete-blocking-owner");
+        var (workspaceId, created) = await CreateReadyInstanceAsync(app, client, "overview-delete-blocking");
+
+        using var confirmationResponse = await client.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations",
+            content: null);
+        var confirmation = await confirmationResponse.Content
+            .ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        using var firstDelete = await SendDeleteAsync(
+            client,
+            workspaceId,
+            created.Instance.InstanceId,
+            created.Instance.ETag,
+            "overview-delete-blocking-first",
+            confirmation!.ConfirmationId);
+        Assert.Equal(HttpStatusCode.Accepted, firstDelete.StatusCode);
+        var acceptedEtag = firstDelete.Headers.ETag?.ToString()
+            ?? throw new InvalidOperationException("Delete acceptance ETag is missing.");
+
+        using var overviewResponse = await client.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/overview");
+        var overview = JsonSerializer.Deserialize<ManagedElsaInstanceOverviewResponse>(
+            await overviewResponse.Content.ReadAsStringAsync(), ControlApiTestApplication.JsonOptions);
+        Assert.Equal(HttpStatusCode.OK, overviewResponse.StatusCode);
         Assert.False(overview!.AllowedActions.Delete.Allowed);
-        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.InstanceDeletingCode, overview.AllowedActions.Delete.ReasonCode);
-        AssertExactCustomerDtoShape(
-            JsonSerializer.Serialize(overview, ControlApiTestApplication.JsonOptions), "overview");
+        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.OperationActiveCode, overview.AllowedActions.Delete.ReasonCode);
+
+        using var secondConfirmation = await client.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations",
+            content: null);
+        var secondConfirmationBody = await secondConfirmation.Content
+            .ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        using var secondDelete = await SendDeleteAsync(
+            client,
+            workspaceId,
+            created.Instance.InstanceId,
+            acceptedEtag,
+            "overview-delete-blocking-second",
+            secondConfirmationBody!.ConfirmationId);
+        Assert.Equal(HttpStatusCode.Conflict, secondDelete.StatusCode);
+        Assert.Contains(
+            ManagedElsaInstanceOverviewEndpoints.OperationActiveCode,
+            await secondDelete.Content.ReadAsStringAsync(),
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1643,17 +1815,18 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
     private static async Task ParkRecoveryRequiredAsync(
         ControlApiTestApplication app,
         Guid operationId,
-        string suffix)
+        string suffix,
+        string? failureCode = null)
     {
         await using var scope = app.Services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
         var evidence = $"https://evidence.example/retry/overview-attempt-{suffix}";
         var digest = "sha256:" + new string(suffix[0], 64);
-        var retrySafe = ElsaInstanceProviderReconciliationService.RetrySafeCode;
+        var parkedFailureCode = failureCode ?? ElsaInstanceProviderReconciliationService.RetrySafeCode;
         await db.Database.ExecuteSqlInterpolatedAsync($"""
             UPDATE ElsaInstanceOperations
             SET State = {ElsaInstanceOperationState.RecoveryRequired.ToString()},
-                FailureCode = {retrySafe},
+                FailureCode = {parkedFailureCode},
                 ReconciliationRetryEvidenceReference = {evidence},
                 ReconciliationRetryEvidenceDigest = {digest},
                 CompletedAt = NULL
@@ -1666,6 +1839,19 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
         using var response = await client.GetAsync($"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}");
         response.EnsureSuccessStatusCode();
         return response.Headers.ETag?.Tag ?? throw new InvalidOperationException("Instance ETag is missing.");
+    }
+
+    private static async Task QuarantineOutboxAsync(ControlApiTestApplication app, Guid operationId)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        var quarantinedAt = DateTimeOffset.UtcNow.UtcTicks;
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE ElsaInstanceLifecycleOutbox
+            SET QuarantinedAt = {quarantinedAt},
+                QuarantineCode = {"outbox.invalid"}
+            WHERE OperationId = {operationId} AND QuarantinedAt IS NULL
+            """);
     }
 
     private static async Task SetOperationStateAsync(
