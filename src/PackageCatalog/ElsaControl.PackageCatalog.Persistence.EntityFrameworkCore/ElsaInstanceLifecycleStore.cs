@@ -30,7 +30,8 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
     TimeProvider? timeProvider = null,
     IElsaInstanceCommercialGate? commercialGate = null,
     IAzureProviderRecoveryObservationStore? recoveryObservationStore = null,
-    ILogger<EfCoreElsaInstanceLifecycleStore>? logger = null) :
+    ILogger<EfCoreElsaInstanceLifecycleStore>? logger = null,
+    IElsaInstanceProvisioningBackendSelector? backendSelector = null) :
     IElsaInstanceLifecycleStore,
     IElsaInstanceLifecycleWorkerStore,
     IElsaInstanceProviderSubmissionStore,
@@ -40,7 +41,8 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
     IElsaInstanceEntitlementHoldStore,
     IElsaInstanceHealthMonitorStore,
     IStagingRecoveryLifecycleLeverStore,
-    IElsaInstancePlacementAdmissionStore
+    IElsaInstancePlacementAdmissionStore,
+    IElsaInstanceProvisioningBackendStore
 {
     private readonly IElsaInstanceLifecycleResolutionInputSource _resolutionInputSource =
         resolutionInputSource ?? throw new ArgumentNullException(nameof(resolutionInputSource));
@@ -48,6 +50,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
     private readonly IElsaInstanceCommercialGate _commercialGate = commercialGate ?? new EfCoreElsaInstanceCommercialGate(dbContext, timeProvider);
     private readonly IAzureProviderRecoveryObservationStore? _recoveryObservationStore = recoveryObservationStore;
     private readonly ILogger _logger = logger ?? NullLogger<EfCoreElsaInstanceLifecycleStore>.Instance;
+    private readonly IElsaInstanceProvisioningBackendSelector? _backendSelector = backendSelector;
     private static readonly TimeSpan WorkerLeaseDuration = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan DeletionDeferralDelay = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan[] IdempotencyReplayLookupDelays =
@@ -60,6 +63,19 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
     };
 
     private IElsaInstanceLifecycleResolutionInputSource ResolutionInputSource => _resolutionInputSource;
+
+    public async Task<ElsaInstanceProvisioningBackend> GetBackendAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        CancellationToken cancellationToken = default)
+    {
+        var value = await dbContext.ElsaInstances.AsNoTracking()
+            .Where(x => x.WorkspaceId == workspaceId && x.Id == instanceId)
+            .Select(x => x.ProvisioningBackend)
+            .SingleOrDefaultAsync(cancellationToken)
+            .ConfigureAwait(false);
+        return ElsaInstanceProvisioningBackendText.Parse(value);
+    }
 
     public async Task<ElsaInstanceProviderReconciliationTarget?> GetTargetAsync(
         Guid workspaceId,
@@ -832,6 +848,8 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 var instanceEntity = storedInstance ?? ToEntity(instance, outbox.CreatedAt);
                 if (storedInstance is null)
                 {
+                    instanceEntity.ProvisioningBackend = ElsaInstanceProvisioningBackendText.Format(
+                        _backendSelector?.SelectForCreate() ?? ElsaInstanceProvisioningBackend.Bicep);
                     await dbContext.ElsaInstances.AddAsync(instanceEntity, cancellationToken);
                     if (operation.Action == ElsaInstanceOperationAction.Create)
                     {

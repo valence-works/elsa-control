@@ -23,6 +23,10 @@ public static class PulumiStepLedgerMapper
     public const string RuntimeDeployingCode = "runtime.deploying";
     public const string RuntimeDeployedCode = "runtime.deployed";
     public const string ApplyCompletedCode = "azure.step.completed";
+    public const string HealthVerifiedCode = "health.verified";
+    public const string TrafficRoutedCode = "traffic.routed";
+    public const string OperationSucceededCode = "azure.operation.succeeded";
+    public const string CleanupSucceededCode = "azure.cleanup.succeeded";
 
     public const string FoundationPreparingMessage = "Foundation is preparing.";
     public const string FoundationReadyMessage = "Foundation is ready.";
@@ -31,6 +35,10 @@ public static class PulumiStepLedgerMapper
     public const string DatabaseReadyMessage = "Database is ready.";
     public const string RuntimeDeployingMessage = "Runtime is deploying.";
     public const string RuntimeDeployedMessage = "Runtime is deployed.";
+    public const string HealthVerifiedMessage = "The candidate is healthy.";
+    public const string TrafficRoutedMessage = "Traffic is routed.";
+    public const string OperationSucceededMessage = "Azure workload reconciliation completed.";
+    public const string CleanupSucceededMessage = "Exact owned-resource cleanup was verified.";
     public const string ResourceFailedMessage = "The provider step failed.";
     public const string UpdateCancelledMessage = "The provider update was cancelled.";
 
@@ -68,16 +76,15 @@ public static class PulumiStepLedgerMapper
 
         if (value.Kind == ProvisioningEventKind.OperationSucceeded)
         {
-            // TODO(#1033): Health verification and traffic promotion own Succeeded.
-            // This checkpoint is the Pulumi/infra step completing, not engine-ready.
-            var phase = Max(currentPhase, AzureProviderOperationPhase.WorkloadReady);
+            var phase = Max(currentPhase, AzureProviderOperationPhase.TrafficPromoted);
             return new PulumiLedgerCheckpoint(
                 phase,
-                AzureProviderRunnerStep.Workload,
-                AzureProviderOperationStatus.Running,
-                RuntimeDeployedCode,
-                RuntimeDeployedMessage,
-                Finalize: false);
+                AzureProviderRunnerStep.Promotion,
+                AzureProviderOperationStatus.Succeeded,
+                OperationSucceededCode,
+                OperationSucceededMessage,
+                Finalize: true,
+                AzureProviderHealth.Healthy);
         }
 
         if (value.Kind == ProvisioningEventKind.OperationCancelled)
@@ -114,6 +121,35 @@ public static class PulumiStepLedgerMapper
 
         return null;
     }
+
+    public static PulumiLedgerCheckpoint DeleteSucceeded() =>
+        new(
+            AzureProviderOperationPhase.CleanupVerified,
+            AzureProviderRunnerStep.Cleanup,
+            AzureProviderOperationStatus.Succeeded,
+            CleanupSucceededCode,
+            CleanupSucceededMessage,
+            Finalize: true);
+
+    public static PulumiLedgerCheckpoint HealthVerified() =>
+        new(
+            AzureProviderOperationPhase.HealthVerified,
+            AzureProviderRunnerStep.Health,
+            AzureProviderOperationStatus.Running,
+            HealthVerifiedCode,
+            HealthVerifiedMessage,
+            Finalize: false,
+            AzureProviderHealth.Healthy);
+
+    public static PulumiLedgerCheckpoint TrafficPromoted() =>
+        new(
+            AzureProviderOperationPhase.TrafficPromoted,
+            AzureProviderRunnerStep.Promotion,
+            AzureProviderOperationStatus.Running,
+            TrafficRoutedCode,
+            TrafficRoutedMessage,
+            Finalize: false,
+            AzureProviderHealth.Healthy);
 
     public static bool IsCustomerSafe(PulumiLedgerCheckpoint checkpoint)
     {
@@ -300,4 +336,6 @@ public sealed record PulumiLedgerCheckpoint(
     AzureProviderOperationStatus Status,
     string Code,
     string Message,
-    bool Finalize);
+    bool Finalize,
+    AzureProviderHealth Health = AzureProviderHealth.Unknown,
+    string? Endpoint = null);

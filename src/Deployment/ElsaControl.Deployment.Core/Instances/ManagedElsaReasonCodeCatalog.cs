@@ -57,6 +57,7 @@ public static class ManagedElsaReasonCodeCatalog
     public const string ProviderReconciliationCancelled = "provider.reconciliation.cancelled";
     public const string ProviderReconciliationRequired = "provider.reconciliation.required";
     public const string ProviderIdentityBindingMissing = "provider.identity-binding-missing";
+    public const string ProviderDispatchFailed = "provider.dispatch-failed";
     public const string AzureDeploymentFailed = "azure.deployment.failed";
     public const string AzureDeploymentWaitExceeded = "azure.deployment.wait-exceeded";
     public const string AzureDeploymentCanceled = "azure.deployment.canceled";
@@ -200,6 +201,7 @@ public static class ManagedElsaReasonCodeCatalog
             new(ProviderHandoffDesiredLifecycleMismatch, ManagedElsaReasonClass.NeedsPerson),
             new(ProviderHandoffSubmissionInvalid, ManagedElsaReasonClass.NeedsPerson),
             new(ProviderIdentityBindingMissing, ManagedElsaReasonClass.NeedsPerson),
+            new(ProviderDispatchFailed, ManagedElsaReasonClass.AutoResuming),
             new(AzureRecoveryAutoResumeConflict, ManagedElsaReasonClass.NeedsPerson),
             new(AzureRecoveryAutoResumeRejected, ManagedElsaReasonClass.NeedsPerson),
             new(AzureRecoveryObservationAmbiguous, ManagedElsaReasonClass.NeedsPerson),

@@ -3205,6 +3205,13 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                         .HasMaxLength(71)
                         .HasColumnType("nvarchar(71)");
 
+                    b.Property<string>("ProvisioningBackend")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)")
+                        .HasDefaultValue("bicep");
+
                     b.Property<string>("RegionCode")
                         .IsRequired()
                         .HasMaxLength(128)

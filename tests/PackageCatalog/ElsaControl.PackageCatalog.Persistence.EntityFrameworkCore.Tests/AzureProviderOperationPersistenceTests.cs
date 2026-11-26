@@ -1053,6 +1053,49 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
     }
 
     [Fact]
+    public async Task Successful_pulumi_run_ends_terminal_and_is_not_swept()
+    {
+        var now = DateTimeOffset.UtcNow;
+        using var db = CreateContext();
+        var store = new AzureProviderOperationStore(db);
+        var providerOperation = await store.CreateOrGetAsync(Request() with
+        {
+            TargetKey = "ledger-success-not-swept",
+            IdempotencyKey = "ledger-success-not-swept"
+        }, now);
+        var ledger = new AzureProviderOperationStepLedger(store, new FixedTimeProvider(now));
+        var (operation, request) = BoundLedger(providerOperation.Id);
+
+        var result = await ledger.TryWriteAsync(
+            operation,
+            request,
+            [
+                LedgerEvent(operation.Id, 1, ProvisioningEventKind.ResourceStarted, "resource-group"),
+                LedgerEvent(operation.Id, 2, ProvisioningEventKind.ResourceSucceeded, "resource-group"),
+                LedgerEvent(operation.Id, 3, ProvisioningEventKind.ResourceSucceeded, ProvisioningCapability.ContainerRuntime),
+                LedgerEvent(operation.Id, 4, ProvisioningEventKind.OperationSucceeded, ProvisioningCapability.ContainerRuntime)
+            ]);
+
+        Assert.Equal(ProvisioningStepLedgerResult.Written, result);
+        var succeeded = Assert.IsType<AzureProviderOperation>(await store.GetAsync(_workspaceId, providerOperation.Id));
+        Assert.Equal(AzureProviderOperationStatus.Succeeded, succeeded.Status);
+        Assert.Equal(AzureProviderOperationPhase.TrafficPromoted, succeeded.Phase);
+        Assert.Equal(AzureProviderHealth.Healthy, succeeded.Health);
+        Assert.Null(succeeded.LeaseExpiresAt);
+        Assert.Null(succeeded.WorkerId);
+        Assert.Contains(
+            await store.ListTransitionsAsync(_workspaceId, providerOperation.Id),
+            item => item.Code == PulumiStepLedgerMapper.OperationSucceededCode);
+
+        Assert.Equal(0, await store.RecoverStaleAsync(now.AddSeconds(31)));
+        var afterSweep = Assert.IsType<AzureProviderOperation>(await store.GetAsync(_workspaceId, providerOperation.Id));
+        Assert.Equal(AzureProviderOperationStatus.Succeeded, afterSweep.Status);
+        Assert.DoesNotContain(
+            await store.ListTransitionsAsync(_workspaceId, providerOperation.Id),
+            item => item.Code == "operation.recovery.required");
+    }
+
+    [Fact]
     public async Task Ledger_reclaims_a_recovery_required_step_and_finalizes()
     {
         var now = DateTimeOffset.UtcNow;

@@ -77,6 +77,7 @@ public sealed class ManagedElsaReasonCodeCatalogTests
     [InlineData(ManagedElsaReasonCodeCatalog.ProviderReconciliationRetrySafe, ManagedElsaReasonClass.Temporary)]
     [InlineData(ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeClaimConflict, ManagedElsaReasonClass.Temporary)]
     [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentFailed, ManagedElsaReasonClass.AutoResuming)]
+    [InlineData(ManagedElsaReasonCodeCatalog.ProviderDispatchFailed, ManagedElsaReasonClass.AutoResuming)]
     [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentWaitExceeded, ManagedElsaReasonClass.AutoResuming)]
     [InlineData(ManagedElsaReasonCodeCatalog.ProvisioningTimeoutFoundation, ManagedElsaReasonClass.AutoResuming)]
     [InlineData(ManagedElsaReasonCodeCatalog.ProvisioningTimeoutWorkload, ManagedElsaReasonClass.AutoResuming)]

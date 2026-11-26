@@ -1,0 +1,274 @@
+using ElsaControl.Deployment.Abstractions.Instances;
+using ElsaControl.Provisioning.Abstractions;
+using ElsaControl.Provisioning.Core;
+using Microsoft.Extensions.Options;
+
+namespace ElsaControl.Deployment.Azure.Tests;
+
+public sealed class AzurePulumiProvisioningDispatcherTests
+{
+    [Fact]
+    public void IsComplete_requires_seed_vault_https_uri()
+    {
+        var options = CompleteOptions();
+        Assert.True(options.IsComplete);
+
+        options.SeedVaultUri = null;
+        Assert.False(options.IsComplete);
+        options.SeedVaultUri = "http://kv.example.vault.azure.net/";
+        Assert.False(options.IsComplete);
+        options.SeedVaultUri = "not-a-uri";
+        Assert.False(options.IsComplete);
+        options.SeedVaultUri = "https://kv.example.vault.azure.net/";
+        Assert.True(options.IsComplete);
+    }
+
+    [Fact]
+    public async Task Incomplete_options_fail_closed_without_enqueueing()
+    {
+        var provisioning = new RecordingProvisioningService();
+        var dispatcher = Dispatcher(provisioning, new AzurePulumiDispatchOptions(), workerEnabled: true);
+        var result = await dispatcher.DispatchAsync(Operation(), Plan());
+        Assert.False(result.Dispatched);
+        Assert.Empty(provisioning.Requests);
+    }
+
+    [Fact]
+    public async Task Complete_options_enqueue_a_correlated_engine_stack()
+    {
+        var provisioning = new RecordingProvisioningService();
+        var dispatcher = Dispatcher(provisioning, CompleteOptions());
+        var operation = Operation();
+        var result = await dispatcher.DispatchAsync(operation, Plan());
+        Assert.True(result.Dispatched);
+        Assert.NotNull(result.ProvisioningOperationId);
+        var request = Assert.Single(provisioning.Requests);
+        Assert.Equal(ProvisioningCommand.Provision, request.Command);
+        Assert.Equal(ProvisioningStackKind.Engine, request.Target.StackKind);
+        Assert.Equal(AzureWorkloadPlanProvisioningMapper.EngineStackName(operation.InstanceId!.Value), request.Target.StackName);
+        Assert.Equal(operation.IdempotencyKey, request.IdempotencyKey);
+        Assert.Equal(operation.WorkspaceId.ToString("D"), request.StackConfig[PulumiStepLedgerMapper.ControlWorkspaceIdKey]);
+        Assert.Equal(operation.Id.ToString("D"), request.StackConfig[PulumiStepLedgerMapper.ControlProviderOperationIdKey]);
+        Assert.DoesNotContain(request.StackConfig.Values, value =>
+            value.Contains("password", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("subscription", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task Duplicate_admit_reuses_the_idempotency_key()
+    {
+        var provisioning = new RecordingProvisioningService();
+        var dispatcher = Dispatcher(provisioning, CompleteOptions());
+        var operation = Operation();
+        Assert.True((await dispatcher.DispatchAsync(operation, Plan())).Dispatched);
+        Assert.True((await dispatcher.DispatchAsync(operation, Plan())).Dispatched);
+        Assert.Equal(2, provisioning.Requests.Count);
+        Assert.All(provisioning.Requests, request => Assert.Equal(operation.IdempotencyKey, request.IdempotencyKey));
+        Assert.Equal(provisioning.Requests[0].Target.StackName, provisioning.Requests[1].Target.StackName);
+    }
+
+    [Fact]
+    public async Task Delete_enqueues_destroy_on_the_same_engine_stack()
+    {
+        var provisioning = new RecordingProvisioningService();
+        var dispatcher = Dispatcher(provisioning, CompleteOptions());
+        var operation = Operation() with { Action = AzureProviderOperationAction.Delete };
+        Assert.True((await dispatcher.DispatchAsync(operation, Plan())).Dispatched);
+        var request = Assert.Single(provisioning.Requests);
+        Assert.Equal(ProvisioningCommand.Destroy, request.Command);
+        Assert.Equal(AzureWorkloadPlanProvisioningMapper.EngineStackName(operation.InstanceId!.Value), request.Target.StackName);
+    }
+
+    [Fact]
+    public async Task Retry_reuses_the_engine_stack_name()
+    {
+        var provisioning = new RecordingProvisioningService();
+        var dispatcher = Dispatcher(provisioning, CompleteOptions());
+        var create = Operation();
+        var retry = create with { IdempotencyKey = "retry-1" };
+        Assert.True((await dispatcher.DispatchAsync(create, Plan())).Dispatched);
+        Assert.True((await dispatcher.DispatchAsync(retry, Plan())).Dispatched);
+        Assert.Equal(2, provisioning.Requests.Count);
+        Assert.Equal(provisioning.Requests[0].Target.StackName, provisioning.Requests[1].Target.StackName);
+        Assert.Equal("retry-1", provisioning.Requests[1].IdempotencyKey);
+    }
+
+    [Fact]
+    public async Task Unconfigured_provider_fails_closed()
+    {
+        var provisioning = new RecordingProvisioningService();
+        var dispatcher = Dispatcher(provisioning, CompleteOptions(), providerId: "unconfigured");
+        Assert.False(dispatcher.CanDispatch);
+        Assert.False((await dispatcher.DispatchAsync(Operation(), Plan())).Dispatched);
+        Assert.Empty(provisioning.Requests);
+    }
+
+    [Fact]
+    public async Task Dispatch_exception_fails_closed()
+    {
+        var dispatcher = Dispatcher(new ThrowingProvisioningService(), CompleteOptions());
+        Assert.False((await dispatcher.DispatchAsync(Operation(), Plan())).Dispatched);
+    }
+
+    private static AzurePulumiProvisioningDispatcher Dispatcher(
+        IProvisioningService provisioning,
+        AzurePulumiDispatchOptions options,
+        bool workerEnabled = true,
+        string providerId = "azure") =>
+        new(
+            provisioning,
+            Options.Create(options),
+            Options.Create(new ProvisioningOptions { WorkerEnabled = workerEnabled }),
+            new StubInfrastructureProvider(providerId));
+
+    private static AzurePulumiDispatchOptions CompleteOptions() => new()
+    {
+        EnvironmentName = "staging",
+        StateBackendLocator = "stelsaplatform/pulumi-state",
+        SecretsProviderLocator = "kv-elsa-platform/pulumi-secrets",
+        CredentialLocator = "workload-identity",
+        SqlBootstrapObjectId = Guid.NewGuid().ToString("D"),
+        SqlBootstrapLogin = "sql-bootstrap",
+        SeedVaultUri = "https://kv.example.vault.azure.net/"
+    };
+
+    private static AzureProviderOperation Operation() =>
+        new(
+            Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+            Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+            "workload-a",
+            AzureProviderOperationAction.Reconcile,
+            "request-1",
+            new string('a', 64),
+            new string('b', 64),
+            new string('c', 64),
+            new string('d', 64),
+            "3.8.0",
+            "3.8",
+            "combined",
+            "Dedicated",
+            "westeurope",
+            "valenceruntimeimages.azurecr.io/runtime-combined",
+            "sha256:" + new string('e', 64),
+            null,
+            null,
+            AzureProviderOperationStatus.Accepted,
+            AzureProviderOperationPhase.Planned,
+            0,
+            0,
+            1,
+            new(),
+            null,
+            AzureProviderHealth.Unknown,
+            [],
+            null,
+            null,
+            null,
+            DateTimeOffset.UtcNow,
+            DateTimeOffset.UtcNow,
+            null,
+            InstanceId: Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd"),
+            LifecycleAction: ElsaInstanceOperationAction.Create);
+
+    private static AzureWorkloadPlan Plan() =>
+        new(
+            "workload-a",
+            "westeurope",
+            "3.8.0",
+            "3.8",
+            "combined",
+            "Dedicated",
+            "valenceruntimeimages.azurecr.io/runtime-combined",
+            new string('e', 64),
+            "oci://evidence.example/manifest",
+            "sha256:" + new string('f', 64),
+            "oci://evidence.example/signature",
+            "sha256:" + new string('0', 64),
+            new Dictionary<string, string>(StringComparer.Ordinal),
+            new string('c', 64),
+            "3.8.0",
+            "3.8.0");
+
+    private sealed class StubInfrastructureProvider(string providerId) : IInfrastructureProvider
+    {
+        public string ProviderId { get; } = providerId;
+        public IReadOnlySet<string> Capabilities { get; } = new HashSet<string>(StringComparer.Ordinal);
+
+        public Task<ProviderRunResult> PreviewAsync(ProvisioningOperation operation, ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+        public Task<ProviderRunResult> ProvisionAsync(ProvisioningOperation operation, ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+        public Task<ProviderRunResult> UpdateAsync(ProvisioningOperation operation, ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+        public Task<ProviderRunResult> RefreshAsync(ProvisioningOperation operation, ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+        public Task<ProviderRunResult> CancelAsync(ProvisioningOperation operation, ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+        public Task<ProviderRunResult> DestroyAsync(ProvisioningOperation operation, ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+    }
+
+    private sealed class RecordingProvisioningService : IProvisioningService
+    {
+        public List<ProvisioningRequest> Requests { get; } = [];
+
+        public Task<ProvisioningEnqueueResult> PreviewAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            Enqueue(request);
+        public Task<ProvisioningEnqueueResult> ProvisionAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            Enqueue(request);
+        public Task<ProvisioningEnqueueResult> UpdateAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            Enqueue(request);
+        public Task<ProvisioningEnqueueResult> RefreshAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            Enqueue(request);
+        public Task<ProvisioningEnqueueResult> CancelAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            Enqueue(request);
+        public Task<ProvisioningEnqueueResult> DestroyAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            Enqueue(request);
+        public Task<ProvisioningOperation?> GetOperationAsync(Guid operationId, CancellationToken cancellationToken = default) =>
+            Task.FromResult<ProvisioningOperation?>(null);
+        public Task<IReadOnlyList<ProvisioningEvent>> ListEventsAsync(Guid operationId, CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<ProvisioningEvent>>([]);
+        public async IAsyncEnumerable<ProvisioningEvent> WatchAsync(
+            Guid operationId,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await Task.CompletedTask;
+            yield break;
+        }
+
+        private Task<ProvisioningEnqueueResult> Enqueue(ProvisioningRequest request)
+        {
+            Requests.Add(request);
+            return Task.FromResult(new ProvisioningEnqueueResult(Guid.NewGuid(), ProvisioningOperationState.Queued, false, false));
+        }
+    }
+
+    private sealed class ThrowingProvisioningService : IProvisioningService
+    {
+        public Task<ProvisioningEnqueueResult> PreviewAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("enqueue failed");
+        public Task<ProvisioningEnqueueResult> ProvisionAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("enqueue failed");
+        public Task<ProvisioningEnqueueResult> UpdateAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("enqueue failed");
+        public Task<ProvisioningEnqueueResult> RefreshAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("enqueue failed");
+        public Task<ProvisioningEnqueueResult> CancelAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("enqueue failed");
+        public Task<ProvisioningEnqueueResult> DestroyAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("enqueue failed");
+        public Task<ProvisioningOperation?> GetOperationAsync(Guid operationId, CancellationToken cancellationToken = default) =>
+            Task.FromResult<ProvisioningOperation?>(null);
+        public Task<IReadOnlyList<ProvisioningEvent>> ListEventsAsync(Guid operationId, CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<ProvisioningEvent>>([]);
+        public async IAsyncEnumerable<ProvisioningEvent> WatchAsync(
+            Guid operationId,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await Task.CompletedTask;
+            yield break;
+        }
+    }
+}

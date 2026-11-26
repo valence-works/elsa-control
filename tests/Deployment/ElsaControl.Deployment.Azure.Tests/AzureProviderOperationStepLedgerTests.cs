@@ -104,7 +104,7 @@ public sealed class AzureProviderOperationStepLedgerTests
     }
 
     [Fact]
-    public async Task Operation_succeeded_checkpoints_workload_ready_without_finalizing()
+    public async Task Operation_succeeded_finalizes_ready_through_health_and_traffic()
     {
         var providerOperation = Operation();
         var store = new LedgerStore(providerOperation);
@@ -122,9 +122,51 @@ public sealed class AzureProviderOperationStepLedgerTests
             ]);
 
         Assert.Equal(ProvisioningStepLedgerResult.Written, result);
-        Assert.Equal(AzureProviderOperationStatus.Running, store.Operation.Status);
-        Assert.Equal(AzureProviderOperationPhase.WorkloadReady, store.Operation.Phase);
-        Assert.Contains(store.Transitions, item => item.Code == PulumiStepLedgerMapper.RuntimeDeployedCode);
+        Assert.Equal(AzureProviderOperationStatus.Succeeded, store.Operation.Status);
+        Assert.Equal(AzureProviderOperationPhase.TrafficPromoted, store.Operation.Phase);
+        Assert.Equal(AzureProviderHealth.Healthy, store.Operation.Health);
+        Assert.Null(store.Operation.LeaseExpiresAt);
+        Assert.Contains(store.Transitions, item => item.Code == PulumiStepLedgerMapper.HealthVerifiedCode);
+        Assert.Contains(store.Transitions, item => item.Code == PulumiStepLedgerMapper.TrafficRoutedCode);
+        Assert.Contains(store.Transitions, item => item.Code == PulumiStepLedgerMapper.OperationSucceededCode);
+        var progress = AzureManagedElsaProvisioningProgressProjector.Project(
+            new AzureManagedElsaProvisioningProgressProjectionInput(
+                Topology: new ElsaInstanceLifecycleTopologySnapshot(
+                    Guid.Parse("11111111-1111-1111-1111-111111111111"),
+                    1,
+                    ElsaDesiredLifecycle.Running,
+                    ElsaObservedLifecycle.Ready,
+                    Guid.NewGuid(),
+                    [Lifecycle(ElsaInstanceOperationState.Succeeded)]),
+                LifecycleOperation: Lifecycle(ElsaInstanceOperationState.Succeeded),
+                ProviderOperation: store.Operation,
+                Transitions: store.Transitions));
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Ready, progress.State);
+        Assert.All(progress.Stages, stage =>
+            Assert.Equal(ManagedElsaProvisioningProgressStageStatuses.Completed, stage.Status));
+        var json = System.Text.Json.JsonSerializer.Serialize(progress);
+        Assert.DoesNotContain("subscription", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("password", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("pulumi", json, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Delete_operation_succeeded_finalizes_cleanup()
+    {
+        var providerOperation = Operation() with { Action = AzureProviderOperationAction.Delete };
+        var store = new LedgerStore(providerOperation);
+        var ledger = new AzureProviderOperationStepLedger(store);
+        var (operation, request) = Bound(providerOperation.WorkspaceId, providerOperation.Id);
+
+        var result = await ledger.TryWriteAsync(
+            operation,
+            request,
+            [Event(operation.Id, 1, ProvisioningEventKind.OperationSucceeded, ProvisioningCapability.ContainerRuntime)]);
+
+        Assert.Equal(ProvisioningStepLedgerResult.Written, result);
+        Assert.Equal(AzureProviderOperationStatus.Succeeded, store.Operation.Status);
+        Assert.Equal(AzureProviderOperationPhase.CleanupVerified, store.Operation.Phase);
+        Assert.Contains(store.Transitions, item => item.Code == PulumiStepLedgerMapper.CleanupSucceededCode);
     }
 
     [Fact]
@@ -234,6 +276,28 @@ public sealed class AzureProviderOperationStepLedgerTests
         Assert.Equal(ProvisioningStepLedgerResult.Written, result);
         Assert.Equal(AzureProviderOperationStatus.Failed, store.Operation.Status);
         Assert.Contains(store.Transitions, item => item.Code == ManagedElsaReasonCodeCatalog.AzureDeploymentFailed);
+    }
+
+    [Fact]
+    public async Task Operation_failed_stamps_FromPulumi_failure_class()
+    {
+        var providerOperation = Operation();
+        var store = new LedgerStore(providerOperation);
+        var ledger = new AzureProviderOperationStepLedger(store);
+        var (operation, request) = Bound(providerOperation.WorkspaceId, providerOperation.Id);
+        operation = operation with { FailureCode = AzureTransientArmFailure.QuotaExceeded };
+
+        var result = await ledger.TryWriteAsync(
+            operation,
+            request,
+            [Event(operation.Id, 1, ProvisioningEventKind.OperationFailed, ProvisioningCapability.ContainerRuntime)]);
+
+        Assert.Equal(ProvisioningStepLedgerResult.Written, result);
+        Assert.Equal(AzureProviderOperationStatus.Failed, store.Operation.Status);
+        Assert.Equal(ElsaInstanceOperationFailureClass.Terminal, store.LastFailureClass);
+        Assert.Equal(
+            ElsaInstanceOperationFailureClass.Terminal,
+            AzureTransientArmFailure.FromPulumi(AzureTransientArmFailure.QuotaExceeded));
     }
 
     [Fact]
@@ -358,16 +422,17 @@ public sealed class AzureProviderOperationStepLedgerTests
             InstanceId: Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd"),
             LifecycleAction: ElsaInstanceOperationAction.Create);
 
-    private static ElsaInstanceLifecycleTopologyOperation Lifecycle() =>
+    private static ElsaInstanceLifecycleTopologyOperation Lifecycle(
+        ElsaInstanceOperationState state = ElsaInstanceOperationState.Running) =>
         new(
             Guid.Parse("33333333-3333-3333-3333-333333333333"),
             ElsaInstanceOperationAction.Create,
-            ElsaInstanceOperationState.Running,
+            state,
             1,
             1,
             DateTimeOffset.UtcNow,
             DateTimeOffset.UtcNow,
-            null,
+            state == ElsaInstanceOperationState.Succeeded ? DateTimeOffset.UtcNow : null,
             null,
             null,
             null,
@@ -379,6 +444,7 @@ public sealed class AzureProviderOperationStepLedgerTests
         private string? _leaseToken;
         public AzureProviderOperation Operation { get; private set; } = operation;
         public List<AzureProviderOperationTransition> Transitions { get; } = [];
+        public ElsaInstanceOperationFailureClass? LastFailureClass { get; private set; }
         public bool RejectClaim { get; init; }
         public bool RejectFinalize { get; set; }
         public bool ThrowOnWrite { get; set; }
@@ -534,6 +600,8 @@ public sealed class AzureProviderOperationStepLedgerTests
             {
                 Phase = checkpoint.Phase,
                 AttemptedStep = checkpoint.AttemptedStep,
+                Health = checkpoint.Health == AzureProviderHealth.Unknown ? Operation.Health : checkpoint.Health,
+                Endpoint = checkpoint.Endpoint ?? Operation.Endpoint,
                 CheckpointSequence = Operation.CheckpointSequence + 1,
                 Version = Operation.Version + 1,
                 UpdatedAt = now
@@ -601,5 +669,18 @@ public sealed class AzureProviderOperationStepLedgerTests
             Guid operationId,
             CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<AzureProviderOperationTransition>>(Transitions);
+
+        public Task RecordArmObservationClockAsync(
+            Guid workspaceId,
+            Guid operationId,
+            DateTimeOffset observedAt,
+            int backoffSeconds,
+            string? reasonCode,
+            ElsaInstanceOperationFailureClass? failureClass,
+            CancellationToken cancellationToken = default)
+        {
+            LastFailureClass = failureClass;
+            return Task.CompletedTask;
+        }
     }
 }

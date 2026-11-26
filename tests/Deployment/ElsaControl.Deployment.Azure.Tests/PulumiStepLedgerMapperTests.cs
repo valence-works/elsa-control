@@ -128,22 +128,22 @@ public sealed class PulumiStepLedgerMapperTests
     }
 
     [Fact]
-    public void Operation_succeeded_checkpoints_the_runtime_stage_without_finalizing()
+    public void Operation_succeeded_finalizes_traffic_promoted_as_healthy()
     {
         var mapped = PulumiStepLedgerMapper.TryMap(
             Event(ProvisioningEventKind.OperationSucceeded, ProvisioningCapability.ContainerRuntime, "Operation succeeded."),
             AzureProviderOperationPhase.WorkloadReady);
         Assert.NotNull(mapped);
-        Assert.False(mapped.Finalize);
-        Assert.Equal(AzureProviderOperationStatus.Running, mapped.Status);
-        Assert.Equal(AzureProviderOperationPhase.WorkloadReady, mapped.Phase);
-        Assert.Equal(PulumiStepLedgerMapper.RuntimeDeployedCode, mapped.Code);
-        Assert.Equal(PulumiStepLedgerMapper.RuntimeDeployedMessage, mapped.Message);
+        Assert.True(mapped.Finalize);
+        Assert.Equal(AzureProviderOperationStatus.Succeeded, mapped.Status);
+        Assert.Equal(AzureProviderOperationPhase.TrafficPromoted, mapped.Phase);
+        Assert.Equal(PulumiStepLedgerMapper.OperationSucceededCode, mapped.Code);
+        Assert.Equal(AzureProviderHealth.Healthy, mapped.Health);
         Assert.True(PulumiStepLedgerMapper.IsCustomerSafe(mapped));
     }
 
     [Fact]
-    public void A_successful_update_stream_stops_at_workload_ready()
+    public void A_successful_update_stream_finalizes_ready()
     {
         var phase = AzureProviderOperationPhase.Planned;
         PulumiLedgerCheckpoint? last = null;
@@ -162,10 +162,10 @@ public sealed class PulumiStepLedgerMapperTests
         }
 
         Assert.NotNull(last);
-        Assert.False(last.Finalize);
-        Assert.Equal(AzureProviderOperationStatus.Running, last.Status);
-        Assert.Equal(AzureProviderOperationPhase.WorkloadReady, last.Phase);
-        Assert.Equal(PulumiStepLedgerMapper.RuntimeDeployedCode, last.Code);
+        Assert.True(last.Finalize);
+        Assert.Equal(AzureProviderOperationStatus.Succeeded, last.Status);
+        Assert.Equal(AzureProviderOperationPhase.TrafficPromoted, last.Phase);
+        Assert.Equal(PulumiStepLedgerMapper.OperationSucceededCode, last.Code);
     }
 
     [Fact]

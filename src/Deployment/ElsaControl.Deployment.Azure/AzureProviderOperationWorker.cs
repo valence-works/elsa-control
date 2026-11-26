@@ -1,3 +1,6 @@
+using ElsaControl.Deployment.Core.Instances;
+using ElsaControl.Provisioning.Core;
+
 namespace ElsaControl.Deployment.Azure;
 
 /// <summary>
@@ -11,8 +14,12 @@ public sealed class AzureProviderOperationWorker(
     IAzureProviderOperationStore store,
     AzureProviderExecutor executor,
     IAzureProviderPlanSource planSource,
-    TimeProvider? timeProvider = null)
+    TimeProvider? timeProvider = null,
+    IAzurePulumiProvisioningDispatcher? pulumi = null,
+    IElsaInstanceProvisioningBackendStore? backends = null)
 {
+    public const string DispatchWorkerId = "pulumi-dispatch";
+
     // Keep the executor-only construction seam available to hosts that predate the persisted
     // plan source; the default source still enforces the same admission checks.
     public AzureProviderOperationWorker(
@@ -91,10 +98,105 @@ public sealed class AzureProviderOperationWorker(
                 continue;
             }
 
+            if (await IsPulumiOwnedAsync(operation, cancellationToken).ConfigureAwait(false))
+            {
+                await DispatchPulumiAsync(operation, plan, now, cancellationToken).ConfigureAwait(false);
+                processed++;
+                continue;
+            }
+
             await executor.ExecuteAsync(request, cancellationToken);
             processed++;
         }
 
         return processed;
+    }
+
+    private async Task<bool> IsPulumiOwnedAsync(
+        AzureProviderOperation operation,
+        CancellationToken cancellationToken)
+    {
+        if (backends is null || operation.InstanceId is not { } instanceId || instanceId == Guid.Empty)
+            return false;
+        var backend = await backends.GetBackendAsync(operation.WorkspaceId, instanceId, cancellationToken)
+            .ConfigureAwait(false);
+        return backend == ElsaInstanceProvisioningBackend.Pulumi;
+    }
+
+    private async Task DispatchPulumiAsync(
+        AzureProviderOperation operation,
+        AzureWorkloadPlan plan,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        AzurePulumiDispatchResult? dispatched = null;
+        if (pulumi is not null)
+            dispatched = await pulumi.DispatchAsync(operation, plan, cancellationToken).ConfigureAwait(false);
+
+        if (dispatched is { Dispatched: true, ProvisioningOperationId: { } provisioningId })
+        {
+            var claimed = await store.ClaimAsync(
+                    operation.WorkspaceId,
+                    operation.Id,
+                    AzureProviderOperationStepLedger.WorkerId,
+                    AzureProviderOperationStepLedger.LeaseTokenFor(provisioningId),
+                    TimeSpan.FromSeconds(ProvisioningReplicaIdentity.DefaultLeaseSeconds),
+                    now,
+                    operation.Version,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (claimed is null)
+            {
+                // Already claimed by the ledger or another replica. The enqueue
+                // is idempotent; leaving the row as-is is the fail-closed path.
+            }
+
+            return;
+        }
+
+        await FailClosedAsync(operation, now, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task FailClosedAsync(
+        AzureProviderOperation operation,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var leaseToken = Guid.NewGuid().ToString("N");
+        var claimed = await store.ClaimAsync(
+                operation.WorkspaceId,
+                operation.Id,
+                DispatchWorkerId,
+                leaseToken,
+                TimeSpan.FromMinutes(1),
+                now,
+                operation.Version,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (claimed is null)
+            return;
+
+        var finalized = await store.FinalizeAsync(
+                operation.WorkspaceId,
+                operation.Id,
+                leaseToken,
+                AzureProviderOperationStatus.Failed,
+                ManagedElsaReasonCodeCatalog.ProviderDispatchFailed,
+                _timeProvider.GetUtcNow(),
+                claimed.Version,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (finalized is null)
+            return;
+
+        await store.RecordArmObservationClockAsync(
+                operation.WorkspaceId,
+                operation.Id,
+                _timeProvider.GetUtcNow(),
+                0,
+                ManagedElsaReasonCodeCatalog.ProviderDispatchFailed,
+                AzureTransientArmFailure.FromPulumi(null),
+                cancellationToken)
+            .ConfigureAwait(false);
     }
 }
