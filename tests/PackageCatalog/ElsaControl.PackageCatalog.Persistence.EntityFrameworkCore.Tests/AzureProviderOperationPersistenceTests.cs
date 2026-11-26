@@ -4,6 +4,8 @@ using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models;
+using ElsaControl.Provisioning.Abstractions;
+using ElsaControl.Provisioning.Core;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
@@ -1013,6 +1015,142 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
             "azure.deployment.failed",
             now.AddMinutes(2),
             reclaimed.Version));
+    }
+
+    [Fact]
+    public async Task Ledger_reclaims_an_expired_running_lease_and_finalizes()
+    {
+        var now = DateTimeOffset.UtcNow;
+        using var db = CreateContext();
+        var store = new AzureProviderOperationStore(db);
+        var providerOperation = await store.CreateOrGetAsync(Request() with
+        {
+            TargetKey = "ledger-expired-reclaim",
+            IdempotencyKey = "ledger-expired-reclaim"
+        }, now);
+        Assert.NotNull(await store.ClaimAsync(
+            _workspaceId,
+            providerOperation.Id,
+            AzureProviderOperationStepLedger.WorkerId,
+            "stale-random-token",
+            TimeSpan.FromSeconds(30),
+            now));
+
+        var later = now.AddSeconds(31);
+        var ledger = new AzureProviderOperationStepLedger(store, new FixedTimeProvider(later));
+        var (operation, request) = BoundLedger(providerOperation.Id);
+        var result = await ledger.TryWriteAsync(
+            operation,
+            request,
+            [LedgerEvent(operation.Id, 1, ProvisioningEventKind.OperationFailed, ProvisioningCapability.ContainerRuntime)]);
+
+        Assert.Equal(ProvisioningStepLedgerResult.Written, result);
+        var finalized = await store.GetAsync(_workspaceId, providerOperation.Id);
+        Assert.Equal(AzureProviderOperationStatus.Failed, finalized!.Status);
+        Assert.Contains(
+            await store.ListTransitionsAsync(_workspaceId, providerOperation.Id),
+            item => item.Code == ManagedElsaReasonCodeCatalog.AzureDeploymentFailed);
+    }
+
+    [Fact]
+    public async Task Ledger_reclaims_a_recovery_required_step_and_finalizes()
+    {
+        var now = DateTimeOffset.UtcNow;
+        using var db = CreateContext();
+        var store = new AzureProviderOperationStore(db);
+        var providerOperation = await store.CreateOrGetAsync(Request() with
+        {
+            TargetKey = "ledger-recovery-reclaim",
+            IdempotencyKey = "ledger-recovery-reclaim"
+        }, now);
+        Assert.NotNull(await store.ClaimAsync(
+            _workspaceId, providerOperation.Id, "worker-1", "lease-1", TimeSpan.FromSeconds(30), now));
+        Assert.Equal(1, await store.RecoverStaleAsync(now.AddSeconds(31)));
+        Assert.Equal(
+            AzureProviderOperationStatus.RecoveryRequired,
+            (await store.GetAsync(_workspaceId, providerOperation.Id))!.Status);
+
+        var later = now.AddSeconds(31);
+        var ledger = new AzureProviderOperationStepLedger(store, new FixedTimeProvider(later));
+        var (operation, request) = BoundLedger(providerOperation.Id);
+        var result = await ledger.TryWriteAsync(
+            operation,
+            request,
+            [LedgerEvent(operation.Id, 1, ProvisioningEventKind.OperationFailed, ProvisioningCapability.ContainerRuntime)]);
+
+        Assert.Equal(ProvisioningStepLedgerResult.Written, result);
+        var finalized = await store.GetAsync(_workspaceId, providerOperation.Id);
+        Assert.Equal(AzureProviderOperationStatus.Failed, finalized!.Status);
+        Assert.Contains(
+            await store.ListTransitionsAsync(_workspaceId, providerOperation.Id),
+            item => item.Code == ManagedElsaReasonCodeCatalog.AzureDeploymentFailed);
+    }
+
+    [Fact]
+    public async Task Ledger_rejects_the_old_fencing_token_after_reclaim()
+    {
+        var now = DateTimeOffset.UtcNow;
+        using var db = CreateContext();
+        var store = new AzureProviderOperationStore(db);
+        var providerOperation = await store.CreateOrGetAsync(Request() with
+        {
+            TargetKey = "ledger-stale-token",
+            IdempotencyKey = "ledger-stale-token"
+        }, now);
+        const string oldToken = "stale-random-token";
+        Assert.NotNull(await store.ClaimAsync(
+            _workspaceId,
+            providerOperation.Id,
+            AzureProviderOperationStepLedger.WorkerId,
+            oldToken,
+            TimeSpan.FromSeconds(30),
+            now));
+
+        var later = now.AddSeconds(31);
+        var ledger = new AzureProviderOperationStepLedger(store, new FixedTimeProvider(later));
+        var (operation, request) = BoundLedger(providerOperation.Id);
+        Assert.Equal(
+            ProvisioningStepLedgerResult.Written,
+            await ledger.TryWriteAsync(
+                operation,
+                request,
+                [LedgerEvent(operation.Id, 1, ProvisioningEventKind.ResourceStarted, "resource-group")]));
+
+        var running = await store.GetAsync(_workspaceId, providerOperation.Id);
+        Assert.Equal(AzureProviderOperationStatus.Running, running!.Status);
+        Assert.Equal(AzureProviderOperationStepLedger.WorkerId, running.WorkerId);
+        Assert.Null(await store.CheckpointAsync(
+            _workspaceId,
+            providerOperation.Id,
+            oldToken,
+            new(
+                AzureProviderOperationPhase.FoundationReady,
+                "late",
+                "Late.",
+                new(),
+                null,
+                AzureProviderHealth.Unknown,
+                []),
+            later,
+            running.Version));
+        Assert.Null(await store.FinalizeAsync(
+            _workspaceId,
+            providerOperation.Id,
+            oldToken,
+            AzureProviderOperationStatus.Failed,
+            ManagedElsaReasonCodeCatalog.AzureDeploymentFailed,
+            later,
+            running.Version));
+
+        Assert.Equal(
+            ProvisioningStepLedgerResult.Written,
+            await ledger.TryWriteAsync(
+                operation,
+                request,
+                [LedgerEvent(operation.Id, 2, ProvisioningEventKind.OperationFailed, ProvisioningCapability.ContainerRuntime)]));
+        Assert.Equal(
+            AzureProviderOperationStatus.Failed,
+            (await store.GetAsync(_workspaceId, providerOperation.Id))!.Status);
     }
 
     [Fact]
@@ -2032,6 +2170,58 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
         _workspaceId, "workload-a", AzureProviderOperationAction.Reconcile, "request-1",
         new('a', 64), new('b', 64), "3.8.0", "3.8", "combined", "Dedicated", "westeurope",
         "valenceruntimeimages.azurecr.io/runtime-combined", "sha256:" + new string('c', 64));
+
+    private (ProvisioningOperation Operation, ProvisioningRequest Request) BoundLedger(Guid providerOperationId)
+    {
+        var operation = new ProvisioningOperation(
+            Guid.NewGuid(),
+            ProvisioningCommand.Provision,
+            ProvisioningOperationState.Running,
+            "azure",
+            ProvisioningStackKind.Engine,
+            ProvisioningStackName.ForEngine(Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd")),
+            "pulumi-ledger",
+            "hash",
+            DateTimeOffset.UtcNow)
+        {
+            FencingToken = 1
+        };
+        var request = new ProvisioningRequest(
+            ProvisioningCommand.Provision,
+            new EngineSpec(
+                "elsa-server:test",
+                new HashSet<string>(StringComparer.Ordinal) { ProvisioningCapability.ContainerRuntime }),
+            new ProvisioningTarget(
+                "azure",
+                ProvisioningStackKind.Engine,
+                operation.StackName,
+                new CredentialReference(CredentialReference.AzureWorkloadIdentityKind, "workload-identity"),
+                new StateBackendReference(StateBackendReference.AzureBlobKind, "stelsaplatform/pulumi-state"),
+                new SecretsProviderReference(SecretsProviderReference.AzureKeyVaultKind, "kv-elsa-platform/pulumi-secrets"),
+                "staging"),
+            "pulumi-ledger",
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [PulumiStepLedgerMapper.ControlWorkspaceIdKey] = _workspaceId.ToString("D"),
+                [PulumiStepLedgerMapper.ControlProviderOperationIdKey] = providerOperationId.ToString("D")
+            });
+        return (operation, request);
+    }
+
+    private static ProvisioningEvent LedgerEvent(
+        Guid operationId,
+        int sequence,
+        ProvisioningEventKind kind,
+        string resourceKind) =>
+        new(
+            operationId,
+            kind,
+            resourceKind,
+            kind is ProvisioningEventKind.ResourceFailed or ProvisioningEventKind.OperationFailed
+                ? "Resource failed."
+                : "Resource started.",
+            DateTimeOffset.UtcNow,
+            sequence);
 
     private sealed class DenyingCommercialGate : IElsaInstanceCommercialGate
     {

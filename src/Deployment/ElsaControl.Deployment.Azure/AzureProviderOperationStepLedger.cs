@@ -11,7 +11,7 @@ namespace ElsaControl.Deployment.Azure;
 /// Azure lease or a duplicate engine sequence does not write a new row.
 /// The Azure lease token is derived from the module operation id so a replica
 /// or restart can reclaim a Running step. Sequence dedupe is process-local and
-/// evicted when the module operation reaches a terminal event.
+/// evicted on a terminal event, a rejected terminal write, or a store throw.
 /// </summary>
 public sealed class AzureProviderOperationStepLedger : IProvisioningStepLedger
 {
@@ -66,138 +66,150 @@ public sealed class AzureProviderOperationStepLedger : IProvisioningStepLedger
         var written = ProvisioningStepLedgerResult.Ignored;
         using var session = _open();
         var store = session.Store;
-        foreach (var value in events.OrderBy(item => item.EngineSequence ?? int.MaxValue).ThenBy(item => item.OccurredAt))
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var current = await store.GetAsync(workspaceId, providerOperationId, cancellationToken)
-                .ConfigureAwait(false);
-            if (current is null)
-                return ProvisioningStepLedgerResult.StaleFence;
-
-            var checkpoint = PulumiStepLedgerMapper.TryMap(value, current.Phase);
-            if (checkpoint is null || !PulumiStepLedgerMapper.IsCustomerSafe(checkpoint))
-                continue;
-
-            if (current.Status is AzureProviderOperationStatus.Failed
-                or AzureProviderOperationStatus.Cancelled
-                or AzureProviderOperationStatus.Succeeded)
+            foreach (var value in events.OrderBy(item => item.EngineSequence ?? int.MaxValue).ThenBy(item => item.OccurredAt))
             {
-                if (checkpoint.Finalize && checkpoint.Status == current.Status)
+                cancellationToken.ThrowIfCancellationRequested();
+                var current = await store.GetAsync(workspaceId, providerOperationId, cancellationToken)
+                    .ConfigureAwait(false);
+                if (current is null)
+                    return Stale();
+
+                var checkpoint = PulumiStepLedgerMapper.TryMap(value, current.Phase);
+                if (checkpoint is null || !PulumiStepLedgerMapper.IsCustomerSafe(checkpoint))
+                    continue;
+
+                if (current.Status is AzureProviderOperationStatus.Failed
+                    or AzureProviderOperationStatus.Cancelled
+                    or AzureProviderOperationStatus.Succeeded)
+                {
+                    if (checkpoint.Finalize && checkpoint.Status == current.Status)
+                    {
+                        written = ProvisioningStepLedgerResult.Duplicate;
+                        continue;
+                    }
+
+                    return checkpoint.Finalize ? Stale() : written;
+                }
+
+                current = await EnsureClaimedAsync(store, operation.Id, workspaceId, providerOperationId, cancellationToken)
+                    .ConfigureAwait(false);
+                if (current is null)
+                    return Stale();
+
+                if (value.EngineSequence is { } sequence
+                    && !_seen.TryAdd((operation.Id, sequence, value.Kind, value.ResourceKind), 0))
                 {
                     written = ProvisioningStepLedgerResult.Duplicate;
                     continue;
                 }
 
-                return checkpoint.Finalize
-                    ? ProvisioningStepLedgerResult.StaleFence
-                    : written;
-            }
-
-            current = await EnsureClaimedAsync(store, operation.Id, workspaceId, providerOperationId, cancellationToken)
-                .ConfigureAwait(false);
-            if (current is null)
-                return ProvisioningStepLedgerResult.StaleFence;
-
-            if (value.EngineSequence is { } sequence
-                && !_seen.TryAdd((operation.Id, sequence, value.Kind, value.ResourceKind), 0))
-            {
-                written = ProvisioningStepLedgerResult.Duplicate;
-                continue;
-            }
-
-            var lease = RequireLease(operation.Id);
-            var now = _timeProvider.GetUtcNow();
-            if (checkpoint.Finalize)
-            {
-                if (AzureProviderOperationPhaseOrdering.Compare(checkpoint.Phase, current.Phase) > 0)
+                var lease = RequireLease(operation.Id);
+                var now = _timeProvider.GetUtcNow();
+                if (checkpoint.Finalize)
                 {
-                    AzureProviderOperation? advanced;
-                    try
+                    if (AzureProviderOperationPhaseOrdering.Compare(checkpoint.Phase, current.Phase) > 0)
                     {
-                        advanced = await store.CheckpointAsync(
-                                workspaceId,
-                                providerOperationId,
-                                lease.Token,
-                                new AzureProviderCheckpoint(
-                                    checkpoint.Phase,
-                                    checkpoint.Code,
-                                    checkpoint.Message,
-                                    current.Resources,
-                                    current.Endpoint,
-                                    current.Health,
-                                    [],
-                                    AttemptedStep: checkpoint.AttemptedStep),
-                                now,
-                                current.Version,
-                                cancellationToken)
-                            .ConfigureAwait(false);
-                    }
-                    catch (InvalidOperationException)
-                    {
-                        advanced = current;
+                        AzureProviderOperation? advanced;
+                        try
+                        {
+                            advanced = await store.CheckpointAsync(
+                                    workspaceId,
+                                    providerOperationId,
+                                    lease.Token,
+                                    new AzureProviderCheckpoint(
+                                        checkpoint.Phase,
+                                        checkpoint.Code,
+                                        checkpoint.Message,
+                                        current.Resources,
+                                        current.Endpoint,
+                                        current.Health,
+                                        [],
+                                        AttemptedStep: checkpoint.AttemptedStep),
+                                    now,
+                                    current.Version,
+                                    cancellationToken)
+                                .ConfigureAwait(false);
+                        }
+                        catch (InvalidOperationException)
+                        {
+                            advanced = current;
+                        }
+
+                        if (advanced is null)
+                            return Stale();
+                        current = advanced;
+                        now = _timeProvider.GetUtcNow();
                     }
 
-                    if (advanced is null)
-                        return ProvisioningStepLedgerResult.StaleFence;
-                    current = advanced;
-                    now = _timeProvider.GetUtcNow();
+                    var finalized = await store.FinalizeAsync(
+                            workspaceId,
+                            providerOperationId,
+                            lease.Token,
+                            checkpoint.Status,
+                            checkpoint.Code,
+                            now,
+                            current.Version,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    if (finalized is null)
+                        return Stale();
+                    Forget(operation.Id);
+                    written = ProvisioningStepLedgerResult.Written;
+                    continue;
                 }
 
-                var finalized = await store.FinalizeAsync(
-                        workspaceId,
-                        providerOperationId,
-                        lease.Token,
-                        checkpoint.Status,
-                        checkpoint.Code,
-                        now,
-                        current.Version,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-                if (finalized is null)
-                    return ProvisioningStepLedgerResult.StaleFence;
-                Forget(operation.Id);
+                AzureProviderOperation? saved;
+                try
+                {
+                    saved = await store.CheckpointAsync(
+                            workspaceId,
+                            providerOperationId,
+                            lease.Token,
+                            new AzureProviderCheckpoint(
+                                checkpoint.Phase,
+                                checkpoint.Code,
+                                checkpoint.Message,
+                                current.Resources,
+                                current.Endpoint,
+                                current.Health,
+                                [],
+                                AttemptedStep: checkpoint.AttemptedStep),
+                            now,
+                            current.Version,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                catch (InvalidOperationException)
+                {
+                    continue;
+                }
+
+                if (saved is null)
+                    return Stale();
                 written = ProvisioningStepLedgerResult.Written;
-                continue;
+                if (value.Kind is ProvisioningEventKind.OperationSucceeded
+                    or ProvisioningEventKind.OperationFailed
+                    or ProvisioningEventKind.OperationCancelled)
+                {
+                    Forget(operation.Id);
+                }
             }
 
-            AzureProviderOperation? saved;
-            try
-            {
-                saved = await store.CheckpointAsync(
-                        workspaceId,
-                        providerOperationId,
-                        lease.Token,
-                        new AzureProviderCheckpoint(
-                            checkpoint.Phase,
-                            checkpoint.Code,
-                            checkpoint.Message,
-                            current.Resources,
-                            current.Endpoint,
-                            current.Health,
-                            [],
-                            AttemptedStep: checkpoint.AttemptedStep),
-                        now,
-                        current.Version,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-            }
-            catch (InvalidOperationException)
-            {
-                continue;
-            }
-
-            if (saved is null)
-                return ProvisioningStepLedgerResult.StaleFence;
-            written = ProvisioningStepLedgerResult.Written;
-            if (value.Kind is ProvisioningEventKind.OperationSucceeded
-                or ProvisioningEventKind.OperationFailed
-                or ProvisioningEventKind.OperationCancelled)
-            {
-                Forget(operation.Id);
-            }
+            return written;
+        }
+        catch
+        {
+            Forget(operation.Id);
+            throw;
         }
 
-        return written;
+        ProvisioningStepLedgerResult Stale()
+        {
+            Forget(operation.Id);
+            return ProvisioningStepLedgerResult.StaleFence;
+        }
     }
 
     public async Task HeartbeatAsync(

@@ -177,6 +177,48 @@ public sealed class AzureProviderOperationStepLedgerTests
     }
 
     [Fact]
+    public async Task A_rejected_terminal_write_clears_in_memory_lease_and_dedupe()
+    {
+        var providerOperation = Operation();
+        var store = new LedgerStore(providerOperation);
+        var ledger = new AzureProviderOperationStepLedger(store);
+        var (operation, request) = Bound(providerOperation.WorkspaceId, providerOperation.Id);
+        var started = Event(operation.Id, 1, ProvisioningEventKind.ResourceStarted, "resource-group");
+        var failed = Event(operation.Id, 2, ProvisioningEventKind.OperationFailed, ProvisioningCapability.ContainerRuntime);
+
+        Assert.Equal(ProvisioningStepLedgerResult.Written, await ledger.TryWriteAsync(operation, request, [started]));
+        store.RejectFinalize = true;
+        Assert.Equal(ProvisioningStepLedgerResult.StaleFence, await ledger.TryWriteAsync(operation, request, [failed]));
+
+        store.RejectFinalize = false;
+        store.Reopen();
+        Assert.Equal(ProvisioningStepLedgerResult.Written, await ledger.TryWriteAsync(operation, request, [started]));
+        Assert.Equal(AzureProviderOperationPhase.FoundationSubmitted, store.Operation.Phase);
+        Assert.Equal(AzureProviderOperationStatus.Running, store.Operation.Status);
+    }
+
+    [Fact]
+    public async Task A_store_throw_on_a_terminal_write_clears_in_memory_lease_and_dedupe()
+    {
+        var providerOperation = Operation();
+        var store = new LedgerStore(providerOperation);
+        var ledger = new AzureProviderOperationStepLedger(store);
+        var (operation, request) = Bound(providerOperation.WorkspaceId, providerOperation.Id);
+        var started = Event(operation.Id, 1, ProvisioningEventKind.ResourceStarted, "resource-group");
+        var failed = Event(operation.Id, 2, ProvisioningEventKind.OperationFailed, ProvisioningCapability.ContainerRuntime);
+
+        Assert.Equal(ProvisioningStepLedgerResult.Written, await ledger.TryWriteAsync(operation, request, [started]));
+        store.ThrowOnWrite = true;
+        await Assert.ThrowsAsync<InvalidOperationException>(() => ledger.TryWriteAsync(operation, request, [failed]));
+
+        store.ThrowOnWrite = false;
+        store.Reopen();
+        Assert.Equal(ProvisioningStepLedgerResult.Written, await ledger.TryWriteAsync(operation, request, [started]));
+        Assert.Equal(AzureProviderOperationPhase.FoundationSubmitted, store.Operation.Phase);
+        Assert.Equal(AzureProviderOperationStatus.Running, store.Operation.Status);
+    }
+
+    [Fact]
     public async Task Operation_failed_with_no_pulumi_events_finalizes_the_ledger()
     {
         var providerOperation = Operation();
@@ -338,6 +380,8 @@ public sealed class AzureProviderOperationStepLedgerTests
         public AzureProviderOperation Operation { get; private set; } = operation;
         public List<AzureProviderOperationTransition> Transitions { get; } = [];
         public bool RejectClaim { get; init; }
+        public bool RejectFinalize { get; set; }
+        public bool ThrowOnWrite { get; set; }
 
         public void Reopen()
         {
@@ -469,6 +513,8 @@ public sealed class AzureProviderOperationStepLedgerTests
             CancellationToken cancellationToken = default)
         {
             AzureProviderOperationValidation.ValidateCheckpoint(checkpoint);
+            if (ThrowOnWrite)
+                throw new InvalidOperationException("The Azure provider operation store failed.");
             if (_leaseToken != leaseToken
                 || Operation.Status != AzureProviderOperationStatus.Running
                 || expectedVersion.HasValue && expectedVersion.Value != Operation.Version)
@@ -515,7 +561,10 @@ public sealed class AzureProviderOperationStepLedgerTests
             CancellationToken cancellationToken = default)
         {
             AzureProviderOperationValidation.ValidateCode(code);
-            if (_leaseToken != leaseToken
+            if (ThrowOnWrite)
+                throw new InvalidOperationException("The Azure provider operation store failed.");
+            if (RejectFinalize
+                || _leaseToken != leaseToken
                 || Operation.Status != AzureProviderOperationStatus.Running
                 || expectedVersion.HasValue && expectedVersion.Value != Operation.Version)
             {

@@ -66,6 +66,7 @@ public static class ProvisioningServiceCollectionExtensions
                 provider.GetRequiredService<UnconfiguredInfrastructureProvider>());
         }
 
+        services.AddLogging();
         services.TryAddSingleton<IProvisioningStepLedger, NoOpProvisioningStepLedger>();
         services.AddSingleton<IProvisioningLiveEventSink, ProvisioningLiveEventSink>();
         services.AddSingleton<IProvisioningService>(provider =>

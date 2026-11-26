@@ -2,7 +2,6 @@ using System.Collections.Concurrent;
 using ElsaControl.Provisioning.Abstractions;
 using ElsaControl.Provisioning.Core.Stores;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ElsaControl.Provisioning.Core;
 
@@ -15,12 +14,13 @@ namespace ElsaControl.Provisioning.Core;
 public sealed class ProvisioningLiveEventSink(
     IProvisioningOperationStore operations,
     IProvisioningEventStore eventStore,
-    IProvisioningStepLedger? ledger = null,
-    ILogger? logger = null) : IProvisioningLiveEventSink
+    ILogger<ProvisioningLiveEventSink> logger,
+    IProvisioningStepLedger? ledger = null) : IProvisioningLiveEventSink
 {
     private readonly ConcurrentDictionary<Guid, BoundRun> _runs = new();
     private readonly IProvisioningStepLedger _ledger = ledger ?? new NoOpProvisioningStepLedger();
-    private readonly ILogger _logger = logger ?? NullLogger.Instance;
+    private readonly ILogger<ProvisioningLiveEventSink> _logger = logger
+        ?? throw new ArgumentNullException(nameof(logger));
 
     public IDisposable Bind(ProvisioningOperation operation, ProvisioningRequest request)
     {

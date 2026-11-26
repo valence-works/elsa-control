@@ -1,6 +1,7 @@
 using ElsaControl.Provisioning.Abstractions;
 using ElsaControl.Provisioning.Core.Stores;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ElsaControl.Provisioning.Core.Tests;
 
@@ -11,7 +12,7 @@ public sealed class ProvisioningLiveEventSinkTests
     {
         var store = new InMemoryProvisioningStore();
         var ledger = new RecordingLedger();
-        var sink = new ProvisioningLiveEventSink(store, store, ledger);
+        var sink = new ProvisioningLiveEventSink(store, store, Logger(), ledger);
         var (operation, request) = await ClaimAsync(store);
 
         using (sink.Bind(operation, request))
@@ -35,7 +36,7 @@ public sealed class ProvisioningLiveEventSinkTests
         var operations = new FenceStore { HoldsFence = false };
         var events = new RecordingEventStore { FenceHeld = false };
         var ledger = new RecordingLedger();
-        var sink = new ProvisioningLiveEventSink(operations, events, ledger);
+        var sink = new ProvisioningLiveEventSink(operations, events, Logger(), ledger);
         var operation = Operation();
         var request = ProvisioningFixtures.Request(
             ProvisioningCommand.Provision,
@@ -55,7 +56,7 @@ public sealed class ProvisioningLiveEventSinkTests
     {
         var store = new InMemoryProvisioningStore();
         var ledger = new RecordingLedger();
-        var sink = new ProvisioningLiveEventSink(store, store, ledger);
+        var sink = new ProvisioningLiveEventSink(store, store, Logger(), ledger);
         var worker = new ProvisioningOperationWorker(
             store,
             store,
@@ -82,7 +83,7 @@ public sealed class ProvisioningLiveEventSinkTests
     {
         var store = new InMemoryProvisioningStore();
         var ledger = new RecordingLedger();
-        var sink = new ProvisioningLiveEventSink(store, store, ledger);
+        var sink = new ProvisioningLiveEventSink(store, store, Logger(), ledger);
         var worker = new ProvisioningOperationWorker(
             store,
             store,
@@ -107,7 +108,7 @@ public sealed class ProvisioningLiveEventSinkTests
     {
         var store = new InMemoryProvisioningStore();
         var logger = new RecordingLogger();
-        var sink = new ProvisioningLiveEventSink(store, store, new ThrowingLedger(), logger);
+        var sink = new ProvisioningLiveEventSink(store, store, logger, new ThrowingLedger());
         var worker = new ProvisioningOperationWorker(
             store,
             store,
@@ -133,7 +134,7 @@ public sealed class ProvisioningLiveEventSinkTests
         var operations = new FenceStore { HoldsFence = false };
         var events = new RecordingEventStore { FenceHeld = false };
         var ledger = new RecordingLedger();
-        var sink = new ProvisioningLiveEventSink(operations, events, ledger);
+        var sink = new ProvisioningLiveEventSink(operations, events, Logger(), ledger);
         var operation = Operation();
         var request = ProvisioningFixtures.Request(
             ProvisioningCommand.Provision,
@@ -153,7 +154,7 @@ public sealed class ProvisioningLiveEventSinkTests
     {
         var store = new InMemoryProvisioningStore();
         var ledger = new RecordingLedger { Result = ProvisioningStepLedgerResult.Duplicate };
-        var sink = new ProvisioningLiveEventSink(store, store, ledger);
+        var sink = new ProvisioningLiveEventSink(store, store, Logger(), ledger);
         var (operation, request) = await ClaimAsync(store);
         var started = Event(operation.Id, 1, ProvisioningEventKind.ResourceStarted, "resource-group");
 
@@ -179,6 +180,9 @@ public sealed class ProvisioningLiveEventSinkTests
         var claimed = await store.ClaimAsync(enqueued.OperationId, DateTimeOffset.UtcNow);
         return (claimed!, request);
     }
+
+    private static ILogger<ProvisioningLiveEventSink> Logger() =>
+        NullLogger<ProvisioningLiveEventSink>.Instance;
 
     private static ProvisioningEvent Event(
         Guid operationId,
@@ -218,7 +222,7 @@ public sealed class ProvisioningLiveEventSinkTests
             Task.CompletedTask;
     }
 
-    private sealed class RecordingLogger : ILogger
+    private sealed class RecordingLogger : ILogger<ProvisioningLiveEventSink>
     {
         public List<string> Entries { get; } = [];
 
