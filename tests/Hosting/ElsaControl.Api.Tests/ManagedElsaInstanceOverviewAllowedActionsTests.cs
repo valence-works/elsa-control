@@ -62,13 +62,32 @@ public sealed class ManagedElsaInstanceOverviewAllowedActionsTests
     }
 
     [Fact]
-    public void Deleting_intent_denies_delete_with_instance_deleting()
+    public void Owner_may_retry_delete_when_deleting_intent_has_no_active_delete()
     {
         var instance = Instance(ElsaObservedLifecycle.Deleting, desired: ElsaDesiredLifecycle.Deleting);
         var decision = Overview(instance).AllowedActions.Delete;
 
-        Assert.False(decision.Allowed);
-        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.InstanceDeletingCode, decision.ReasonCode);
+        Assert.Null(ManagedElsaInstanceOverviewEndpoints.CustomerDeleteDenialCode(instance));
+        Assert.True(decision.Allowed);
+        Assert.Null(decision.ReasonCode);
+    }
+
+    [Fact]
+    public void Owner_may_retry_delete_after_a_terminally_failed_delete()
+    {
+        var instance = Instance(ElsaObservedLifecycle.Deleting, desired: ElsaDesiredLifecycle.Deleting);
+        var failedDelete = Operation(
+            instance.Id,
+            ElsaInstanceOperationAction.Delete,
+            ElsaInstanceOperationState.Failed);
+        var decision = Overview(instance, lastOperation: failedDelete).AllowedActions.Delete;
+
+        Assert.False(ElsaInstanceOperationGuard.IsBlocking(failedDelete.State));
+        Assert.False(ManagedElsaInstanceOverviewEndpoints.HasBlockingCustomerDelete(failedDelete));
+        Assert.False(ManagedElsaInstanceOverviewEndpoints.IsResumableCustomerDelete(failedDelete));
+        Assert.Null(ManagedElsaInstanceOverviewEndpoints.CustomerDeleteDenialCode(instance));
+        Assert.True(decision.Allowed);
+        Assert.Null(decision.ReasonCode);
     }
 
     [Fact]
@@ -107,7 +126,7 @@ public sealed class ManagedElsaInstanceOverviewAllowedActionsTests
 
         Assert.True(ManagedElsaInstanceOverviewEndpoints.IsResumableCustomerDelete(delete));
         Assert.False(ManagedElsaInstanceOverviewEndpoints.HasBlockingCustomerDelete(delete));
-        Assert.Null(ManagedElsaInstanceOverviewEndpoints.CustomerDeleteDenialCode(instance, delete));
+        Assert.Null(ManagedElsaInstanceOverviewEndpoints.CustomerDeleteDenialCode(instance));
         Assert.True(decision.Allowed);
         Assert.Null(decision.ReasonCode);
     }
@@ -180,7 +199,8 @@ public sealed class ManagedElsaInstanceOverviewAllowedActionsTests
         ElsaInstanceOperationSummary? activeOperation = null,
         WorkspaceRole role = WorkspaceRole.Owner,
         ElsaInstanceCommercialGateDecision? deleteGate = null,
-        bool? canDeletePermission = null) =>
+        bool? canDeletePermission = null,
+        ElsaInstanceOperationSummary? lastOperation = null) =>
         ManagedElsaInstanceOverviewProjection.ToOverview(
             instance,
             instance.WorkspaceId,
@@ -189,7 +209,7 @@ public sealed class ManagedElsaInstanceOverviewAllowedActionsTests
             canDeletePermission: canDeletePermission ?? role is WorkspaceRole.Owner or WorkspaceRole.SourceAdmin,
             identity: null,
             activeOperation,
-            lastOperation: null,
+            lastOperation,
             new ManagedLifecycleOperationalHealthResult(
                 ManagedLifecycleOperationalHealthStatus.Healthy,
                 ManagedLifecycleOperationalHealthDiagnosticCodes.Healthy,
@@ -239,11 +259,13 @@ public sealed class ManagedElsaInstanceOverviewAllowedActionsTests
             1,
             Now,
             state is ElsaInstanceOperationState.Running or ElsaInstanceOperationState.RecoveryRequired ? Now : null,
+            state is ElsaInstanceOperationState.Failed or ElsaInstanceOperationState.Succeeded or ElsaInstanceOperationState.Cancelled
+                ? Now
+                : null,
             null,
             null,
             null,
-            null,
-            null,
+            state == ElsaInstanceOperationState.Failed ? "deletion.provider.unavailable" : null,
             null,
             null);
 }

@@ -701,19 +701,15 @@ public static class ManagedElsaInstanceOverviewEndpoints
         return ElsaInstanceStateMachine.CanRestart(instance) ? null : InstanceNotReadyCode;
     }
 
-    // Delete is a safe exit: Failed/provisioning stay allowed. A tombstone is
-    // denied. Deleting intent is denied unless POST …/delete can resume a
-    // RecoveryRequired Delete with a fresh confirmation. Active non-Delete
-    // work is not a denial because that route waits behind or supersedes the
-    // predecessor.
-    internal static string? CustomerDeleteDenialCode(
-        ElsaInstance instance,
-        ElsaInstanceOperationSummary? activeOperation)
+    // Delete is a safe exit. Failed, provisioning, and a stuck Deleting intent
+    // without an in-flight Delete stay allowed, including a terminally Failed
+    // Delete with no RecoveryRequired resume. A tombstone is denied. An
+    // ordinary blocking Delete stays denied via HasBlockingCustomerDelete;
+    // RecoveryRequired Delete is resumed. Active non-Delete work is not a
+    // denial because that route waits behind or supersedes the predecessor.
+    internal static string? CustomerDeleteDenialCode(ElsaInstance instance)
     {
         if (instance.ObservedLifecycle == ElsaObservedLifecycle.Deleted)
-            return InstanceDeletingCode;
-        if (instance.Intent.DesiredLifecycle == ElsaDesiredLifecycle.Deleting &&
-            !IsResumableCustomerDelete(activeOperation))
             return InstanceDeletingCode;
         return null;
     }
@@ -771,7 +767,7 @@ internal static class ManagedElsaInstanceOverviewProjection
         var hasActiveOperation = activeOperation is not null &&
                                  ElsaInstanceOperationGuard.IsBlocking(activeOperation.State);
         var mutationDenial = ManagedElsaInstanceOverviewEndpoints.CustomerMutationDenialCode(instance);
-        var deleteDenial = ManagedElsaInstanceOverviewEndpoints.CustomerDeleteDenialCode(instance, activeOperation);
+        var deleteDenial = ManagedElsaInstanceOverviewEndpoints.CustomerDeleteDenialCode(instance);
         var hasBlockingDelete = ManagedElsaInstanceOverviewEndpoints.HasBlockingCustomerDelete(activeOperation);
 
         return new ManagedElsaInstanceOverviewResponse(

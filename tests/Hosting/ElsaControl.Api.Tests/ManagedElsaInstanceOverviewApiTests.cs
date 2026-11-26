@@ -924,7 +924,7 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
     }
 
     [Fact]
-    public async Task Delete_is_denied_while_deleting()
+    public async Task Delete_is_allowed_while_stuck_deleting_with_no_active_delete()
     {
         var app = await PrepareApplicationAsync();
         var client = app.CreateTrustedWorkspaceClient("overview-delete-deleting-owner");
@@ -932,13 +932,75 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
         await SetLifecycleAsync(
             app, created.Instance.InstanceId, ElsaObservedLifecycle.Deleting, ElsaDesiredLifecycle.Deleting);
 
-        var overview = await client.GetControlJsonAsync<ManagedElsaInstanceOverviewResponse>(
-            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/overview");
+        await AssertDeleteDecisionMatchesRouteAsync(
+            client, workspaceId, created.Instance.InstanceId, created.Instance.ETag,
+            "overview-delete-deleting", allowed: true, reasonCode: null);
+    }
 
-        Assert.False(overview!.AllowedActions.Delete.Allowed);
-        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.InstanceDeletingCode, overview.AllowedActions.Delete.ReasonCode);
-        AssertExactCustomerDtoShape(
-            JsonSerializer.Serialize(overview, ControlApiTestApplication.JsonOptions), "overview");
+    [Fact]
+    public async Task Delete_after_a_terminally_failed_delete_matches_the_delete_route()
+    {
+        var app = await PrepareApplicationAsync();
+        var client = app.CreateTrustedWorkspaceClient("overview-delete-failed-delete-owner");
+        var (workspaceId, created) = await CreateReadyInstanceAsync(app, client, "overview-delete-failed-delete");
+
+        using var firstConfirmationResponse = await client.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations",
+            content: null);
+        var firstConfirmation = await firstConfirmationResponse.Content
+            .ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        Assert.Equal(HttpStatusCode.OK, firstConfirmationResponse.StatusCode);
+        using var firstDelete = await SendDeleteAsync(
+            client,
+            workspaceId,
+            created.Instance.InstanceId,
+            created.Instance.ETag,
+            "overview-delete-failed-delete-first",
+            firstConfirmation!.ConfirmationId);
+        var firstDeleteBody = await firstDelete.Content
+            .ReadControlJsonAsync<ManagedElsaInstanceDeleteAcceptedResponse>();
+        Assert.Equal(HttpStatusCode.Accepted, firstDelete.StatusCode);
+        Assert.NotNull(firstDeleteBody);
+        await SetOperationStateAsync(
+            app, firstDeleteBody!.OperationId, ElsaInstanceOperationState.Failed, "deletion.provider.unavailable",
+            completed: true);
+        var acceptedEtag = firstDelete.Headers.ETag?.ToString()
+            ?? throw new InvalidOperationException("Delete acceptance ETag is missing.");
+
+        await AssertDeleteDecisionMatchesRouteAsync(
+            client, workspaceId, created.Instance.InstanceId, acceptedEtag,
+            "overview-delete-failed-delete-retry", allowed: true, reasonCode: null);
+    }
+
+    [Fact]
+    public async Task Delete_after_a_rejected_create_matches_the_delete_route()
+    {
+        var app = await PrepareApplicationAsync();
+        var client = app.CreateTrustedWorkspaceClient("overview-delete-rejected-owner");
+        var (workspaceId, created) = await CreateAcceptedInstanceAsync(app, client, "overview-delete-rejected");
+        await SetOperationStateAsync(
+            app, created.Operation.Id, ElsaInstanceOperationState.Failed,
+            ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected, completed: true);
+        await SetLifecycleAsync(
+            app, created.Instance.InstanceId, ElsaObservedLifecycle.Failed, ElsaDesiredLifecycle.Running);
+
+        await AssertDeleteDecisionMatchesRouteAsync(
+            client, workspaceId, created.Instance.InstanceId, created.Instance.ETag,
+            "overview-delete-rejected", allowed: true, reasonCode: null);
+    }
+
+    [Fact]
+    public async Task Delete_behind_an_uncertain_create_matches_the_delete_route()
+    {
+        var app = await PrepareApplicationAsync();
+        var client = app.CreateTrustedWorkspaceClient("overview-delete-uncertain-owner");
+        var (workspaceId, created) = await CreateAcceptedInstanceAsync(app, client, "overview-delete-uncertain");
+        await ParkRecoveryRequiredAsync(
+            app, created.Operation.Id, "u", ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain);
+
+        await AssertDeleteDecisionMatchesRouteAsync(
+            client, workspaceId, created.Instance.InstanceId, created.Instance.ETag,
+            "overview-delete-uncertain", allowed: true, reasonCode: null);
     }
 
     [Fact]
@@ -1636,17 +1698,18 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
     private static async Task ParkRecoveryRequiredAsync(
         ControlApiTestApplication app,
         Guid operationId,
-        string suffix)
+        string suffix,
+        string? failureCode = null)
     {
         await using var scope = app.Services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
         var evidence = $"https://evidence.example/retry/overview-attempt-{suffix}";
         var digest = "sha256:" + new string(suffix[0], 64);
-        var retrySafe = ElsaInstanceProviderReconciliationService.RetrySafeCode;
+        var parkedFailureCode = failureCode ?? ElsaInstanceProviderReconciliationService.RetrySafeCode;
         await db.Database.ExecuteSqlInterpolatedAsync($"""
             UPDATE ElsaInstanceOperations
             SET State = {ElsaInstanceOperationState.RecoveryRequired.ToString()},
-                FailureCode = {retrySafe},
+                FailureCode = {parkedFailureCode},
                 ReconciliationRetryEvidenceReference = {evidence},
                 ReconciliationRetryEvidenceDigest = {digest},
                 CompletedAt = NULL
