@@ -244,6 +244,67 @@ public sealed class EfProvisioningStoreTests : IDisposable
         Assert.True(await store.TryAcquireAsync(ProvisioningStackKind.Platform, "ef-lock", second, DateTimeOffset.UtcNow));
     }
 
+    [Fact]
+    public async Task Replica_reclaims_expired_lock_on_a_finished_operation()
+    {
+        var request = ProvisioningFixtures.Request(
+            ProvisioningCommand.Provision,
+            ProvisioningFixtures.PlatformTarget("ef-terminal-lock"),
+            ProvisioningFixtures.PlatformSpec("ef-terminal-lock"),
+            "ef-terminal-lock");
+        var first = new EfProvisioningStore(
+            _factory,
+            new ProvisioningReplicaIdentity("dead", TimeSpan.FromMilliseconds(1)));
+        var enqueued = await first.CreateOrGetAsync(
+            request,
+            ProvisioningRequestHash.Compute(request),
+            DateTimeOffset.UtcNow);
+        var claimed = await first.ClaimAsync(enqueued.OperationId, DateTimeOffset.UtcNow);
+        var completed = await first.CompleteAsync(
+            claimed!.Id,
+            ProvisioningOperationState.Cancelled,
+            DateTimeOffset.UtcNow,
+            ProvisioningFailureCodes.Interrupted,
+            stateLockMayBeHeld: true,
+            fencingToken: claimed.FencingToken);
+        Assert.NotNull(completed);
+        Assert.True(completed!.StateLockMayBeHeld);
+        Assert.Equal(
+            claimed.Id,
+            await first.GetHolderAsync(ProvisioningStackKind.Platform, "ef-terminal-lock"));
+
+        await Task.Delay(1500);
+        var second = new EfProvisioningStore(
+            _factory,
+            new ProvisioningReplicaIdentity("reclaim", TimeSpan.FromMinutes(5)));
+        var worker = new ProvisioningOperationWorker(
+            second,
+            second,
+            new FakeInfrastructureProvider(),
+            heartbeat: TimeSpan.FromSeconds(3));
+        await worker.ReconcileInterruptedAsync();
+
+        var loaded = await second.GetAsync(claimed.Id);
+        Assert.Equal(ProvisioningOperationState.Cancelled, loaded!.State);
+        Assert.False(loaded.StateLockMayBeHeld);
+        Assert.Null(await second.GetHolderAsync(ProvisioningStackKind.Platform, "ef-terminal-lock"));
+
+        var destroyRequest = ProvisioningFixtures.Request(
+            ProvisioningCommand.Destroy,
+            ProvisioningFixtures.PlatformTarget("ef-terminal-lock"),
+            ProvisioningFixtures.PlatformSpec("ef-terminal-lock"),
+            "ef-terminal-lock-destroy");
+        var destroy = await second.CreateOrGetAsync(
+            destroyRequest,
+            ProvisioningRequestHash.Compute(destroyRequest),
+            DateTimeOffset.UtcNow);
+        Assert.False(destroy.LockConflict);
+        Assert.Equal(ProvisioningOperationState.Queued, destroy.State);
+        Assert.Equal(1, await worker.ProcessOnceAsync());
+        var destroyed = await second.GetAsync(destroy.OperationId);
+        Assert.Equal(ProvisioningOperationState.Succeeded, destroyed!.State);
+    }
+
     public void Dispose() => _connection.Dispose();
 
     private sealed class TestFactory(DbContextOptions<ProvisioningDbContext> options)

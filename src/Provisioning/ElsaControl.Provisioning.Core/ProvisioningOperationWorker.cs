@@ -73,7 +73,12 @@ public sealed class ProvisioningOperationWorker(
             var request = await operations.GetRequestAsync(claimed.Id, cancellationToken).ConfigureAwait(false);
             if (request is null)
             {
-                await FailAsync(claimed, ProvisioningFailureCodes.RequestMissing, cancellationToken).ConfigureAwait(false);
+                await FailAsync(
+                        claimed,
+                        ProvisioningFailureCodes.RequestMissing,
+                        stateLockMayBeHeld: true,
+                        cancellationToken)
+                    .ConfigureAwait(false);
                 continue;
             }
 
@@ -97,9 +102,9 @@ public sealed class ProvisioningOperationWorker(
 
                 await events.AppendAsync(result.Events, cancellationToken).ConfigureAwait(false);
                 var terminal = TerminalState(claimed, result, linked, cancellationToken);
-                var holdLock = terminal != ProvisioningOperationState.Succeeded;
-                if (holdLock)
-                    await TryCancelProviderAsync(claimed, request).ConfigureAwait(false);
+                var needsCancel = terminal != ProvisioningOperationState.Succeeded;
+                var pulumiReleased = !needsCancel
+                    || await TryCancelProviderAsync(claimed, request).ConfigureAwait(false);
 
                 var completed = await operations.CompleteAsync(
                     claimed.Id,
@@ -107,7 +112,7 @@ public sealed class ProvisioningOperationWorker(
                     _timeProvider.GetUtcNow(),
                     result.FailureCode,
                     cancellationToken,
-                    stateLockMayBeHeld: holdLock,
+                    stateLockMayBeHeld: needsCancel && !pulumiReleased,
                     fencingToken: claimed.FencingToken).ConfigureAwait(false);
                 if (completed is not null)
                 {
@@ -143,23 +148,23 @@ public sealed class ProvisioningOperationWorker(
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                await TryCancelProviderAsync(claimed, request).ConfigureAwait(false);
+                var pulumiReleased = await TryCancelProviderAsync(claimed, request).ConfigureAwait(false);
                 await CompleteTerminalAsync(
                     claimed,
                     ProvisioningOperationState.Cancelled,
                     ProvisioningFailureCodes.Interrupted,
-                    stateLockMayBeHeld: true,
+                    stateLockMayBeHeld: !pulumiReleased,
                     CancellationToken.None).ConfigureAwait(false);
                 throw;
             }
             catch (OperationCanceledException)
             {
-                await TryCancelProviderAsync(claimed, request).ConfigureAwait(false);
+                var pulumiReleased = await TryCancelProviderAsync(claimed, request).ConfigureAwait(false);
                 await CompleteTerminalAsync(
                     claimed,
                     ProvisioningOperationState.Cancelled,
                     ProvisioningFailureCodes.Cancelled,
-                    stateLockMayBeHeld: true,
+                    stateLockMayBeHeld: !pulumiReleased,
                     cancellationToken).ConfigureAwait(false);
             }
             catch (Exception exception)
@@ -168,8 +173,12 @@ public sealed class ProvisioningOperationWorker(
                     "Provisioning provider failed. OperationId={OperationId} ExceptionType={ExceptionType}",
                     claimed.Id,
                     exception.GetType().FullName);
-                await TryCancelProviderAsync(claimed, request).ConfigureAwait(false);
-                await FailAsync(claimed, ProvisioningFailureCodes.ProviderFailed, cancellationToken)
+                var pulumiReleased = await TryCancelProviderAsync(claimed, request).ConfigureAwait(false);
+                await FailAsync(
+                        claimed,
+                        ProvisioningFailureCodes.ProviderFailed,
+                        stateLockMayBeHeld: !pulumiReleased,
+                        cancellationToken)
                     .ConfigureAwait(false);
             }
         }
@@ -201,7 +210,9 @@ public sealed class ProvisioningOperationWorker(
                     operation.FencingToken)
                 .ConfigureAwait(false);
 
-            if (expired.Any(item => item.Id == operation.Id))
+            if (expired.Any(item => item.Id == operation.Id)
+                && operation.State == ProvisioningOperationState.Failed
+                && operation.FailureCode == ProvisioningFailureCodes.Interrupted)
             {
                 await events.AppendAsync(
                     [
@@ -295,18 +306,19 @@ public sealed class ProvisioningOperationWorker(
             _ => Task.FromResult(ProviderRunResult.Fail([], ProvisioningFailureCodes.UnknownCommand))
         };
 
-    private async Task TryCancelProviderAsync(ProvisioningOperation operation, ProvisioningRequest request)
+    private async Task<bool> TryCancelProviderAsync(ProvisioningOperation operation, ProvisioningRequest request)
     {
         if (operation.Command != ProvisioningCommand.Cancel
             && !await operations.HoldsFenceAsync(operation.Id, operation.FencingToken, CancellationToken.None)
                 .ConfigureAwait(false))
         {
-            return;
+            return false;
         }
 
         try
         {
             await provider.CancelAsync(operation, request, CancellationToken.None).ConfigureAwait(false);
+            return true;
         }
         catch (Exception exception)
         {
@@ -314,6 +326,7 @@ public sealed class ProvisioningOperationWorker(
                 "Provisioning state-lock release failed. OperationId={OperationId} ExceptionType={ExceptionType}",
                 operation.Id,
                 exception.GetType().FullName);
+            return false;
         }
     }
 
@@ -348,7 +361,11 @@ public sealed class ProvisioningOperationWorker(
             cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task FailAsync(ProvisioningOperation operation, string failureCode, CancellationToken cancellationToken)
+    private async Task FailAsync(
+        ProvisioningOperation operation,
+        string failureCode,
+        bool stateLockMayBeHeld,
+        CancellationToken cancellationToken)
     {
         var current = await operations.GetAsync(operation.Id, CancellationToken.None).ConfigureAwait(false);
         if (current is null || ProvisioningOperationStateMachine.IsTerminal(current.State))
@@ -360,7 +377,7 @@ public sealed class ProvisioningOperationWorker(
             _timeProvider.GetUtcNow(),
             failureCode,
             cancellationToken,
-            stateLockMayBeHeld: true,
+            stateLockMayBeHeld,
             operation.FencingToken).ConfigureAwait(false);
         await events.AppendAsync(
             [

@@ -19,6 +19,7 @@ public sealed class ProvisioningProviderGuard(
         var configured = options.Value;
         if (!configured.WorkerEnabled)
             return Task.CompletedTask;
+        configured.EnsureHeartbeatFitsLease();
         if (configured.AllowFakeProvider)
             return Task.CompletedTask;
         if (string.Equals(provider.ProviderId, FakeInfrastructureProvider.Id, StringComparison.Ordinal))

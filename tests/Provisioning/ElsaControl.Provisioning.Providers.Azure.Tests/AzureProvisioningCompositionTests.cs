@@ -49,12 +49,18 @@ public sealed class AzureProvisioningCompositionTests
         Assert.IsType<EmptyProvisioningSecretResolver>(provider.GetRequiredService<IProvisioningSecretResolver>());
         var worker = provider.GetRequiredService<ProvisioningOperationWorker>();
         Assert.NotNull(worker);
+        var options = configuration.GetSection(ProvisioningOptions.ConfigurationSection).Get<ProvisioningOptions>()!;
         Assert.Equal(
             TimeSpan.FromSeconds(ProvisioningReplicaIdentity.DefaultHeartbeatSeconds),
-            configuration.GetSection(ProvisioningOptions.ConfigurationSection).Get<ProvisioningOptions>()!
-                .HeartbeatInterval);
+            options.HeartbeatInterval);
+        Assert.Equal(
+            TimeSpan.FromSeconds(ProvisioningReplicaIdentity.DefaultLeaseSeconds),
+            options.LeaseDuration);
         Assert.Equal(30, ProvisioningReplicaIdentity.DefaultLeaseSeconds);
-        Assert.True(ProvisioningReplicaIdentity.DefaultLeaseSeconds
-                    >= 3 * ProvisioningReplicaIdentity.DefaultHeartbeatSeconds);
+        Assert.True(options.LeaseDuration >= options.HeartbeatInterval * 3);
+        options.EnsureHeartbeatFitsLease();
+        Assert.Equal(
+            options.LeaseDuration,
+            provider.GetRequiredService<ProvisioningReplicaIdentity>().Lease);
     }
 }

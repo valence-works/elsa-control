@@ -527,7 +527,7 @@ public sealed class AzurePulumiAutomationRunnerTests
         await processing;
         var created = await service.GetOperationAsync(create.OperationId);
         Assert.Equal(ProvisioningOperationState.Cancelled, created!.State);
-        Assert.True(created.StateLockMayBeHeld);
+        Assert.False(created.StateLockMayBeHeld);
 
         await worker.ReconcileInterruptedAsync();
         Assert.False((await service.GetOperationAsync(create.OperationId))!.StateLockMayBeHeld);

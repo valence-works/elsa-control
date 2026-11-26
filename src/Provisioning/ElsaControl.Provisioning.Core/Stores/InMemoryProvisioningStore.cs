@@ -422,7 +422,9 @@ public sealed class InMemoryProvisioningStore :
             foreach (var id in expired)
             {
                 if (!_operations.TryGetValue(id, out var operation)
-                    || !ProvisioningOperationStateMachine.HoldsStackLock(operation.State))
+                    || !ProvisioningOperationStateMachine.MayReclaimExpiredLease(
+                        operation.State,
+                        operation.StateLockMayBeHeld))
                 {
                     continue;
                 }
@@ -438,17 +440,31 @@ public sealed class InMemoryProvisioningStore :
                 held.Owner = _replica.Id;
                 held.FencingToken++;
                 held.LeaseExpiresAt = _replica.ExpiresAt(now);
-                var completed = ProvisioningOperationStateMachine.Transition(
-                    operation,
-                    ProvisioningOperationState.Failed,
-                    now,
-                    ProvisioningFailureCodes.Interrupted) with
+                ProvisioningOperation completed;
+                if (ProvisioningOperationStateMachine.HoldsStackLock(operation.State))
                 {
-                    StateLockMayBeHeld = true,
-                    LeaseOwner = held.Owner,
-                    LeaseExpiresAt = held.LeaseExpiresAt,
-                    FencingToken = held.FencingToken
-                };
+                    completed = ProvisioningOperationStateMachine.Transition(
+                        operation,
+                        ProvisioningOperationState.Failed,
+                        now,
+                        ProvisioningFailureCodes.Interrupted) with
+                    {
+                        StateLockMayBeHeld = true,
+                        LeaseOwner = held.Owner,
+                        LeaseExpiresAt = held.LeaseExpiresAt,
+                        FencingToken = held.FencingToken
+                    };
+                }
+                else
+                {
+                    completed = operation with
+                    {
+                        LeaseOwner = held.Owner,
+                        LeaseExpiresAt = held.LeaseExpiresAt,
+                        FencingToken = held.FencingToken
+                    };
+                }
+
                 _operations[id] = completed;
                 failed.Add(completed);
             }

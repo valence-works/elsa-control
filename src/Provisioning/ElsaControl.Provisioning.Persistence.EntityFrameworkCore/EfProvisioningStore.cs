@@ -572,21 +572,20 @@ public sealed class EfProvisioningStore :
     {
         cancellationToken.ThrowIfCancellationRequested();
         await using var db = await _factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-        var running = ProvisioningOperationState.Running.ToString();
-        var cancelling = ProvisioningOperationState.Cancelling.ToString();
-        var locks = await db.Locks.AsNoTracking().ToListAsync(cancellationToken).ConfigureAwait(false);
-        var expiredLockIds = locks
-            .Where(item => item.LeaseExpiresAt <= now)
-            .Select(item => item.OperationId)
-            .ToHashSet();
-        var expiredIds = expiredLockIds.Count == 0
+        var expiredLockIds = await ListExpiredLockOperationIdsAsync(db, cancellationToken)
+            .ConfigureAwait(false);
+        var candidates = expiredLockIds.Count == 0
             ? []
             : await db.Operations.AsNoTracking()
-                .Where(item => expiredLockIds.Contains(item.Id)
-                               && (item.State == running || item.State == cancelling))
-                .Select(item => item.Id)
+                .Where(item => expiredLockIds.Contains(item.Id))
                 .ToListAsync(cancellationToken)
                 .ConfigureAwait(false);
+        var expiredIds = candidates
+            .Where(item => ProvisioningOperationStateMachine.MayReclaimExpiredLease(
+                Enum.Parse<ProvisioningOperationState>(item.State),
+                item.StateLockMayBeHeld))
+            .Select(item => item.Id)
+            .ToList();
 
         var failed = new List<ProvisioningOperation>();
         foreach (var id in expiredIds)
@@ -600,7 +599,7 @@ public sealed class EfProvisioningStore :
                 if (row is null)
                     return (ProvisioningOperation?)null;
                 var state = Enum.Parse<ProvisioningOperationState>(row.State);
-                if (!ProvisioningOperationStateMachine.HoldsStackLock(state))
+                if (!ProvisioningOperationStateMachine.MayReclaimExpiredLease(state, row.StateLockMayBeHeld))
                     return null;
 
                 var held = await db.Locks
@@ -608,23 +607,34 @@ public sealed class EfProvisioningStore :
                         item => item.LockKey == row.LockKey && item.OperationId == id,
                         cancellationToken)
                     .ConfigureAwait(false);
-                if (held is null || held.LeaseExpiresAt > now)
+                if (held is null
+                    || !await LeaseExpiredInDatabaseAsync(db, held.LockKey, id, cancellationToken)
+                        .ConfigureAwait(false))
+                {
                     return null;
+                }
 
                 held.Owner = _replica.Id;
                 held.FencingToken++;
-                held.LeaseExpiresAt = _replica.ExpiresAt(now);
-                Apply(row, ProvisioningOperationStateMachine.Transition(
-                    FromEntity(row),
-                    ProvisioningOperationState.Failed,
-                    now,
-                    ProvisioningFailureCodes.Interrupted) with
+                if (ProvisioningOperationStateMachine.HoldsStackLock(state))
                 {
-                    StateLockMayBeHeld = true,
-                    LeaseOwner = held.Owner,
-                    LeaseExpiresAt = held.LeaseExpiresAt,
-                    FencingToken = held.FencingToken
-                });
+                    Apply(row, ProvisioningOperationStateMachine.Transition(
+                        FromEntity(row),
+                        ProvisioningOperationState.Failed,
+                        now,
+                        ProvisioningFailureCodes.Interrupted) with
+                    {
+                        StateLockMayBeHeld = true,
+                        LeaseOwner = held.Owner,
+                        FencingToken = held.FencingToken
+                    });
+                }
+                else
+                {
+                    row.LeaseOwner = held.Owner;
+                    row.FencingToken = held.FencingToken;
+                }
+
                 await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
                 await StampLeaseExpiryAsync(db, held, row, cancellationToken).ConfigureAwait(false);
                 await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
@@ -713,6 +723,68 @@ public sealed class EfProvisioningStore :
         if (fencingToken is { } token && held.FencingToken != token)
             return false;
         return true;
+    }
+
+    private static async Task<IReadOnlyList<Guid>> ListExpiredLockOperationIdsAsync(
+        ProvisioningDbContext db,
+        CancellationToken cancellationToken)
+    {
+        if (db.Database.IsSqlServer())
+        {
+            return await db.Database.SqlQuery<Guid>(
+                    $"""
+                     SELECT [OperationId] AS [Value]
+                     FROM [{ProvisioningDbContext.SchemaName}].[Locks]
+                     WHERE [LeaseExpiresAt] <= TODATETIMEOFFSET(SYSUTCDATETIME(), 0)
+                     """)
+                .ToListAsync(cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        return await db.Database.SqlQuery<Guid>(
+                $"""
+                 SELECT OperationId AS Value
+                 FROM Locks
+                 WHERE LeaseExpiresAt <= datetime('now')
+                 """)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static async Task<bool> LeaseExpiredInDatabaseAsync(
+        ProvisioningDbContext db,
+        string lockKey,
+        Guid operationId,
+        CancellationToken cancellationToken)
+    {
+        if (db.Database.IsSqlServer())
+        {
+            var expired = await db.Database.SqlQuery<int>(
+                    $"""
+                     SELECT CASE WHEN EXISTS (
+                         SELECT 1 FROM [{ProvisioningDbContext.SchemaName}].[Locks]
+                         WHERE [LockKey] = {lockKey}
+                           AND [OperationId] = {operationId}
+                           AND [LeaseExpiresAt] <= TODATETIMEOFFSET(SYSUTCDATETIME(), 0)
+                     ) THEN 1 ELSE 0 END AS [Value]
+                     """)
+                .SingleAsync(cancellationToken)
+                .ConfigureAwait(false);
+            return expired == 1;
+        }
+
+        var sqliteExpired = await db.Database.SqlQuery<int>(
+                $"""
+                 SELECT CASE WHEN EXISTS (
+                     SELECT 1 FROM Locks
+                     WHERE LockKey = {lockKey}
+                       AND OperationId = {operationId}
+                       AND LeaseExpiresAt <= datetime('now')
+                 ) THEN 1 ELSE 0 END AS Value
+                 """)
+            .SingleAsync(cancellationToken)
+            .ConfigureAwait(false);
+        return sqliteExpired == 1;
     }
 
     private async Task StampLeaseExpiryAsync(

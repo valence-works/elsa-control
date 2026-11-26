@@ -72,4 +72,7 @@ public static class ProvisioningOperationStateMachine
 
     public static bool HoldsStackLock(ProvisioningOperationState state) =>
         state is ProvisioningOperationState.Running or ProvisioningOperationState.Cancelling;
+
+    public static bool MayReclaimExpiredLease(ProvisioningOperationState state, bool stateLockMayBeHeld) =>
+        HoldsStackLock(state) || (IsTerminal(state) && stateLockMayBeHeld);
 }

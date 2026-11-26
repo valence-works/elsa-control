@@ -36,7 +36,11 @@ public static class ProvisioningServiceCollectionExtensions
                 options.AllowFileBackend = true;
         });
         services.AddSingleton<ProvisioningRunRegistry>();
-        services.AddSingleton<ProvisioningReplicaIdentity>();
+        services.AddSingleton(provider =>
+        {
+            var options = provider.GetRequiredService<IOptions<ProvisioningOptions>>().Value;
+            return new ProvisioningReplicaIdentity(lease: options.LeaseDuration);
+        });
         services.TryAddSingleton(TimeProvider.System);
 
         var configured = configuration.GetSection(ProvisioningOptions.ConfigurationSection).Get<ProvisioningOptions>()

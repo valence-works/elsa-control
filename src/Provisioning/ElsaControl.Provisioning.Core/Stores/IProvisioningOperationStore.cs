@@ -60,7 +60,8 @@ public interface IProvisioningOperationStore
         long? fencingToken = null);
 
     /// <summary>
-    /// Reclaims operations whose lock lease has expired. Live replicas are left
+    /// Reclaims expired leases on running operations and on finished
+    /// operations that still hold the stack lock. Live replicas are left
     /// alone. Returned rows keep the module lock until the Pulumi state lock
     /// is cleared.
     /// </summary>

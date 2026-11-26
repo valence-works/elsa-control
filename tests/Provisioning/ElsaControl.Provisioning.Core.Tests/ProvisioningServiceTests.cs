@@ -415,8 +415,8 @@ public sealed class ProvisioningServiceTests
         var completed = await service.GetOperationAsync(provision.OperationId);
         Assert.Equal(ProvisioningOperationState.Cancelled, completed!.State);
         Assert.Equal(ProvisioningFailureCodes.Interrupted, completed.FailureCode);
-        Assert.True(completed.StateLockMayBeHeld);
-        Assert.Equal(provision.OperationId, await store.GetHolderAsync(ProvisioningStackKind.Platform, "interrupt"));
+        Assert.False(completed.StateLockMayBeHeld);
+        Assert.Null(await store.GetHolderAsync(ProvisioningStackKind.Platform, "interrupt"));
 
         await worker.ReconcileInterruptedAsync();
         var cleared = await service.GetOperationAsync(provision.OperationId);

@@ -31,11 +31,38 @@ public sealed class ProvisioningOptions
     public TimeSpan PollInterval { get; set; } = TimeSpan.FromSeconds(5);
 
     /// <summary>
-    /// Lease heartbeat. Default 5s; the replica lease is 30s so several
-    /// missed beats are still live.
+    /// Lease heartbeat. Default 5s; must stay at most one third of
+    /// <see cref="LeaseDuration"/> so missed beats do not look expired.
     /// </summary>
     public TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromSeconds(
         ProvisioningReplicaIdentity.DefaultHeartbeatSeconds);
 
+    /// <summary>
+    /// Replica lock lease. Default 30s. Heartbeats must be well below this.
+    /// </summary>
+    public TimeSpan LeaseDuration { get; set; } = TimeSpan.FromSeconds(
+        ProvisioningReplicaIdentity.DefaultLeaseSeconds);
+
     public int BatchSize { get; set; } = 10;
+
+    public void EnsureHeartbeatFitsLease()
+    {
+        if (HeartbeatInterval <= TimeSpan.Zero)
+        {
+            throw new InvalidOperationException(
+                "Provisioning heartbeat must be greater than zero.");
+        }
+
+        if (LeaseDuration <= TimeSpan.Zero)
+        {
+            throw new InvalidOperationException(
+                "Provisioning lease duration must be greater than zero.");
+        }
+
+        if (HeartbeatInterval * 3 > LeaseDuration)
+        {
+            throw new InvalidOperationException(
+                "Provisioning heartbeat must be at most one third of the lease duration.");
+        }
+    }
 }

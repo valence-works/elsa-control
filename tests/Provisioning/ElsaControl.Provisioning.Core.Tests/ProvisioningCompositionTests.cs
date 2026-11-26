@@ -108,6 +108,26 @@ public sealed class ProvisioningCompositionTests
     }
 
     [Fact]
+    public async Task Guard_refuses_to_start_when_heartbeat_is_not_well_below_the_lease()
+    {
+        var guard = new ProvisioningProviderGuard(
+            new AzureStandIn(),
+            new Stores.InMemoryProvisioningStore(),
+            Microsoft.Extensions.Options.Options.Create(new ProvisioningOptions
+            {
+                WorkerEnabled = true,
+                AllowFakeProvider = true,
+                HeartbeatInterval = TimeSpan.FromSeconds(30),
+                LeaseDuration = TimeSpan.FromSeconds(30)
+            }));
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            guard.StartAsync(CancellationToken.None));
+        Assert.Equal(
+            "Provisioning heartbeat must be at most one third of the lease duration.",
+            error.Message);
+    }
+
+    [Fact]
     public void Hosted_catalog_store_requires_sql_server()
     {
         Assert.False(ElsaControl.Provisioning.Persistence.EntityFrameworkCore.ProvisioningPersistenceServiceCollectionExtensions.TryGetCatalogStore(
