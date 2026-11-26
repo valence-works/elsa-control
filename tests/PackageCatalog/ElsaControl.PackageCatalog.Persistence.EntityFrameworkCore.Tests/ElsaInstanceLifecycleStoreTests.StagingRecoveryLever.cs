@@ -540,6 +540,115 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     }
 
     [Fact]
+    public async Task Staging_failed_create_lever_fails_the_active_create_without_recovery_required()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var workspace = await CreateWorkspaceAsync(db, "Staging failed create lever workspace");
+        var created = await new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now))
+            .CreateAsync(new ElsaInstanceCreateRequest(
+                workspace.OrganizationId, workspace.Id, "Managed Elsa", "staging-failed-create",
+                CreateIntent(), "create-staging-failed-create"));
+
+        var commit = await CreateStore(db).FailActiveCreateAsync(created.Instance.Id, "api-key");
+
+        Assert.Equal(ElsaInstanceOperationAction.Create, commit.Operation.Action);
+        Assert.Equal(ElsaInstanceOperationState.Failed, commit.Operation.State);
+        Assert.Equal(StagingRecoveryLifecycleLeverStoreDefaults.FailedCreateCode, commit.Reason);
+        Assert.Equal(ElsaObservedLifecycle.Failed, commit.Instance.ObservedLifecycle);
+        Assert.Equal(ElsaInstanceHealth.Unreachable, commit.Instance.Health);
+        Assert.Equal(ElsaDesiredLifecycle.Running, commit.Instance.DesiredLifecycle);
+
+        var operation = await db.ElsaInstanceOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == commit.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.Failed, operation.State);
+        Assert.Equal(StagingRecoveryLifecycleLeverStoreDefaults.FailedCreateCode, operation.FailureCode);
+        Assert.NotNull(operation.CompletedAt);
+        Assert.Null(operation.ProviderSubmissionInFlightAt);
+        Assert.Equal(0, await db.ElsaInstanceOperations.CountAsync(x =>
+            x.InstanceId == created.Instance.Id &&
+            x.State == ElsaInstanceOperationState.RecoveryRequired));
+
+        var outbox = await db.ElsaInstanceLifecycleOutbox.AsNoTracking()
+            .SingleAsync(x => x.OperationId == created.Operation.Id);
+        Assert.Equal("outbox.invalid", outbox.QuarantineCode);
+        Assert.NotNull(outbox.QuarantinedAt);
+        Assert.Empty(await CreateStore(db).ListPendingProviderOperationsAsync(16));
+
+        var fired = await db.ElsaInstanceAuditEvents.AsNoTracking()
+            .SingleAsync(x =>
+                x.OperationId == commit.Operation.Id &&
+                x.EventType == StagingRecoveryLifecycleLeverStoreDefaults.FiredEventType);
+        Assert.Equal(StagingRecoveryLifecycleLeverStoreDefaults.FailedCreateCode, fired.DiagnosticCode);
+    }
+
+    [Fact]
+    public async Task Staging_failed_create_lever_refuses_when_no_active_create_exists()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var workspace = await CreateWorkspaceAsync(db, "Staging failed create ready workspace");
+        var created = await new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now))
+            .CreateAsync(new ElsaInstanceCreateRequest(
+                workspace.OrganizationId, workspace.Id, "Managed Elsa", "staging-failed-create-ready",
+                CreateIntent(), "create-staging-failed-create-ready"));
+        await CompleteOperationAsync(db, created.Operation.Id);
+        await SetObservedAsync(db, created.Instance.Id, ElsaObservedLifecycle.Ready, ElsaInstanceHealth.Healthy);
+
+        var error = await Assert.ThrowsAsync<ElsaInstanceLifecycleConflictException>(() =>
+            CreateStore(db).FailActiveCreateAsync(created.Instance.Id, "api-key"));
+
+        Assert.Equal(ElsaInstanceLifecycleConflictReason.InvalidState, error.Reason);
+        Assert.Equal(
+            ElsaInstanceOperationState.Succeeded,
+            (await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == created.Operation.Id)).State);
+    }
+
+    [Fact]
+    public async Task Staging_failed_delete_lever_leaves_deleting_intent_without_recovery_required_or_outbox()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var workspace = await CreateWorkspaceAsync(db, "Staging failed delete lever workspace");
+        var created = await new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now))
+            .CreateAsync(new ElsaInstanceCreateRequest(
+                workspace.OrganizationId, workspace.Id, "Managed Elsa", "staging-failed-delete",
+                CreateIntent(), "create-staging-failed-delete"));
+        await CompleteOperationAsync(db, created.Operation.Id);
+        await SetObservedAsync(db, created.Instance.Id, ElsaObservedLifecycle.Ready, ElsaInstanceHealth.Healthy);
+
+        var commit = await CreateStore(db).InjectTerminalFailedDeleteAsync(created.Instance.Id, "api-key");
+
+        Assert.Equal(ElsaInstanceOperationAction.Delete, commit.Operation.Action);
+        Assert.Equal(ElsaInstanceOperationState.Failed, commit.Operation.State);
+        Assert.Equal(StagingRecoveryLifecycleLeverStoreDefaults.FailedDeleteCode, commit.Reason);
+        Assert.Equal(ElsaDesiredLifecycle.Deleting, commit.Instance.DesiredLifecycle);
+        Assert.Equal(ElsaObservedLifecycle.Deleting, commit.Instance.ObservedLifecycle);
+        Assert.Equal(0, await db.ElsaInstanceOperations.CountAsync(x =>
+            x.InstanceId == created.Instance.Id &&
+            x.State == ElsaInstanceOperationState.RecoveryRequired));
+        Assert.Equal(0, await db.ElsaInstanceLifecycleOutbox.CountAsync(x =>
+            x.OperationId == commit.Operation.Id));
+        Assert.Null(await CreateStore(db).GetActiveOperationAsync(workspace.Id, created.Instance.Id));
+        Assert.Null(await CreateStore(db).TryClaimNextDeletionAsync("deletion-worker", Now.AddMinutes(1)));
+
+        var retried = await new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now.AddMinutes(2)))
+            .DeleteAsync(await CreateConfirmedDeleteRequestAsync(
+                db, workspace.Id, created.Instance.Id, commit.Instance.Version, "retry-after-failed-delete"));
+
+        Assert.Equal(ElsaInstanceOperationAction.Delete, retried.Operation.Action);
+        Assert.NotEqual(commit.Operation.Id, retried.Operation.Id);
+        Assert.True(ElsaInstanceOperationGuard.IsBlocking(retried.Operation.State));
+        Assert.Equal(ElsaDesiredLifecycle.Deleting, retried.Instance.DesiredLifecycle);
+    }
+
+    [Fact]
     public void Staging_recovery_lever_maps_concurrency_to_operation_active()
     {
         var mapped = EfCoreElsaInstanceLifecycleStore.MapStagingRecoveryLeverPersistenceFailure(

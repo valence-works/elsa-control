@@ -12,6 +12,8 @@ public static class StagingRecoveryLifecycleLeverDefaults
     public const string UnavailableCode = "staging.recovery-lifecycle-lever.unavailable";
     public const string TransitionCode = StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode;
     public const string UncertainCode = StagingRecoveryLifecycleLeverStoreDefaults.UncertainCode;
+    public const string FailedCreateCode = StagingRecoveryLifecycleLeverStoreDefaults.FailedCreateCode;
+    public const string FailedDeleteCode = StagingRecoveryLifecycleLeverStoreDefaults.FailedDeleteCode;
     public const string FiredEventType = StagingRecoveryLifecycleLeverStoreDefaults.FiredEventType;
     public const string ResetEventType = StagingRecoveryLifecycleLeverStoreDefaults.ResetEventType;
     public const string ResetCode = StagingRecoveryLifecycleLeverStoreDefaults.ResetCode;

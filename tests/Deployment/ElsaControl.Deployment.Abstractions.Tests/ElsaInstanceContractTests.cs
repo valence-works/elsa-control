@@ -344,6 +344,22 @@ public sealed class ElsaInstanceContractTests
             first.Instance, ElsaInstanceOperationAction.Delete, first.Operation));
     }
 
+    [Fact]
+    public void Delete_retries_when_intent_is_already_deleting_and_no_operation_is_active()
+    {
+        var instance = ElsaInstance.Hydrate(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "Claims", "claims",
+            InstanceIntent() with { DesiredLifecycle = ElsaDesiredLifecycle.Deleting },
+            ElsaObservedLifecycle.Deleting, ElsaInstanceHealth.Unreachable, 3);
+
+        var result = ElsaInstanceStateMachine.Request(instance, ElsaInstanceOperationAction.Delete);
+
+        Assert.Equal(ElsaDesiredLifecycle.Deleting, result.Instance.Intent.DesiredLifecycle);
+        Assert.Equal(ElsaObservedLifecycle.Deleting, result.Instance.ObservedLifecycle);
+        Assert.Equal(ElsaInstanceOperationState.Accepted, result.Operation.State);
+        Assert.Equal(instance.Version + 1, result.Instance.Version);
+    }
+
     [Theory]
     [InlineData(ElsaObservedLifecycle.Pending, ElsaObservedLifecycle.Deleting)]
     [InlineData(ElsaObservedLifecycle.Provisioning, ElsaObservedLifecycle.Deleting)]

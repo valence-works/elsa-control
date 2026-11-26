@@ -6,11 +6,14 @@ public static class StagingRecoveryLifecycleLeverStoreDefaults
 {
     public const string TransitionCode = ManagedElsaReasonCodeCatalog.StagingLeverRecoveryRequired;
     public const string UncertainCode = ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain;
+    public const string FailedCreateCode = ManagedElsaReasonCodeCatalog.StagingLeverFailedCreate;
+    public const string FailedDeleteCode = ManagedElsaReasonCodeCatalog.StagingLeverFailedDelete;
     public const string FiredEventType = ManagedElsaReasonCodeCatalog.StagingLeverFired;
     public const string ResetEventType = ManagedElsaReasonCodeCatalog.StagingLeverReset;
     public const string ResetCode = ManagedElsaReasonCodeCatalog.StagingLeverReset;
     public const string RecoveryRequiredEventType = "lifecycle.recovery-required";
     public const string AcceptedEventType = "lifecycle.accepted";
+    public const string FailedEventType = "lifecycle.failed";
 
     public static string FormatFiredSnapshot(
         ElsaObservedLifecycle observedLifecycle,
@@ -46,6 +49,8 @@ public static class StagingRecoveryLifecycleLeverStoreDefaults
 /// using <see cref="ElsaInstanceOperation.TransitionTo"/>. A matching reset
 /// clears only a lever-parked operation through the same transition methods;
 /// it never fabricates provider retry evidence or calls production Recover.
+/// Terminal Failed Create / Failed Delete injection is the same fail-closed
+/// gate: it uses the real Failed transition and never writes Azure.
 /// </summary>
 public interface IStagingRecoveryLifecycleLeverStore
 {
@@ -56,6 +61,16 @@ public interface IStagingRecoveryLifecycleLeverStore
         CancellationToken cancellationToken = default);
 
     Task<StagingRecoveryLifecycleLeverCommit> ResetLeverParkedReconcileAsync(
+        Guid instanceId,
+        string? operatorSubject,
+        CancellationToken cancellationToken = default);
+
+    Task<StagingRecoveryLifecycleLeverCommit> FailActiveCreateAsync(
+        Guid instanceId,
+        string? operatorSubject,
+        CancellationToken cancellationToken = default);
+
+    Task<StagingRecoveryLifecycleLeverCommit> InjectTerminalFailedDeleteAsync(
         Guid instanceId,
         string? operatorSubject,
         CancellationToken cancellationToken = default);

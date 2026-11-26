@@ -702,19 +702,20 @@ public static class ManagedElsaInstanceOverviewEndpoints
     }
 
     // Delete is a safe exit: Failed/provisioning stay allowed. A tombstone is
-    // denied. Deleting intent is denied unless POST …/delete can resume a
-    // RecoveryRequired Delete with a fresh confirmation. Active non-Delete
-    // work is not a denial because that route waits behind or supersedes the
-    // predecessor.
+    // denied. Deleting intent without a blocking Delete is allowed so a leftover
+    // terminal Failed Delete (no RecoveryRequired) can be retried. A
+    // RecoveryRequired Delete is resumed with a fresh confirmation. Active
+    // non-Delete work is not a denial because that route waits behind or
+    // supersedes the predecessor.
     internal static string? CustomerDeleteDenialCode(
         ElsaInstance instance,
         ElsaInstanceOperationSummary? activeOperation)
     {
         if (instance.ObservedLifecycle == ElsaObservedLifecycle.Deleted)
             return InstanceDeletingCode;
-        if (instance.Intent.DesiredLifecycle == ElsaDesiredLifecycle.Deleting &&
-            !IsResumableCustomerDelete(activeOperation))
-            return InstanceDeletingCode;
+        // Callers pass the same active operation POST …/delete reads. Blocking
+        // Deletes are denied as operation-active by ActionDecision. Leftover
+        // Deleting intent after a terminal Failed Delete is retryable.
         return null;
     }
 

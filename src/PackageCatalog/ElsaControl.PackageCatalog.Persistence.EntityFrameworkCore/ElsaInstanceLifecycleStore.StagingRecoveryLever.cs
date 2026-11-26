@@ -6,6 +6,7 @@ using System.Text;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Azure;
 using ElsaControl.Deployment.Core.Instances;
+using ElsaControl.Deployment.Core.Workspace;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
@@ -333,6 +334,338 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
         }
     }
 
+    public async Task<StagingRecoveryLifecycleLeverCommit> FailActiveCreateAsync(
+        Guid instanceId,
+        string? operatorSubject,
+        CancellationToken cancellationToken = default)
+    {
+        if (instanceId == Guid.Empty)
+            throw new ArgumentException("Instance ID is required.", nameof(instanceId));
+
+        dbContext.ChangeTracker.Clear();
+        var firedAuditId = Guid.NewGuid();
+        var now = _timeProvider.GetUtcNow().ToUniversalTime();
+        var reason = StagingRecoveryLifecycleLeverStoreDefaults.FailedCreateCode;
+        try
+        {
+            return await dbContext.ExecuteInTransactionAsync(
+                IsolationLevel.Serializable,
+                async () =>
+                {
+                    var instanceEntity = await LoadTrackedInstanceAsync(instanceId, cancellationToken)
+                        ?? throw new KeyNotFoundException("Elsa instance does not exist.");
+                    if (instanceEntity.ObservedLifecycle is ElsaObservedLifecycle.Deleted
+                        or ElsaObservedLifecycle.Deleting)
+                        throw Conflict(
+                            "A deleting or deleted instance cannot be injected as a terminal Failed Create.",
+                            ElsaInstanceLifecycleConflictReason.InvalidState);
+
+                    var operationEntity = await dbContext.ElsaInstanceOperations
+                        .Where(x => x.InstanceId == instanceId &&
+                                    x.Action == ElsaInstanceOperationAction.Create &&
+                                    (x.State == ElsaInstanceOperationState.Accepted ||
+                                     x.State == ElsaInstanceOperationState.WaitingForPriorOperation ||
+                                     x.State == ElsaInstanceOperationState.Queued ||
+                                     x.State == ElsaInstanceOperationState.EntitlementHeld ||
+                                     x.State == ElsaInstanceOperationState.Running ||
+                                     x.State == ElsaInstanceOperationState.RecoveryRequired))
+                        .OrderByDescending(x => x.AcceptedAt)
+                        .ThenByDescending(x => x.CreatedAt)
+                        .FirstOrDefaultAsync(cancellationToken);
+                    if (operationEntity is null)
+                        throw Conflict(
+                            "No active Create is available for the staging failed-create lever.",
+                            ElsaInstanceLifecycleConflictReason.InvalidState);
+                    if (!ElsaInstanceOperation.CanTransition(operationEntity.State, ElsaInstanceOperationState.Failed))
+                        throw Conflict(
+                            "The active Create cannot transition to Failed.",
+                            ElsaInstanceLifecycleConflictReason.InvalidState);
+                    if (instanceEntity.ObservedLifecycle != ElsaObservedLifecycle.Failed &&
+                        !ElsaInstanceStateMachine.CanTransition(
+                            instanceEntity.ObservedLifecycle,
+                            ElsaObservedLifecycle.Failed))
+                        throw Conflict(
+                            "The instance cannot transition to Failed from its current lifecycle state.",
+                            ElsaInstanceLifecycleConflictReason.InvalidState);
+
+                    var preFireLifecycle = instanceEntity.ObservedLifecycle;
+                    var preFireHealth = instanceEntity.Health;
+                    var outbox = await dbContext.ElsaInstanceLifecycleOutbox
+                        .SingleOrDefaultAsync(x => x.OperationId == operationEntity.Id, cancellationToken);
+                    QuarantineOutboxIfPresent(outbox, now);
+
+                    if (operationEntity.DeploymentRunId is { } runId)
+                    {
+                        var run = await dbContext.DeploymentRuns
+                            .SingleOrDefaultAsync(x => x.Id == runId, cancellationToken);
+                        if (run is not null &&
+                            run.Status is WorkspaceDeploymentRunStatus.Queued or WorkspaceDeploymentRunStatus.Running)
+                        {
+                            run.Status = WorkspaceDeploymentRunStatus.Failed;
+                            run.CompletedAt = now;
+                            run.RecoveryReason = reason;
+                            run.WorkerId = null;
+                            run.WorkerHeartbeatAt = null;
+                        }
+                    }
+
+                    TransitionPersistedOperation(operationEntity, ElsaInstanceOperationState.Failed, now);
+                    operationEntity.FailureCode = reason;
+                    operationEntity.FailureSummary = reason;
+                    operationEntity.ReconciliationDiagnosticCode = reason;
+                    operationEntity.CompletedAt = now;
+                    operationEntity.ProviderSubmissionInFlightAt = null;
+                    ClearWorkerLease(operationEntity);
+                    ApplyReasonClock(
+                        operationEntity,
+                        CurrentParkReason(operationEntity, null),
+                        reason,
+                        now,
+                        restartClock: true);
+                    instanceEntity.ObservedLifecycle = ElsaInstanceStateMachine.Transition(
+                        instanceEntity.ObservedLifecycle,
+                        ElsaObservedLifecycle.Failed);
+                    instanceEntity.Health = ElsaInstanceHealth.Unreachable;
+                    instanceEntity.UpdatedAt = now;
+
+                    await dbContext.ElsaInstanceAuditEvents.AddAsync(
+                        await CreateAuditEventAsync(
+                            instanceEntity,
+                            operationEntity,
+                            preFireLifecycle,
+                            now,
+                            cancellationToken,
+                            StagingRecoveryLifecycleLeverStoreDefaults.FailedEventType,
+                            diagnosticCode: reason,
+                            summary: reason),
+                        cancellationToken);
+                    await dbContext.SaveChangesAsync(cancellationToken);
+
+                    var fired = await CreateAuditEventAsync(
+                        instanceEntity,
+                        operationEntity,
+                        preFireLifecycle,
+                        now,
+                        cancellationToken,
+                        StagingRecoveryLifecycleLeverStoreDefaults.FiredEventType,
+                        diagnosticCode: reason,
+                        summary: reason);
+                    fired.Id = firedAuditId;
+                    fired.OperatorSubject = NormalizeOperatorSubject(operatorSubject);
+                    fired.PriorState = StagingRecoveryLifecycleLeverStoreDefaults.FormatFiredSnapshot(
+                        preFireLifecycle,
+                        preFireHealth);
+                    await dbContext.ElsaInstanceAuditEvents.AddAsync(fired, cancellationToken);
+                    await dbContext.SaveChangesAsync(cancellationToken);
+
+                    return new StagingRecoveryLifecycleLeverCommit(
+                        MapInstance(instanceEntity),
+                        MapOperation(operationEntity),
+                        reason);
+                },
+                async (commit, verificationCancellationToken) =>
+                    await dbContext.ElsaInstanceAuditEvents.AsNoTracking().AnyAsync(
+                        x => x.Id == firedAuditId &&
+                             x.InstanceId == instanceId &&
+                             x.OperationId == commit.Operation.Id &&
+                             x.EventType == StagingRecoveryLifecycleLeverStoreDefaults.FiredEventType &&
+                             x.DiagnosticCode == reason,
+                        verificationCancellationToken),
+                cancellationToken);
+        }
+        catch (ElsaInstanceLifecycleConflictException)
+        {
+            dbContext.ChangeTracker.Clear();
+            throw;
+        }
+        catch (KeyNotFoundException)
+        {
+            dbContext.ChangeTracker.Clear();
+            throw;
+        }
+        catch (Exception exception) when (IsStagingRecoveryLeverPersistenceFailure(exception))
+        {
+            dbContext.ChangeTracker.Clear();
+            throw MapStagingRecoveryLeverPersistenceFailure(exception);
+        }
+    }
+
+    public async Task<StagingRecoveryLifecycleLeverCommit> InjectTerminalFailedDeleteAsync(
+        Guid instanceId,
+        string? operatorSubject,
+        CancellationToken cancellationToken = default)
+    {
+        if (instanceId == Guid.Empty)
+            throw new ArgumentException("Instance ID is required.", nameof(instanceId));
+
+        dbContext.ChangeTracker.Clear();
+        var firedAuditId = Guid.NewGuid();
+        var now = _timeProvider.GetUtcNow().ToUniversalTime();
+        var reason = StagingRecoveryLifecycleLeverStoreDefaults.FailedDeleteCode;
+        try
+        {
+            return await dbContext.ExecuteInTransactionAsync(
+                IsolationLevel.Serializable,
+                async () =>
+                {
+                    var instanceEntity = await LoadTrackedInstanceAsync(instanceId, cancellationToken)
+                        ?? throw new KeyNotFoundException("Elsa instance does not exist.");
+                    if (instanceEntity.ObservedLifecycle == ElsaObservedLifecycle.Deleted)
+                        throw Conflict(
+                            "A tombstone cannot be injected as a leftover Failed Delete.",
+                            ElsaInstanceLifecycleConflictReason.InvalidState);
+
+                    var activeOperation = await dbContext.ElsaInstanceOperations
+                        .AsNoTracking()
+                        .Where(x => x.InstanceId == instanceId &&
+                                    (x.State == ElsaInstanceOperationState.Accepted ||
+                                     x.State == ElsaInstanceOperationState.WaitingForPriorOperation ||
+                                     x.State == ElsaInstanceOperationState.Queued ||
+                                     x.State == ElsaInstanceOperationState.EntitlementHeld ||
+                                     x.State == ElsaInstanceOperationState.Running ||
+                                     x.State == ElsaInstanceOperationState.RecoveryRequired))
+                        .OrderByDescending(x => x.AcceptedAt)
+                        .ThenByDescending(x => x.CreatedAt)
+                        .FirstOrDefaultAsync(cancellationToken);
+                    if (activeOperation is not null)
+                        throw Conflict("An instance operation is already active.", ElsaInstanceLifecycleConflictReason.OperationActive);
+
+                    var instance = MapInstance(instanceEntity);
+                    ElsaInstanceTransitionResult transition;
+                    try
+                    {
+                        transition = ElsaInstanceStateMachine.Request(
+                            instance,
+                            ElsaInstanceOperationAction.Delete,
+                            activeOperation: null,
+                            expectedVersion: instance.Version,
+                            idempotencyKey: $"staging-lever-failed-delete-{Guid.NewGuid():N}",
+                            requestHash: ComputeStagingLeverRequestHash(
+                                ElsaInstanceOperationAction.Delete,
+                                instance.Version,
+                                reason),
+                            idempotencyScope: $"instance/{instance.Id:D}/operations");
+                    }
+                    catch (ElsaInstanceStateConflictException exception)
+                    {
+                        throw new ElsaInstanceLifecycleConflictException(
+                            "The state machine refused the terminal failed-delete transition.",
+                            exception.Reason == ElsaInstanceStateConflictReason.OperationActive
+                                ? ElsaInstanceLifecycleConflictReason.OperationActive
+                                : ElsaInstanceLifecycleConflictReason.InvalidState);
+                    }
+
+                    var commercialDecision = await _commercialGate.EvaluateAsync(
+                        instance.OrganizationId,
+                        transition.Operation.Action,
+                        cancellationToken: cancellationToken);
+                    if (!commercialDecision.Allowed)
+                        throw new ElsaInstanceLifecycleConflictException(
+                            commercialDecision.Summary,
+                            ElsaInstanceLifecycleConflictReason.CommercialDenied,
+                            commercialDecision.Code,
+                            commercialDecision.CurrentInstanceCount,
+                            commercialDecision.MaxInstances);
+
+                    var preFireLifecycle = instanceEntity.ObservedLifecycle;
+                    var preFireHealth = instanceEntity.Health;
+                    ApplyAggregate(instanceEntity, transition.Instance);
+                    instanceEntity.UpdatedAt = now;
+
+                    var operationEntity = ToEntity(transition.Operation, transition.Instance, now);
+                    operationEntity.DesiredStateRevisionId = instanceEntity.DesiredStateRevisionId;
+                    await dbContext.ElsaInstanceOperations.AddAsync(operationEntity, cancellationToken);
+                    await dbContext.ElsaInstanceAuditEvents.AddAsync(
+                        await CreateAuditEventAsync(
+                            instanceEntity,
+                            operationEntity,
+                            preFireLifecycle,
+                            now,
+                            cancellationToken,
+                            StagingRecoveryLifecycleLeverStoreDefaults.AcceptedEventType,
+                            summary: reason),
+                        cancellationToken);
+                    await dbContext.SaveChangesAsync(cancellationToken);
+
+                    TransitionPersistedOperation(
+                        operationEntity,
+                        ElsaInstanceOperationState.Failed,
+                        now);
+                    operationEntity.FailureCode = reason;
+                    operationEntity.FailureSummary = reason;
+                    operationEntity.ReconciliationDiagnosticCode = reason;
+                    operationEntity.CompletedAt = now;
+                    ClearWorkerLease(operationEntity);
+                    ApplyReasonClock(
+                        operationEntity,
+                        previousCode: null,
+                        nextCode: reason,
+                        now,
+                        restartClock: true);
+                    instanceEntity.UpdatedAt = now;
+
+                    await dbContext.ElsaInstanceAuditEvents.AddAsync(
+                        await CreateAuditEventAsync(
+                            instanceEntity,
+                            operationEntity,
+                            preFireLifecycle,
+                            now,
+                            cancellationToken,
+                            StagingRecoveryLifecycleLeverStoreDefaults.FailedEventType,
+                            diagnosticCode: reason,
+                            summary: reason),
+                        cancellationToken);
+                    await dbContext.SaveChangesAsync(cancellationToken);
+
+                    var fired = await CreateAuditEventAsync(
+                        instanceEntity,
+                        operationEntity,
+                        preFireLifecycle,
+                        now,
+                        cancellationToken,
+                        StagingRecoveryLifecycleLeverStoreDefaults.FiredEventType,
+                        diagnosticCode: reason,
+                        summary: reason);
+                    fired.Id = firedAuditId;
+                    fired.OperatorSubject = NormalizeOperatorSubject(operatorSubject);
+                    fired.PriorState = StagingRecoveryLifecycleLeverStoreDefaults.FormatFiredSnapshot(
+                        preFireLifecycle,
+                        preFireHealth);
+                    await dbContext.ElsaInstanceAuditEvents.AddAsync(fired, cancellationToken);
+                    await dbContext.SaveChangesAsync(cancellationToken);
+
+                    return new StagingRecoveryLifecycleLeverCommit(
+                        MapInstance(instanceEntity),
+                        MapOperation(operationEntity),
+                        reason);
+                },
+                async (commit, verificationCancellationToken) =>
+                    await dbContext.ElsaInstanceAuditEvents.AsNoTracking().AnyAsync(
+                        x => x.Id == firedAuditId &&
+                             x.InstanceId == instanceId &&
+                             x.OperationId == commit.Operation.Id &&
+                             x.EventType == StagingRecoveryLifecycleLeverStoreDefaults.FiredEventType &&
+                             x.DiagnosticCode == reason,
+                        verificationCancellationToken),
+                cancellationToken);
+        }
+        catch (ElsaInstanceLifecycleConflictException)
+        {
+            dbContext.ChangeTracker.Clear();
+            throw;
+        }
+        catch (KeyNotFoundException)
+        {
+            dbContext.ChangeTracker.Clear();
+            throw;
+        }
+        catch (Exception exception) when (IsStagingRecoveryLeverPersistenceFailure(exception))
+        {
+            dbContext.ChangeTracker.Clear();
+            throw MapStagingRecoveryLeverPersistenceFailure(exception);
+        }
+    }
+
     internal static bool IsStagingRecoveryLeverPersistenceFailure(Exception exception) =>
         exception is DbUpdateException or DbException or RetryLimitExceededException;
 
@@ -376,12 +709,32 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
         entity.UpdatedAt = now;
     }
 
-    private static string ComputeStagingLeverRequestHash(int expectedVersion)
+    private static void QuarantineOutboxIfPresent(
+        ElsaInstanceLifecycleOutboxEntity? outbox,
+        DateTimeOffset now)
+    {
+        if (outbox is null || outbox.QuarantinedAt is not null)
+            return;
+
+        outbox.QuarantinedAt = now;
+        outbox.QuarantineCode = "outbox.invalid";
+    }
+
+    private static string ComputeStagingLeverRequestHash(int expectedVersion) =>
+        ComputeStagingLeverRequestHash(
+            ElsaInstanceOperationAction.Reconcile,
+            expectedVersion,
+            StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode);
+
+    private static string ComputeStagingLeverRequestHash(
+        ElsaInstanceOperationAction action,
+        int expectedVersion,
+        string reason)
     {
         var canonical = new StringBuilder()
-            .Append(ElsaInstanceOperationAction.Reconcile).Append('\n')
+            .Append(action).Append('\n')
             .Append(expectedVersion.ToString(CultureInfo.InvariantCulture)).Append('\n')
-            .Append(StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode);
+            .Append(reason);
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical.ToString())));
     }
 
