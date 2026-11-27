@@ -216,7 +216,7 @@ public sealed class AzureProviderOperationWorkerTests
         Assert.Equal(AzureProviderOperationAction.Reconcile, dispatcher.Operations[0].Action);
         Assert.Equal(ElsaInstanceOperationAction.Create, dispatcher.Operations[0].LifecycleAction);
         Assert.Empty(runner.Steps);
-        Assert.Equal(AzureProviderOperationStatus.Accepted, store.Operation.Status);
+        Assert.Equal(AzureProviderOperationStatus.Queued, store.Operation.Status);
         Assert.Null(store.Operation.WorkerId);
         Assert.Null(store.Operation.LeaseExpiresAt);
         Assert.Equal(AzureProviderOperationPhase.Planned, store.Operation.Phase);
@@ -282,25 +282,42 @@ public sealed class AzureProviderOperationWorkerTests
     }
 
     [Fact]
-    public async Task Pulumi_owned_reconcile_without_lifecycle_action_fails_closed_without_pulumi_or_bicep()
+    public async Task Well_formed_null_lifecycle_reconcile_cannot_reach_the_pulumi_gate()
     {
-        var operation = RunnableOperation() with { LifecycleAction = null };
+        // An org-bound row cannot recompute a request hash with a null lifecycle
+        // action (lifecycleAction.required). Overlaying null without recomputing
+        // is an invalid plan, not a Pulumi allow-list miss.
+        Assert.Throws<ArgumentException>(() =>
+            WithComputedMetadata(RunnableOperation() with { LifecycleAction = null }));
+
+        // The only well-formed null-lifecycle shape is unbound identity. That row
+        // has no instance id, so ReadBackendAsync never consults the backend store
+        // and the Pulumi allow-list is unreachable.
+        var backends = new StaticBackendStore(ElsaInstanceProvisioningBackend.Pulumi);
+        var operation = WithComputedMetadata(RunnableOperation() with
+        {
+            OrganizationId = null,
+            InstanceId = null,
+            LifecycleAction = null,
+            ProviderAssignmentId = null
+        });
         var store = new WorkerStore(operation, execute: true);
         var runner = new CompletingRunner();
         var dispatcher = new RecordingDispatcher();
         var worker = new AzureProviderOperationWorker(
             store,
-            new AzureProviderExecutor(store, runner, assignmentStore: new OperationAssignmentStore(operation)),
+            new AzureProviderExecutor(store, runner),
             new PersistedAzureProviderPlanSource(),
             new FixedTimeProvider(),
             dispatcher,
-            new StaticBackendStore(ElsaInstanceProvisioningBackend.Pulumi));
+            backends);
 
-        Assert.Equal(0, await worker.ProcessOnceAsync());
+        Assert.Equal(1, await worker.ProcessOnceAsync());
         Assert.Empty(dispatcher.Operations);
         Assert.Empty(runner.Steps);
-        Assert.Equal(1, store.MarkUnrestorableCount);
-        Assert.Equal(AzureProviderOperationStatus.Failed, store.Operation.Status);
+        Assert.Equal(0, backends.Reads);
+        Assert.NotEqual(AzureProviderOperationStatus.Accepted, store.Operation.Status);
+        Assert.NotEqual(AzureProviderOperationStatus.Queued, store.Operation.Status);
     }
 
     [Fact]
@@ -371,7 +388,7 @@ public sealed class AzureProviderOperationWorkerTests
         Assert.Equal(1, await worker.ProcessOnceAsync());
         Assert.Equal(AzureProviderOperationAction.Delete, Assert.Single(dispatcher.Operations).Action);
         Assert.Empty(runner.Steps);
-        Assert.Equal(AzureProviderOperationStatus.Accepted, store.Operation.Status);
+        Assert.Equal(AzureProviderOperationStatus.Queued, store.Operation.Status);
         Assert.Null(store.Operation.WorkerId);
     }
 
@@ -412,7 +429,7 @@ public sealed class AzureProviderOperationWorkerTests
     }
 
     [Fact]
-    public async Task Two_queued_pulumi_creates_stay_accepted_across_a_stale_sweep()
+    public async Task Two_queued_pulumi_creates_stay_queued_across_a_stale_sweep()
     {
         var first = RunnableOperation();
         var second = WithComputedMetadata(RunnableOperation() with
@@ -435,14 +452,14 @@ public sealed class AzureProviderOperationWorkerTests
         Assert.Empty(runner.Steps);
         Assert.All(store.Operations, operation =>
         {
-            Assert.Equal(AzureProviderOperationStatus.Accepted, operation.Status);
+            Assert.Equal(AzureProviderOperationStatus.Queued, operation.Status);
             Assert.Null(operation.WorkerId);
             Assert.Null(operation.LeaseExpiresAt);
         });
 
         Assert.Equal(0, await store.RecoverStaleAsync(now.AddSeconds(31)));
         Assert.All(store.Operations, operation =>
-            Assert.Equal(AzureProviderOperationStatus.Accepted, operation.Status));
+            Assert.Equal(AzureProviderOperationStatus.Queued, operation.Status));
         Assert.DoesNotContain(
             store.Operations,
             operation => operation.Status == AzureProviderOperationStatus.RecoveryRequired);
@@ -477,7 +494,7 @@ public sealed class AzureProviderOperationWorkerTests
         Assert.Equal(1, await second.ProcessOnceAsync());
         Assert.Single(dispatcher.Operations);
         Assert.Empty(runner.Steps);
-        Assert.Equal(AzureProviderOperationStatus.Accepted, store.Operation.Status);
+        Assert.Equal(AzureProviderOperationStatus.Queued, store.Operation.Status);
     }
 
     [Fact]
@@ -1272,6 +1289,32 @@ public sealed class AzureProviderOperationWorkerTests
             return Task.FromResult<AzureProviderOperation?>(updated);
         }
 
+        public Task<AzureProviderOperation?> ReleaseToQueueAsync(
+            Guid workspaceId,
+            Guid operationId,
+            string leaseToken,
+            DateTimeOffset now,
+            long? expectedVersion = null,
+            CancellationToken cancellationToken = default)
+        {
+            var index = Operations.FindIndex(operation => operation.Id == operationId && operation.Status == AzureProviderOperationStatus.Running &&
+                (!expectedVersion.HasValue || operation.Version == expectedVersion.Value));
+            if (index < 0)
+                return Task.FromResult<AzureProviderOperation?>(null);
+
+            var updated = Operations[index] with
+            {
+                Status = AzureProviderOperationStatus.Queued,
+                Version = Operations[index].Version + 1,
+                UpdatedAt = now,
+                WorkerId = null,
+                LeaseExpiresAt = null,
+                CompletedAt = null
+            };
+            Operations[index] = updated;
+            return Task.FromResult<AzureProviderOperation?>(updated);
+        }
+
         public Task<int> RecoverStaleAsync(DateTimeOffset now, CancellationToken cancellationToken = default)
         {
             var recovered = 0;
@@ -1365,11 +1408,16 @@ public sealed class AzureProviderOperationWorkerTests
 
     private sealed class StaticBackendStore(ElsaInstanceProvisioningBackend backend) : IElsaInstanceProvisioningBackendStore
     {
+        public int Reads { get; private set; }
+
         public Task<ElsaInstanceProvisioningBackend> GetBackendAsync(
             Guid workspaceId,
             Guid instanceId,
-            CancellationToken cancellationToken = default) =>
-            Task.FromResult(backend);
+            CancellationToken cancellationToken = default)
+        {
+            Reads++;
+            return Task.FromResult(backend);
+        }
     }
 
     private sealed class RecordingDispatcher : IAzurePulumiProvisioningDispatcher

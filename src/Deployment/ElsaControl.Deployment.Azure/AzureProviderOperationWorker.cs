@@ -181,13 +181,27 @@ public sealed class AzureProviderOperationWorker(
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
-        if (operation.Action != AzureProviderOperationAction.Delete)
+        var leaseToken = Guid.NewGuid().ToString("N");
+        var claimed = await store.ClaimAsync(
+                operation.WorkspaceId,
+                operation.Id,
+                DispatchWorkerId,
+                leaseToken,
+                TimeSpan.FromMinutes(1),
+                now,
+                operation.Version,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (claimed is null)
+            return;
+
+        if (claimed.Action != AzureProviderOperationAction.Delete)
         {
-            if (IsIdentityBindingMissing(operation))
+            if (IsIdentityBindingMissing(claimed))
             {
-                await ParkAsync(
-                        operation,
-                        now,
+                await ParkClaimedAsync(
+                        claimed,
+                        leaseToken,
                         AzureProviderOperationStatus.RecoveryRequired,
                         ManagedElsaReasonCodeCatalog.ProviderIdentityBindingMissing,
                         cancellationToken)
@@ -199,15 +213,15 @@ public sealed class AzureProviderOperationWorker(
             {
                 var decision = await commercialGate
                     .EvaluateAsync(
-                        operation.OrganizationId!.Value,
-                        operation.LifecycleAction!.Value,
+                        claimed.OrganizationId!.Value,
+                        claimed.LifecycleAction!.Value,
                         cancellationToken: cancellationToken)
                     .ConfigureAwait(false);
                 if (!decision.Allowed)
                 {
-                    await ParkAsync(
-                            operation,
-                            now,
+                    await ParkClaimedAsync(
+                            claimed,
+                            leaseToken,
                             AzureProviderOperationStatus.EntitlementHeld,
                             decision.Code,
                             cancellationToken)
@@ -219,12 +233,29 @@ public sealed class AzureProviderOperationWorker(
 
         AzurePulumiDispatchResult? dispatched = null;
         if (pulumi is not null)
-            dispatched = await pulumi.DispatchAsync(operation, plan, cancellationToken).ConfigureAwait(false);
+            dispatched = await pulumi.DispatchAsync(claimed, plan, cancellationToken).ConfigureAwait(false);
 
         if (dispatched is { Dispatched: true })
+        {
+            await store.ReleaseToQueueAsync(
+                    claimed.WorkspaceId,
+                    claimed.Id,
+                    leaseToken,
+                    now,
+                    claimed.Version,
+                    cancellationToken)
+                .ConfigureAwait(false);
             return;
+        }
 
-        await FailClosedAsync(operation, now, cancellationToken).ConfigureAwait(false);
+        await ParkClaimedAsync(
+                claimed,
+                leaseToken,
+                AzureProviderOperationStatus.Failed,
+                ManagedElsaReasonCodeCatalog.ProviderDispatchFailed,
+                cancellationToken,
+                stampFromPulumi: true)
+            .ConfigureAwait(false);
     }
 
     private Task FailClosedAsync(
@@ -262,9 +293,21 @@ public sealed class AzureProviderOperationWorker(
         if (claimed is null)
             return;
 
+        await ParkClaimedAsync(claimed, leaseToken, status, code, cancellationToken, stampFromPulumi)
+            .ConfigureAwait(false);
+    }
+
+    private async Task ParkClaimedAsync(
+        AzureProviderOperation claimed,
+        string leaseToken,
+        AzureProviderOperationStatus status,
+        string code,
+        CancellationToken cancellationToken,
+        bool stampFromPulumi = false)
+    {
         var finalized = await store.FinalizeAsync(
-                operation.WorkspaceId,
-                operation.Id,
+                claimed.WorkspaceId,
+                claimed.Id,
                 leaseToken,
                 status,
                 code,
@@ -279,8 +322,8 @@ public sealed class AzureProviderOperationWorker(
             return;
 
         await store.RecordArmObservationClockAsync(
-                operation.WorkspaceId,
-                operation.Id,
+                claimed.WorkspaceId,
+                claimed.Id,
                 _timeProvider.GetUtcNow(),
                 0,
                 code,

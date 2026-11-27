@@ -162,18 +162,32 @@ public sealed class AzurePulumiProvisioningDispatcherTests
         Assert.DoesNotContain(logger.Messages, message => message.Contains("enqueue failed", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public async Task In_memory_dispatch_skip_expires_so_a_row_can_self_heal()
+    {
+        var clock = new ShiftedTimeProvider();
+        var dispatcher = Dispatcher(new RecordingProvisioningService(), CompleteOptions(), timeProvider: clock);
+        var operation = Operation();
+        Assert.True((await dispatcher.DispatchAsync(operation, Plan())).Dispatched);
+        Assert.True(dispatcher.HasDispatched(operation.Id));
+        clock.Now += AzurePulumiProvisioningDispatcher.DispatchSkipTtl.Add(TimeSpan.FromSeconds(1));
+        Assert.False(dispatcher.HasDispatched(operation.Id));
+    }
+
     private static AzurePulumiProvisioningDispatcher Dispatcher(
         IProvisioningService provisioning,
         AzurePulumiDispatchOptions options,
         bool workerEnabled = true,
         string providerId = "azure",
-        Microsoft.Extensions.Logging.ILogger<AzurePulumiProvisioningDispatcher>? logger = null) =>
+        Microsoft.Extensions.Logging.ILogger<AzurePulumiProvisioningDispatcher>? logger = null,
+        TimeProvider? timeProvider = null) =>
         new(
             provisioning,
             Options.Create(options),
             Options.Create(new ProvisioningOptions { WorkerEnabled = workerEnabled }),
             new StubInfrastructureProvider(providerId),
-            logger);
+            logger,
+            timeProvider);
 
     private static AzurePulumiDispatchOptions CompleteOptions() => new()
     {
@@ -361,6 +375,12 @@ public sealed class AzurePulumiProvisioningDispatcherTests
             {
             }
         }
+    }
+
+    private sealed class ShiftedTimeProvider : TimeProvider
+    {
+        public DateTimeOffset Now { get; set; } = DateTimeOffset.UtcNow;
+        public override DateTimeOffset GetUtcNow() => Now;
     }
 
     private sealed class ThrowingProvisioningService : IProvisioningService

@@ -1088,6 +1088,62 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
     }
 
     [Fact]
+    public async Task Pulumi_dispatch_lease_releases_to_the_queue_and_a_new_dispatcher_can_self_heal()
+    {
+        var now = DateTimeOffset.UtcNow;
+        using var db = CreateContext();
+        var store = new AzureProviderOperationStore(db);
+        var instanceId = Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd");
+        var assignment = await Assignment(store, _organizationId, instanceId, now);
+        var created = await store.CreateOrGetAsync(Request() with
+        {
+            OrganizationId = _organizationId,
+            InstanceId = instanceId,
+            LifecycleAction = ElsaInstanceOperationAction.Create,
+            ProviderAssignmentId = assignment.Id,
+            ReleaseManifestDigest = "sha256:" + new string('d', 64),
+            ReleaseManifestSignatureDigest = "sha256:" + new string('e', 64),
+            ReleaseManifestReference = "oci://evidence.example/manifest",
+            ReleaseManifestSignatureReference = "oci://evidence.example/signature",
+            SqlWorkflowPackageVersion = "3.8.0",
+            SqlQuartzPackageVersion = "3.8.0",
+            SecretReferences = new Dictionary<string, string>
+            {
+                ["database:connectionstring"] = "secret://vault/database",
+                ["identity:signingkey"] = "secret://vault/signingkey",
+                ["admin:password"] = "secret://vault/admin"
+            }
+        }, now);
+        var dispatcher = new RecordingPulumiDispatcher();
+        AzureProviderOperationWorker Worker(IAzurePulumiProvisioningDispatcher pulumi) =>
+            new(
+                store,
+                new AzureProviderExecutor(store, new NeverCalledRunner(), assignmentStore: store),
+                new PersistedAzureProviderPlanSource(),
+                new FixedTimeProvider(now),
+                pulumi,
+                new StaticPulumiBackendStore());
+
+        Assert.Equal(1, await Worker(dispatcher).ProcessOnceAsync());
+        Assert.Single(dispatcher.Operations);
+        var released = Assert.IsType<AzureProviderOperation>(await store.GetAsync(_workspaceId, created.Id));
+        Assert.Equal(AzureProviderOperationStatus.Queued, released.Status);
+        Assert.Null(released.WorkerId);
+        Assert.Null(released.LeaseExpiresAt);
+        Assert.Equal(0, await store.RecoverStaleAsync(now.AddHours(1)));
+
+        Assert.Equal(1, await Worker(dispatcher).ProcessOnceAsync());
+        Assert.Single(dispatcher.Operations);
+
+        var replica = new RecordingPulumiDispatcher();
+        Assert.Equal(1, await Worker(replica).ProcessOnceAsync());
+        Assert.Single(replica.Operations);
+        var healed = Assert.IsType<AzureProviderOperation>(await store.GetAsync(_workspaceId, created.Id));
+        Assert.Equal(AzureProviderOperationStatus.Queued, healed.Status);
+        Assert.Equal(0, await store.RecoverStaleAsync(now.AddHours(1)));
+    }
+
+    [Fact]
     public async Task Same_worker_can_reclaim_its_expired_running_lease()
     {
         var now = DateTimeOffset.UtcNow;
@@ -2421,6 +2477,31 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
             int? activeInstanceCount = null,
             CancellationToken cancellationToken = default) =>
             throw new Xunit.Sdk.XunitException("The commercial gate must not run when provider identity is missing.");
+    }
+
+    private sealed class RecordingPulumiDispatcher : IAzurePulumiProvisioningDispatcher
+    {
+        public bool CanDispatch => true;
+        public List<AzureProviderOperation> Operations { get; } = [];
+        public bool HasDispatched(Guid operationId) => Operations.Exists(operation => operation.Id == operationId);
+
+        public Task<AzurePulumiDispatchResult> DispatchAsync(
+            AzureProviderOperation operation,
+            AzureWorkloadPlan plan,
+            CancellationToken cancellationToken = default)
+        {
+            Operations.Add(operation);
+            return Task.FromResult(new AzurePulumiDispatchResult(true, Guid.NewGuid()));
+        }
+    }
+
+    private sealed class StaticPulumiBackendStore : IElsaInstanceProvisioningBackendStore
+    {
+        public Task<ElsaInstanceProvisioningBackend> GetBackendAsync(
+            Guid workspaceId,
+            Guid instanceId,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(ElsaInstanceProvisioningBackend.Pulumi);
     }
 
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
