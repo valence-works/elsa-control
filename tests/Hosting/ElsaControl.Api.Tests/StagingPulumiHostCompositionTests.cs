@@ -76,6 +76,7 @@ public sealed class StagingPulumiHostCompositionTests : IDisposable
         values["Sync:Scheduled:Enabled"] = "false";
         values["Billing:Lifecycle:Enabled"] = "false";
         values["ManagedElsa:Handoff:Enabled"] = "false";
+        values["Hosting:BuildOnly"] = "true";
         return values;
     }
 
@@ -186,7 +187,9 @@ public sealed class StagingPulumiHostCompositionTests : IDisposable
                 options.ValidateOnBuild = true;
                 options.ValidateScopes = true;
             });
-            // Build without Start so hosted workers are resolved but do not poll Azure.
+            // Hosting:BuildOnly stops Program after Build(), before migrations and
+            // app.Run(). Skipping Start keeps hosted workers unstarted if that
+            // boundary is removed.
             return builder.Build();
         }
     }

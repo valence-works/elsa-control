@@ -796,6 +796,11 @@ var runtimeImageFindings = app.Services.GetRequiredService<RuntimeImageValidator
 if (runtimeImageFindings.Count > 0)
     throw new InvalidOperationException($"Runtime image catalog is invalid: {string.Join(" ", runtimeImageFindings.Select(x => $"{x.Code} {x.Scope}"))}");
 
+// Composition tests build the real host to validate DI without migrations or
+// hosted workers. Development-only so an App Service setting cannot skip Run.
+if (app.Environment.IsDevelopment() && app.Configuration.GetValue("Hosting:BuildOnly", false))
+    return;
+
 if (!app.Environment.IsEnvironment("Testing"))
 {
     await using var scope = app.Services.CreateAsyncScope();
