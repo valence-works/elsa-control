@@ -726,7 +726,14 @@ if (provisioningWorkerEnabled && !provisioningTesting)
 
     builder.Services.AddProvisioningPersistence(builder.Configuration, requireSqlServer);
     builder.Services.AddAzureProvisioning(builder.Configuration);
-    builder.Services.Replace(ServiceDescriptor.Singleton<IProvisioningStepLedger, AzureProviderOperationStepLedger>());
+    // Factory, not implementation type: the built-in container ignores
+    // [ActivatorUtilitiesConstructor] and would otherwise treat the scope-factory
+    // and store constructors as ambiguous. The singleton must open a scope per
+    // write rather than capturing the scoped IAzureProviderOperationStore.
+    builder.Services.Replace(ServiceDescriptor.Singleton<IProvisioningStepLedger>(services =>
+        new AzureProviderOperationStepLedger(
+            services.GetRequiredService<IServiceScopeFactory>(),
+            services.GetRequiredService<TimeProvider>())));
 }
 var webhookDispatchEnabled = builder.Configuration.GetValue("Deployment:WebhookDispatch:Enabled", false);
 if (webhookDispatchEnabled && !builder.Environment.IsEnvironment("Testing"))

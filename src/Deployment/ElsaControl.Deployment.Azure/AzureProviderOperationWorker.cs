@@ -23,8 +23,9 @@ public sealed class AzureProviderOperationWorker(
     public const string DispatchWorkerId = "pulumi-dispatch";
 
     // Keep the executor-only construction seam available to hosts that predate the persisted
-    // plan source; the default source still enforces the same admission checks.
-    public AzureProviderOperationWorker(
+    // plan source; the default source still enforces the same admission checks. Internal so
+    // the built-in container cannot treat this as ambiguous with the primary constructor.
+    internal AzureProviderOperationWorker(
         IAzureProviderOperationStore store,
         AzureProviderExecutor executor,
         TimeProvider timeProvider)
