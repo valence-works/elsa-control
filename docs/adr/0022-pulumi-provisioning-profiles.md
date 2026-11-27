@@ -14,8 +14,10 @@ are filed but not Ready.
 
 [ADR-0021](0021-pulumi-provisioning-module.md) made Pulumi (Automation API, state in
 our Azure Blob backend, no Pulumi Cloud) the engine realization path, behind
-`IProvisioningService`. Epic #1010 is proving it on staging (#1014 AC4, with #1032,
-#1033, #1034 and #1035 in flight).
+`IProvisioningService`. Epic #1010 is proving it on staging (#1014 AC4). The step
+ledger (#1032) is merged as 9b176ae3, and staging infrastructure (#1035, which
+closed #1034) is merged as 8059c57b. Only the dispatcher (#1033, PR #1039) remains
+open.
 
 Sipke's intent (26 Nov 2026): use Pulumi as much as possible, behind options that
 Control curates. Customers never see Pulumi. Control decides which options exist,
@@ -36,8 +38,8 @@ What exists today:
 - ADR-0019 (#633) fixes the Shared model: one CShells shell and one database per
   tenant on a shared SQL server, host-based routing, `RejectUnresolvedTenants` on.
   The Shared flag stays **off in production**.
-- #1033 pins every instance to one backend (`bicep` or `pulumi`) for its whole life,
-  with no fallback.
+- Pin-for-life is decided and landing with #1033 (PR #1039): each instance will be
+  pinned to one backend (`bicep` or `pulumi`) for life, with no fallback.
 
 ## Decision
 
@@ -134,15 +136,17 @@ shard is a **third program, `elsa-shard`**, composed from the same components.
 Isolation and SKU rules carried from #1014 (fixed, not profile options):
 - `EngineComponent` creates a **per-engine** Container Apps environment and Log Analytics workspace inside the engine's resource group for Dedicated and BYO, so destroy and the delete receipt cover everything. A shared Container Apps environment exists only inside an `elsa-shard` stack (the Shared tier).
 - `DatabaseComponent` pins engine databases to **Standard S0**, enforced by a test and by policy (§6).
-- Every run (preview, up, refresh, destroy) goes through the provisioning module's **SQL-backed queue and per-stack lock with a fencing token** (ADR-0021, #1014). The Blob state lock is a second guard only, and a conflict there ends the run as `provider.stack.locked`.
+- Every run (preview, up, refresh, destroy) goes through the provisioning module's **SQL-backed queue and per-stack lock with a fencing token** (ADR-0021, #1014). The Blob state lock is a second guard only, and a conflict there ends the run as `provider.stack.locked`. That SQL-backed queue and lock are the production store; SQLite and in-memory are for tests only.
+- Lifecycle decisions carried from ADR-0021, #1014 and #1033: Cancel stops an in-flight run only; idle Cancel is rejected (`operation.nothing-to-cancel`) and never destroys. Delete is destroy, then the resource-group absence probe, then the receipt. `IsComplete` requires `SeedVaultUri`.
 
 Component refactoring must produce **no diff** on an existing Pulumi engine stack
 (Pulumi `aliases` where URNs move); that is a test gate.
 
 ### 3. The Shared fleet on Pulumi
 
-- **A stack per shard**: project `elsa-shard`, stack `shard-{shardId}`, with `shardId`
-  being the immutable ADR-0017 shard record ID. One Elsa version per shard (ADR-0019).
+- **Stack names.** Dedicated stacks stay `engine-{instanceId}` (ADR-0021 §5; #1033).
+  Shared uses project `elsa-shard`, stack `shard-{shardId}`, with `shardId` the
+  immutable ADR-0017 shard record ID. One Elsa version per shard (ADR-0019).
 - **Two layers, never mixed:**
   - *Shard provisioning* (Pulumi): engine, SQL server or pool, vault, networking.
   - *Tenant onboarding* (Control, not infrastructure): placement assignment, tenant
@@ -259,10 +263,11 @@ Hub control (ADR-0021).
 
 ### 8. Phased plan and issues
 
-Every phase starts **after #1010's staging proof (#1014 AC4)**, so #1032, #1033,
-#1034 and #1035 are not disrupted. Issues are filed under #1010 (27 Nov 2026), **not Ready**; the Lead
-arms them in phase order. Launch scope: one engine per placement, no Test-to-Prod
-promotion product.
+Every phase starts **after #1010's staging proof (#1014 AC4)**. The step ledger
+(#1032, 9b176ae3) and staging infrastructure (#1035, 8059c57b, which closed #1034)
+are merged. Do not disrupt the still-open dispatcher (#1033, PR #1039). Issues are
+filed under #1010 (27 Nov 2026), **not Ready**; the Lead arms them in phase order.
+Launch scope: one engine per placement, no Test-to-Prod promotion product.
 
 | Phase | Issue | Scope | Depends on |
 |---|---|---|---|
@@ -328,6 +333,8 @@ Patterns from the market, weighed for the first public launch:
 - No prices, rates or customer details in public repositories; tiers by name only.
 - No new workflow files.
 - Shared stays off in production; ADR-0019 gates and the public-copy gate stand.
+- Production `Provisioning:WorkerEnabled` stays false until a later rollout
+  (ADR-0021 §9). The Shared flag is not a substitute.
 - Engine DBs stay Standard S0.
 
 ## Consequences
