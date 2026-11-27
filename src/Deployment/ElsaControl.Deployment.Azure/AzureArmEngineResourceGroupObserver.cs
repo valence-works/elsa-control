@@ -15,13 +15,15 @@ public sealed class AzureArmEngineResourceGroupObserver : IAzureEngineResourceGr
     private readonly bool _ownsHttp;
     private readonly TokenCredential _credential;
 
+    private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(30);
+
     public AzureArmEngineResourceGroupObserver(TokenCredential credential)
-        : this(credential, new HttpClient(), ownsHttp: true)
+        : this(credential, CreateHttpClient(), ownsHttp: true)
     {
     }
 
     public AzureArmEngineResourceGroupObserver(TokenCredential credential, HttpMessageHandler handler)
-        : this(credential, new HttpClient(handler), ownsHttp: true)
+        : this(credential, CreateHttpClient(handler), ownsHttp: true)
     {
     }
 
@@ -30,6 +32,13 @@ public sealed class AzureArmEngineResourceGroupObserver : IAzureEngineResourceGr
         _credential = credential ?? throw new ArgumentNullException(nameof(credential));
         _http = http;
         _ownsHttp = ownsHttp;
+    }
+
+    private static HttpClient CreateHttpClient(HttpMessageHandler? handler = null)
+    {
+        var http = handler is null ? new HttpClient() : new HttpClient(handler);
+        http.Timeout = RequestTimeout;
+        return http;
     }
 
     public async Task<AzureProviderFreshResourceGroupState> ObserveAsync(
@@ -58,7 +67,7 @@ public sealed class AzureArmEngineResourceGroupObserver : IAzureEngineResourceGr
             var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
             return AzureArmResourceGroupPresence.MapResponse(response.StatusCode, body);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }

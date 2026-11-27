@@ -1,3 +1,5 @@
+using System.Net;
+using Azure.Core;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Azure;
 using ElsaControl.Deployment.Core.Instances;
@@ -142,6 +144,109 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             x.EventType == "lifecycle.delete-out-of-band-resource-group-absent"));
     }
 
+    [Fact]
+    public async Task Out_of_band_rg_http_timeout_keeps_recovery_authority_unavailable()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var fixture = await SeedCorrelationInvalidDeleteAsync(
+            db, "oob-rg-http-timeout", retainWorkload: true, assignmentDeleted: false);
+        using var observer = new AzureArmEngineResourceGroupObserver(
+            new SucceedingCredential(), new HttpTimeoutHandler());
+        var (service, _) = CreateOutOfBandRecoverServices(db, observer, Now.AddMinutes(4));
+        var beforeAssignment = await db.AzureProviderResourceAssignments.AsNoTracking().SingleAsync();
+        var beforeVersion = (await db.ElsaInstances.AsNoTracking().SingleAsync(x => x.Id == fixture.Instance.Id)).Version;
+        var beforeAudit = await db.ElsaInstanceAuditEvents.CountAsync();
+
+        var conflict = await Assert.ThrowsAsync<ElsaInstanceLifecycleConflictException>(() =>
+            service.RecoverAsync(new(
+                fixture.Workspace.Id,
+                fixture.Instance.Id,
+                fixture.Instance.Version,
+                "recover-oob-rg-http-timeout")));
+
+        Assert.Equal(ElsaInstanceLifecycleConflictReason.RecoveryAuthorityUnavailable, conflict.Reason);
+        var afterAssignment = await db.AzureProviderResourceAssignments.AsNoTracking().SingleAsync();
+        Assert.Equal(beforeAssignment.WorkloadResourceId, afterAssignment.WorkloadResourceId);
+        Assert.Equal(beforeAssignment.State, afterAssignment.State);
+        Assert.Equal(beforeAssignment.Version, afterAssignment.Version);
+        Assert.Equal(beforeVersion,
+            (await db.ElsaInstances.AsNoTracking().SingleAsync(x => x.Id == fixture.Instance.Id)).Version);
+        Assert.Equal(beforeAudit, await db.ElsaInstanceAuditEvents.CountAsync());
+    }
+
+    [Fact]
+    public async Task Out_of_band_rg_token_timeout_keeps_recovery_authority_unavailable()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var fixture = await SeedCorrelationInvalidDeleteAsync(
+            db, "oob-rg-token-timeout", retainWorkload: true, assignmentDeleted: false);
+        using var observer = new AzureArmEngineResourceGroupObserver(
+            new TokenTimeoutCredential(), new PresentHandler());
+        var (service, _) = CreateOutOfBandRecoverServices(db, observer, Now.AddMinutes(4));
+        var beforeAssignment = await db.AzureProviderResourceAssignments.AsNoTracking().SingleAsync();
+        var beforeVersion = (await db.ElsaInstances.AsNoTracking().SingleAsync(x => x.Id == fixture.Instance.Id)).Version;
+        var beforeAudit = await db.ElsaInstanceAuditEvents.CountAsync();
+
+        var conflict = await Assert.ThrowsAsync<ElsaInstanceLifecycleConflictException>(() =>
+            service.RecoverAsync(new(
+                fixture.Workspace.Id,
+                fixture.Instance.Id,
+                fixture.Instance.Version,
+                "recover-oob-rg-token-timeout")));
+
+        Assert.Equal(ElsaInstanceLifecycleConflictReason.RecoveryAuthorityUnavailable, conflict.Reason);
+        var afterAssignment = await db.AzureProviderResourceAssignments.AsNoTracking().SingleAsync();
+        Assert.Equal(beforeAssignment.WorkloadResourceId, afterAssignment.WorkloadResourceId);
+        Assert.Equal(beforeAssignment.State, afterAssignment.State);
+        Assert.Equal(beforeAssignment.Version, afterAssignment.Version);
+        Assert.Equal(beforeVersion,
+            (await db.ElsaInstances.AsNoTracking().SingleAsync(x => x.Id == fixture.Instance.Id)).Version);
+        Assert.Equal(beforeAudit, await db.ElsaInstanceAuditEvents.CountAsync());
+    }
+
+    [Fact]
+    public async Task Out_of_band_rg_caller_cancellation_propagates()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var fixture = await SeedCorrelationInvalidDeleteAsync(
+            db, "oob-rg-cancel", retainWorkload: true, assignmentDeleted: false);
+        var observer = new StubEngineResourceGroupObserver
+        {
+            State = AzureProviderFreshResourceGroupState.Absent
+        };
+        var (service, _) = CreateOutOfBandRecoverServices(db, observer, Now.AddMinutes(4));
+        var beforeAssignment = await db.AzureProviderResourceAssignments.AsNoTracking().SingleAsync();
+        var beforeVersion = (await db.ElsaInstances.AsNoTracking().SingleAsync(x => x.Id == fixture.Instance.Id)).Version;
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            service.RecoverAsync(new(
+                fixture.Workspace.Id,
+                fixture.Instance.Id,
+                fixture.Instance.Version,
+                "recover-oob-rg-cancel"), cts.Token));
+
+        var afterAssignment = await db.AzureProviderResourceAssignments.AsNoTracking().SingleAsync();
+        Assert.Equal(beforeAssignment.WorkloadResourceId, afterAssignment.WorkloadResourceId);
+        Assert.Equal(beforeAssignment.State, afterAssignment.State);
+        Assert.Equal(beforeAssignment.Version, afterAssignment.Version);
+        Assert.Equal(beforeVersion,
+            (await db.ElsaInstances.AsNoTracking().SingleAsync(x => x.Id == fixture.Instance.Id)).Version);
+        Assert.Equal(0, await db.ElsaInstanceAuditEvents.CountAsync(x =>
+            x.EventType == "lifecycle.delete-out-of-band-resource-group-absent"));
+        Assert.Empty(observer.Calls);
+    }
+
     private static (ElsaInstanceLifecycleService Service, AzureElsaInstanceProvider Provider) CreateOutOfBandRecoverServices(
         CatalogDbContext db,
         IAzureEngineResourceGroupAbsenceObserver observer,
@@ -180,10 +285,56 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             string resourceGroupName,
             CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             Calls.Add((subscriptionId, resourceGroupName));
             if (Error is not null)
                 throw Error;
             return Task.FromResult(State);
         }
+    }
+
+    private sealed class SucceedingCredential : TokenCredential
+    {
+        public override AccessToken GetToken(TokenRequestContext requestContext, CancellationToken cancellationToken) =>
+            new("token", DateTimeOffset.UtcNow.AddHours(1));
+
+        public override ValueTask<AccessToken> GetTokenAsync(
+            TokenRequestContext requestContext,
+            CancellationToken cancellationToken) =>
+            new(GetToken(requestContext, cancellationToken));
+    }
+
+    private sealed class TokenTimeoutCredential : TokenCredential
+    {
+        public override AccessToken GetToken(TokenRequestContext requestContext, CancellationToken cancellationToken) =>
+            throw new TaskCanceledException("Token acquisition timed out.");
+
+        public override ValueTask<AccessToken> GetTokenAsync(
+            TokenRequestContext requestContext,
+            CancellationToken cancellationToken) =>
+            throw new TaskCanceledException("Token acquisition timed out.");
+    }
+
+    private sealed class HttpTimeoutHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken) =>
+            Task.FromException<HttpResponseMessage>(
+                new TaskCanceledException(
+                    "The request was canceled due to the configured HttpClient.Timeout.",
+                    new TimeoutException()));
+    }
+
+    private sealed class PresentHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                RequestMessage = request,
+                Content = new StringContent("{}")
+            });
     }
 }

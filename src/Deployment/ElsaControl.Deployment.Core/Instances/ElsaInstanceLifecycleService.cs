@@ -273,7 +273,7 @@ public sealed class ElsaInstanceLifecycleService(
             await staleDeleteInventory.TryReconcileStaleDeleteInventoryFromEngineResourceGroupAbsenceAsync(
                 instance, operation, cancellationToken);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }

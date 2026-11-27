@@ -92,6 +92,40 @@ public sealed class AzureArmEngineResourceGroupObserverTests
             await observer.ObserveAsync("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "rg-engine"));
     }
 
+    [Fact]
+    public async Task Http_timeout_is_unknown()
+    {
+        using var observer = new AzureArmEngineResourceGroupObserver(
+            new StubCredential(), new TimeoutHandler());
+
+        Assert.Equal(
+            AzureProviderFreshResourceGroupState.Unknown,
+            await observer.ObserveAsync("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "rg-engine"));
+    }
+
+    [Fact]
+    public async Task Token_acquisition_timeout_is_unknown()
+    {
+        using var observer = new AzureArmEngineResourceGroupObserver(
+            new TimeoutCredential(), new StubHandler(HttpStatusCode.OK, "{}"));
+
+        Assert.Equal(
+            AzureProviderFreshResourceGroupState.Unknown,
+            await observer.ObserveAsync("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "rg-engine"));
+    }
+
+    [Fact]
+    public async Task Caller_cancellation_propagates()
+    {
+        using var observer = new AzureArmEngineResourceGroupObserver(
+            new StubCredential(), new CancelOnSendHandler());
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            observer.ObserveAsync("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "rg-engine", cts.Token));
+    }
+
     private sealed class StubCredential : TokenCredential
     {
         public override AccessToken GetToken(TokenRequestContext requestContext, CancellationToken cancellationToken) =>
@@ -130,5 +164,42 @@ public sealed class AzureArmEngineResourceGroupObserverTests
             HttpRequestMessage request,
             CancellationToken cancellationToken) =>
             throw new HttpRequestException("transport failed");
+    }
+
+    private sealed class TimeoutHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken) =>
+            Task.FromException<HttpResponseMessage>(
+                new TaskCanceledException(
+                    "The request was canceled due to the configured HttpClient.Timeout.",
+                    new TimeoutException()));
+    }
+
+    private sealed class TimeoutCredential : TokenCredential
+    {
+        public override AccessToken GetToken(TokenRequestContext requestContext, CancellationToken cancellationToken) =>
+            throw new TaskCanceledException("Token acquisition timed out.");
+
+        public override ValueTask<AccessToken> GetTokenAsync(
+            TokenRequestContext requestContext,
+            CancellationToken cancellationToken) =>
+            throw new TaskCanceledException("Token acquisition timed out.");
+    }
+
+    private sealed class CancelOnSendHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                RequestMessage = request,
+                Content = new StringContent("{}")
+            });
+        }
     }
 }

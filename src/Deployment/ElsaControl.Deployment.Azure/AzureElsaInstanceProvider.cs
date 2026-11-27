@@ -1172,7 +1172,7 @@ public sealed class AzureElsaInstanceProvider(
             EnsureEnabled();
             assignment = await assignmentStore.GetAsync(instance.WorkspaceId, assignmentId, cancellationToken);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
@@ -1205,7 +1205,7 @@ public sealed class AzureElsaInstanceProvider(
                 assignment.ResourceGroupName,
                 cancellationToken);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
