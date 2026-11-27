@@ -1,6 +1,8 @@
 using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.Provisioning.Abstractions;
 using ElsaControl.Provisioning.Core;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
 namespace ElsaControl.Deployment.Azure;
@@ -28,8 +30,12 @@ public sealed class AzurePulumiProvisioningDispatcher(
     IProvisioningService provisioning,
     IOptions<AzurePulumiDispatchOptions> options,
     IOptions<ProvisioningOptions> provisioningOptions,
-    IInfrastructureProvider? provider = null) : IAzurePulumiProvisioningDispatcher
+    IInfrastructureProvider? provider = null,
+    ILogger<AzurePulumiProvisioningDispatcher>? logger = null) : IAzurePulumiProvisioningDispatcher
 {
+    private readonly ILogger<AzurePulumiProvisioningDispatcher> _logger =
+        logger ?? NullLogger<AzurePulumiProvisioningDispatcher>.Instance;
+
     public bool CanDispatch =>
         provisioningOptions.Value.WorkerEnabled
         && string.Equals(provider?.ProviderId, AzurePulumiProvisioningBackendSelector.AzureProviderId, StringComparison.Ordinal)
@@ -50,6 +56,7 @@ public sealed class AzurePulumiProvisioningDispatcher(
             return new AzurePulumiDispatchResult(false);
         }
 
+        ProvisioningRequest? request = null;
         try
         {
             var configured = options.Value;
@@ -65,7 +72,7 @@ public sealed class AzurePulumiProvisioningDispatcher(
                 ["sqlBootstrapObjectId"] = configured.SqlBootstrapObjectId!.Trim(),
                 ["sqlBootstrapLogin"] = configured.SqlBootstrapLogin!.Trim()
             };
-            var request = new ProvisioningRequest(
+            request = new ProvisioningRequest(
                 operation.Action == AzureProviderOperationAction.Delete
                     ? ProvisioningCommand.Destroy
                     : ProvisioningCommand.Provision,
@@ -80,19 +87,42 @@ public sealed class AzurePulumiProvisioningDispatcher(
                     configured.EnvironmentName.Trim()),
                 operation.IdempotencyKey,
                 config);
-            var result = operation.Action == AzureProviderOperationAction.Delete
-                ? await provisioning.DestroyAsync(request, cancellationToken).ConfigureAwait(false)
-                : await provisioning.ProvisionAsync(request, cancellationToken).ConfigureAwait(false);
-            return result.State is ProvisioningOperationState.Queued
-                or ProvisioningOperationState.Accepted
-                or ProvisioningOperationState.Running
-                or ProvisioningOperationState.Succeeded
-                ? new AzurePulumiDispatchResult(true, result.OperationId)
-                : new AzurePulumiDispatchResult(false);
+            return await EnqueueAsync(operation, request, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            return new AzurePulumiDispatchResult(false);
+            _logger.LogError(
+                "Pulumi dispatch failed. ExceptionType={ExceptionType}",
+                exception.GetType().FullName);
+            if (request is null)
+                return new AzurePulumiDispatchResult(false);
+            try
+            {
+                return await EnqueueAsync(operation, request, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception retry) when (retry is not OperationCanceledException)
+            {
+                _logger.LogError(
+                    "Pulumi dispatch retry failed after commit. ExceptionType={ExceptionType}",
+                    retry.GetType().FullName);
+                return new AzurePulumiDispatchResult(false);
+            }
         }
+    }
+
+    private async Task<AzurePulumiDispatchResult> EnqueueAsync(
+        AzureProviderOperation operation,
+        ProvisioningRequest request,
+        CancellationToken cancellationToken)
+    {
+        var result = operation.Action == AzureProviderOperationAction.Delete
+            ? await provisioning.DestroyAsync(request, cancellationToken).ConfigureAwait(false)
+            : await provisioning.ProvisionAsync(request, cancellationToken).ConfigureAwait(false);
+        return result.State is ProvisioningOperationState.Queued
+            or ProvisioningOperationState.Accepted
+            or ProvisioningOperationState.Running
+            or ProvisioningOperationState.Succeeded
+            ? new AzurePulumiDispatchResult(true, result.OperationId)
+            : new AzurePulumiDispatchResult(false);
     }
 }

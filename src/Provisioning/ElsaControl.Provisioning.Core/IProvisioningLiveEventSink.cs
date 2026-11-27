@@ -37,4 +37,12 @@ public interface IProvisioningLiveEventSink
     void SetFailureCode(Guid operationId, string? failureCode)
     {
     }
+
+    /// <summary>
+    /// Overlays sanitised stack outputs onto the bound run so the next ledger
+    /// write can record the engine origin. No-op when the run is not bound.
+    /// </summary>
+    void SetOutputs(Guid operationId, IReadOnlyDictionary<string, string>? outputs)
+    {
+    }
 }

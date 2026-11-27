@@ -1074,24 +1074,65 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
                 LedgerEvent(operation.Id, 2, ProvisioningEventKind.ResourceSucceeded, "resource-group"),
                 LedgerEvent(operation.Id, 3, ProvisioningEventKind.ResourceSucceeded, ProvisioningCapability.ContainerRuntime),
                 LedgerEvent(operation.Id, 4, ProvisioningEventKind.OperationSucceeded, ProvisioningCapability.ContainerRuntime)
-            ]);
+            ],
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [PulumiStepLedgerMapper.EngineEndpointOutputKey] = "https://runtime.example.test",
+                [PulumiStepLedgerMapper.WorkloadRevisionNameOutputKey] = "engine-app--candidate",
+                [PulumiStepLedgerMapper.OwnedResourceGroupNameOutputKey] = "rg-engine-test"
+            });
 
         Assert.Equal(ProvisioningStepLedgerResult.Written, result);
-        var succeeded = Assert.IsType<AzureProviderOperation>(await store.GetAsync(_workspaceId, providerOperation.Id));
-        Assert.Equal(AzureProviderOperationStatus.Succeeded, succeeded.Status);
-        Assert.Equal(AzureProviderOperationPhase.TrafficPromoted, succeeded.Phase);
-        Assert.Equal(AzureProviderHealth.Healthy, succeeded.Health);
-        Assert.Null(succeeded.LeaseExpiresAt);
-        Assert.Null(succeeded.WorkerId);
-        Assert.Contains(
+        var queued = Assert.IsType<AzureProviderOperation>(await store.GetAsync(_workspaceId, providerOperation.Id));
+        Assert.Equal(AzureProviderOperationStatus.Queued, queued.Status);
+        Assert.Equal(AzureProviderOperationPhase.WorkloadReady, queued.Phase);
+        Assert.Equal(AzureProviderHealth.Unknown, queued.Health);
+        Assert.Equal("https://runtime.example.test", queued.Endpoint);
+        Assert.Null(queued.LeaseExpiresAt);
+        Assert.Null(queued.WorkerId);
+        Assert.DoesNotContain(
             await store.ListTransitionsAsync(_workspaceId, providerOperation.Id),
             item => item.Code == PulumiStepLedgerMapper.OperationSucceededCode);
 
         Assert.Equal(0, await store.RecoverStaleAsync(now.AddSeconds(31)));
         var afterSweep = Assert.IsType<AzureProviderOperation>(await store.GetAsync(_workspaceId, providerOperation.Id));
-        Assert.Equal(AzureProviderOperationStatus.Succeeded, afterSweep.Status);
+        Assert.Equal(AzureProviderOperationStatus.Queued, afterSweep.Status);
         Assert.DoesNotContain(
             await store.ListTransitionsAsync(_workspaceId, providerOperation.Id),
+            item => item.Code == "operation.recovery.required");
+    }
+
+    [Fact]
+    public async Task Two_accepted_creates_are_not_swept_while_queued()
+    {
+        var now = DateTimeOffset.UtcNow;
+        using var db = CreateContext();
+        var store = new AzureProviderOperationStore(db);
+        var first = await store.CreateOrGetAsync(Request() with
+        {
+            TargetKey = "queued-create-a",
+            IdempotencyKey = "queued-create-a"
+        }, now);
+        var second = await store.CreateOrGetAsync(Request() with
+        {
+            TargetKey = "queued-create-b",
+            IdempotencyKey = "queued-create-b"
+        }, now);
+
+        Assert.Equal(AzureProviderOperationStatus.Accepted, first.Status);
+        Assert.Equal(AzureProviderOperationStatus.Accepted, second.Status);
+        Assert.Equal(0, await store.RecoverStaleAsync(now.AddSeconds(31)));
+        Assert.Equal(
+            AzureProviderOperationStatus.Accepted,
+            (await store.GetAsync(_workspaceId, first.Id))!.Status);
+        Assert.Equal(
+            AzureProviderOperationStatus.Accepted,
+            (await store.GetAsync(_workspaceId, second.Id))!.Status);
+        Assert.DoesNotContain(
+            await store.ListTransitionsAsync(_workspaceId, first.Id),
+            item => item.Code == "operation.recovery.required");
+        Assert.DoesNotContain(
+            await store.ListTransitionsAsync(_workspaceId, second.Id),
             item => item.Code == "operation.recovery.required");
     }
 

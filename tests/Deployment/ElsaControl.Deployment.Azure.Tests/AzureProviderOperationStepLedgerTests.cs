@@ -104,7 +104,7 @@ public sealed class AzureProviderOperationStepLedgerTests
     }
 
     [Fact]
-    public async Task Operation_succeeded_finalizes_ready_through_health_and_traffic()
+    public async Task Operation_succeeded_queues_workload_ready_with_the_engine_endpoint()
     {
         var providerOperation = Operation();
         var store = new LedgerStore(providerOperation);
@@ -119,35 +119,20 @@ public sealed class AzureProviderOperationStepLedgerTests
                 Event(operation.Id, 2, ProvisioningEventKind.ResourceSucceeded, "resource-group"),
                 Event(operation.Id, 3, ProvisioningEventKind.ResourceSucceeded, ProvisioningCapability.ContainerRuntime),
                 Event(operation.Id, 4, ProvisioningEventKind.OperationSucceeded, ProvisioningCapability.ContainerRuntime)
-            ]);
+            ],
+            StackOutputs());
 
         Assert.Equal(ProvisioningStepLedgerResult.Written, result);
-        Assert.Equal(AzureProviderOperationStatus.Succeeded, store.Operation.Status);
-        Assert.Equal(AzureProviderOperationPhase.TrafficPromoted, store.Operation.Phase);
-        Assert.Equal(AzureProviderHealth.Healthy, store.Operation.Health);
+        Assert.Equal(AzureProviderOperationStatus.Queued, store.Operation.Status);
+        Assert.Equal(AzureProviderOperationPhase.WorkloadReady, store.Operation.Phase);
+        Assert.Equal(AzureProviderHealth.Unknown, store.Operation.Health);
+        Assert.Equal("https://runtime.example.test", store.Operation.Endpoint);
+        Assert.Equal("engine-app--candidate", store.Operation.Resources.WorkloadRevisionName);
         Assert.Null(store.Operation.LeaseExpiresAt);
-        Assert.Contains(store.Transitions, item => item.Code == PulumiStepLedgerMapper.HealthVerifiedCode);
-        Assert.Contains(store.Transitions, item => item.Code == PulumiStepLedgerMapper.TrafficRoutedCode);
-        Assert.Contains(store.Transitions, item => item.Code == PulumiStepLedgerMapper.OperationSucceededCode);
-        var progress = AzureManagedElsaProvisioningProgressProjector.Project(
-            new AzureManagedElsaProvisioningProgressProjectionInput(
-                Topology: new ElsaInstanceLifecycleTopologySnapshot(
-                    Guid.Parse("11111111-1111-1111-1111-111111111111"),
-                    1,
-                    ElsaDesiredLifecycle.Running,
-                    ElsaObservedLifecycle.Ready,
-                    Guid.NewGuid(),
-                    [Lifecycle(ElsaInstanceOperationState.Succeeded)]),
-                LifecycleOperation: Lifecycle(ElsaInstanceOperationState.Succeeded),
-                ProviderOperation: store.Operation,
-                Transitions: store.Transitions));
-        Assert.Equal(ManagedElsaProvisioningProgressStates.Ready, progress.State);
-        Assert.All(progress.Stages, stage =>
-            Assert.Equal(ManagedElsaProvisioningProgressStageStatuses.Completed, stage.Status));
-        var json = System.Text.Json.JsonSerializer.Serialize(progress);
-        Assert.DoesNotContain("subscription", json, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("password", json, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("pulumi", json, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(store.Operation.WorkerId);
+        Assert.DoesNotContain(store.Transitions, item => item.Code == PulumiStepLedgerMapper.HealthVerifiedCode);
+        Assert.DoesNotContain(store.Transitions, item => item.Code == PulumiStepLedgerMapper.TrafficRoutedCode);
+        Assert.DoesNotContain(store.Transitions, item => item.Code == PulumiStepLedgerMapper.OperationSucceededCode);
     }
 
     [Fact]
@@ -166,7 +151,7 @@ public sealed class AzureProviderOperationStepLedgerTests
                     operation.Id,
                     1,
                     ProvisioningEventKind.ResourceSucceeded,
-                    "resource-group",
+                    PulumiStepLedgerMapper.OwnedResourceGroupAbsentKind,
                     PulumiStepLedgerMapper.ResourceGroupAbsentMessage),
                 Event(operation.Id, 2, ProvisioningEventKind.OperationSucceeded, ProvisioningCapability.ContainerRuntime)
             ]);
@@ -430,6 +415,14 @@ public sealed class AzureProviderOperationStepLedgerTests
             DateTimeOffset.UtcNow,
             sequence);
 
+    private static IReadOnlyDictionary<string, string> StackOutputs() =>
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [PulumiStepLedgerMapper.EngineEndpointOutputKey] = "https://runtime.example.test",
+            [PulumiStepLedgerMapper.WorkloadRevisionNameOutputKey] = "engine-app--candidate",
+            [PulumiStepLedgerMapper.OwnedResourceGroupNameOutputKey] = "rg-engine-test"
+        };
+
     private static AzureProviderOperation Operation() =>
         new(
             Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
@@ -649,7 +642,9 @@ public sealed class AzureProviderOperationStepLedgerTests
                 AttemptedStep = checkpoint.AttemptedStep,
                 Health = checkpoint.Health == AzureProviderHealth.Unknown ? Operation.Health : checkpoint.Health,
                 Endpoint = checkpoint.Endpoint ?? Operation.Endpoint,
-                Resources = checkpoint.ReplaceResources ? checkpoint.Resources : Operation.Resources,
+                Resources = checkpoint.ReplaceResources
+                    ? checkpoint.Resources
+                    : MergeResources(Operation.Resources, checkpoint.Resources),
                 CheckpointSequence = Operation.CheckpointSequence + 1,
                 Version = Operation.Version + 1,
                 UpdatedAt = now
@@ -709,6 +704,34 @@ public sealed class AzureProviderOperationStepLedgerTests
             return Task.FromResult<AzureProviderOperation?>(Operation);
         }
 
+        public Task<AzureProviderOperation?> ReleaseToQueueAsync(
+            Guid workspaceId,
+            Guid operationId,
+            string leaseToken,
+            DateTimeOffset now,
+            long? expectedVersion = null,
+            CancellationToken cancellationToken = default)
+        {
+            if (_leaseToken != leaseToken
+                || Operation.Status != AzureProviderOperationStatus.Running
+                || expectedVersion.HasValue && expectedVersion.Value != Operation.Version)
+            {
+                return Task.FromResult<AzureProviderOperation?>(null);
+            }
+
+            Operation = Operation with
+            {
+                Status = AzureProviderOperationStatus.Queued,
+                Version = Operation.Version + 1,
+                UpdatedAt = now,
+                WorkerId = null,
+                LeaseExpiresAt = null,
+                CompletedAt = null
+            };
+            _leaseToken = null;
+            return Task.FromResult<AzureProviderOperation?>(Operation);
+        }
+
         public Task<int> RecoverStaleAsync(DateTimeOffset now, CancellationToken cancellationToken = default) =>
             Task.FromResult(0);
 
@@ -729,6 +752,32 @@ public sealed class AzureProviderOperationStepLedgerTests
         {
             LastFailureClass = failureClass;
             return Task.CompletedTask;
+        }
+
+        private static AzureProviderResourceReferences MergeResources(
+            AzureProviderResourceReferences current,
+            AzureProviderResourceReferences? incoming)
+        {
+            if (incoming is null)
+                return current;
+            return new(
+                incoming.ResourceGroupName ?? current.ResourceGroupName,
+                incoming.FoundationDeploymentId ?? current.FoundationDeploymentId,
+                incoming.WorkloadDeploymentId ?? current.WorkloadDeploymentId,
+                incoming.WorkloadResourceId ?? current.WorkloadResourceId,
+                incoming.WorkloadRevisionName ?? current.WorkloadRevisionName,
+                incoming.StableTrafficRevisionName ?? current.StableTrafficRevisionName,
+                incoming.WorkloadIdentityResourceId ?? current.WorkloadIdentityResourceId,
+                incoming.WorkloadIdentityClientId ?? current.WorkloadIdentityClientId,
+                incoming.WorkloadIdentityPrincipalId ?? current.WorkloadIdentityPrincipalId,
+                incoming.KeyVaultResourceId ?? current.KeyVaultResourceId,
+                incoming.KeyVaultUri ?? current.KeyVaultUri,
+                incoming.SqlServerResourceId ?? current.SqlServerResourceId,
+                incoming.SqlServerFqdn ?? current.SqlServerFqdn,
+                incoming.ContainerAppsEnvironmentResourceId ?? current.ContainerAppsEnvironmentResourceId,
+                incoming.RegistryResourceId ?? current.RegistryResourceId,
+                incoming.AcrPullDeploymentId ?? current.AcrPullDeploymentId,
+                incoming.AcrPullRoleAssignmentId ?? current.AcrPullRoleAssignmentId);
         }
     }
 }

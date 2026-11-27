@@ -213,8 +213,9 @@ public sealed class AzureProviderOperationWorkerTests
         Assert.Single(dispatcher.Operations);
         Assert.Equal(AzureProviderOperationAction.Reconcile, dispatcher.Operations[0].Action);
         Assert.Empty(runner.Steps);
-        Assert.Equal(AzureProviderOperationStatus.Running, store.Operation.Status);
-        Assert.Equal(AzureProviderOperationStepLedger.WorkerId, store.Operation.WorkerId);
+        Assert.Equal(AzureProviderOperationStatus.Accepted, store.Operation.Status);
+        Assert.Null(store.Operation.WorkerId);
+        Assert.Null(store.Operation.LeaseExpiresAt);
     }
 
     [Fact]
@@ -320,7 +321,8 @@ public sealed class AzureProviderOperationWorkerTests
         Assert.Equal(1, await worker.ProcessOnceAsync());
         Assert.Equal(AzureProviderOperationAction.Delete, Assert.Single(dispatcher.Operations).Action);
         Assert.Empty(runner.Steps);
-        Assert.Equal(AzureProviderOperationStatus.Running, store.Operation.Status);
+        Assert.Equal(AzureProviderOperationStatus.Accepted, store.Operation.Status);
+        Assert.Null(store.Operation.WorkerId);
     }
 
     [Fact]
@@ -338,6 +340,125 @@ public sealed class AzureProviderOperationWorkerTests
         Assert.Empty(runner.Steps);
         Assert.Equal(AzureProviderOperationStatus.Failed, store.Operation.Status);
         Assert.Contains(store.Transitions, transition => transition.Code == ManagedElsaReasonCodeCatalog.ProviderDispatchFailed);
+    }
+
+    [Fact]
+    public async Task Unknown_owner_fails_closed_without_bicep()
+    {
+        var operation = RunnableOperation();
+        var store = new WorkerStore(operation, execute: true);
+        var runner = new CompletingRunner();
+        var executor = new AzureProviderExecutor(store, runner, assignmentStore: new OperationAssignmentStore(operation));
+        var dispatcher = new RecordingDispatcher();
+        var worker = new AzureProviderOperationWorker(
+            store, executor, new PersistedAzureProviderPlanSource(), new FixedTimeProvider(),
+            dispatcher, new StaticBackendStore(ElsaInstanceProvisioningBackend.Unknown));
+
+        Assert.Equal(1, await worker.ProcessOnceAsync());
+        Assert.Empty(dispatcher.Operations);
+        Assert.Empty(runner.Steps);
+        Assert.Equal(AzureProviderOperationStatus.Failed, store.Operation.Status);
+        Assert.Contains(store.Transitions, transition => transition.Code == ManagedElsaReasonCodeCatalog.ProviderDispatchFailed);
+    }
+
+    [Fact]
+    public async Task Two_queued_pulumi_creates_stay_accepted_across_a_stale_sweep()
+    {
+        var first = RunnableOperation();
+        var second = WithComputedMetadata(RunnableOperation() with
+        {
+            Id = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaab"),
+            TargetKey = "workload-b",
+            IdempotencyKey = "request-2"
+        });
+        var store = new MultiOperationWorkerStore(first, second);
+        var runner = new CompletingRunner();
+        var executor = new AzureProviderExecutor(store, runner, assignmentStore: new OperationAssignmentStore(first));
+        var dispatcher = new RecordingDispatcher();
+        var now = DateTimeOffset.UtcNow;
+        var worker = new AzureProviderOperationWorker(
+            store, executor, new PersistedAzureProviderPlanSource(), new FixedTimeProvider(),
+            dispatcher, new StaticBackendStore(ElsaInstanceProvisioningBackend.Pulumi));
+
+        Assert.Equal(2, await worker.ProcessOnceAsync());
+        Assert.Equal(2, dispatcher.Operations.Count);
+        Assert.Empty(runner.Steps);
+        Assert.All(store.Operations, operation =>
+        {
+            Assert.Equal(AzureProviderOperationStatus.Accepted, operation.Status);
+            Assert.Null(operation.WorkerId);
+            Assert.Null(operation.LeaseExpiresAt);
+        });
+
+        Assert.Equal(0, await store.RecoverStaleAsync(now.AddSeconds(31)));
+        Assert.All(store.Operations, operation =>
+            Assert.Equal(AzureProviderOperationStatus.Accepted, operation.Status));
+        Assert.DoesNotContain(
+            store.Operations,
+            operation => operation.Status == AzureProviderOperationStatus.RecoveryRequired);
+    }
+
+    [Fact]
+    public async Task Pulumi_apply_success_reaches_ready_through_health_then_observation()
+    {
+        var lifecycleOperationId = Guid.Parse("33333333-3333-3333-3333-333333333333");
+        var instanceId = Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd");
+        var operation = WithComputedMetadata(RunnableOperation() with
+        {
+            Status = AzureProviderOperationStatus.Queued,
+            Phase = AzureProviderOperationPhase.WorkloadReady,
+            Endpoint = "https://runtime.example.test/",
+            Resources = new AzureProviderResourceReferences(
+                ResourceGroupName: "rg-engine-test",
+                WorkloadRevisionName: "engine-app--candidate"),
+            IdempotencyKey = AzureProviderOperationValidation.LifecycleIdempotencyKey(lifecycleOperationId),
+            TargetKey = AzureElsaInstanceProvider.WorkloadName(instanceId),
+            InstanceId = instanceId,
+            ProviderScopeFingerprint = new string('a', 64)
+        });
+        var store = new WorkerStore(operation, execute: true);
+        var runner = new CompletingRunner();
+        var executor = new AzureProviderExecutor(store, runner, assignmentStore: new OperationAssignmentStore(operation));
+        var dispatcher = new RecordingDispatcher();
+        var worker = new AzureProviderOperationWorker(
+            store, executor, new PersistedAzureProviderPlanSource(), new FixedTimeProvider(),
+            dispatcher, new StaticBackendStore(ElsaInstanceProvisioningBackend.Pulumi));
+
+        Assert.Equal(1, await worker.ProcessOnceAsync());
+        Assert.Empty(dispatcher.Operations);
+        Assert.Equal(
+            [AzureProviderRunnerStep.Health, AzureProviderRunnerStep.Promotion],
+            runner.Steps);
+        Assert.Equal(AzureProviderOperationStatus.Succeeded, store.Operation.Status);
+        Assert.Equal(AzureProviderOperationPhase.TrafficPromoted, store.Operation.Phase);
+        Assert.Equal(AzureProviderHealth.Healthy, store.Operation.Health);
+        Assert.Equal("https://workload.example.test", store.Operation.Endpoint);
+
+        var provider = new AzureElsaInstanceProvider(
+            new UnusedOperationService(),
+            store,
+            new OperationAssignmentStore(store.Operation),
+            options: new AzureElsaInstanceProviderOptions
+            {
+                Enabled = true,
+                TemplateFingerprint = new string('b', 64),
+                ProviderScopeFingerprint = new string('a', 64),
+                SubscriptionId = "11111111-1111-1111-1111-111111111111",
+                ResourceGroupNamePrefix = "rg-elsa"
+            });
+        var observation = await provider.ObserveAsync(new(
+            store.Operation.WorkspaceId,
+            instanceId,
+            lifecycleOperationId,
+            store.Operation.AttemptNumber,
+            ElsaDesiredLifecycle.Running,
+            null,
+            null));
+
+        Assert.Equal(ElsaInstanceProviderObservationKind.Confirmed, observation.Kind);
+        Assert.Equal(ElsaObservedLifecycle.Ready, observation.ObservedLifecycle);
+        Assert.Equal(ElsaInstanceProviderHealthGate.Passed, observation.HealthGate);
+        Assert.Equal("https://workload.example.test", observation.CurrentDeploymentReference?.EndpointUri);
     }
 
     private static AzureProviderOperation RunnableOperation()
@@ -529,7 +650,11 @@ public sealed class AzureProviderOperationWorkerTests
             Task.FromResult<IReadOnlyList<AzureProviderOperation>>(Operation.Status is AzureProviderOperationStatus.Accepted or AzureProviderOperationStatus.Queued ? [Operation] : []);
 
         public Task<AzureProviderOperation?> GetLatestReconcileAsync(Guid workspaceId, string targetKey, string? providerScopeFingerprint, CancellationToken cancellationToken = default) =>
-            Task.FromResult<AzureProviderOperation?>(null);
+            Task.FromResult<AzureProviderOperation?>(
+                Operation.Action == AzureProviderOperationAction.Reconcile
+                && string.Equals(Operation.TargetKey, targetKey, StringComparison.OrdinalIgnoreCase)
+                    ? Operation
+                    : null);
 
         public Task<AzureProviderOperation?> MarkUnrestorableAsync(Guid workspaceId, Guid operationId, DateTimeOffset now, long? expectedVersion = null, CancellationToken cancellationToken = default)
         {
@@ -609,7 +734,25 @@ public sealed class AzureProviderOperationWorkerTests
             return Task.FromResult<AzureProviderOperation?>(Operation);
         }
 
-        public Task<int> RecoverStaleAsync(DateTimeOffset now, CancellationToken cancellationToken = default) => Task.FromResult(0);
+        public Task<int> RecoverStaleAsync(DateTimeOffset now, CancellationToken cancellationToken = default)
+        {
+            if (Operation.Status != AzureProviderOperationStatus.Running
+                || Operation.LeaseExpiresAt is not { } expires
+                || expires > now)
+            {
+                return Task.FromResult(0);
+            }
+
+            Operation = Operation with
+            {
+                Status = AzureProviderOperationStatus.RecoveryRequired,
+                WorkerId = null,
+                LeaseExpiresAt = null,
+                Version = Operation.Version + 1,
+                UpdatedAt = now
+            };
+            return Task.FromResult(1);
+        }
 
         public Task<IReadOnlyList<AzureProviderOperationTransition>> ListTransitionsAsync(Guid workspaceId, Guid operationId, CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<AzureProviderOperationTransition>>(Transitions);
@@ -736,7 +879,32 @@ public sealed class AzureProviderOperationWorkerTests
             return Task.FromResult<AzureProviderOperation?>(updated);
         }
 
-        public Task<int> RecoverStaleAsync(DateTimeOffset now, CancellationToken cancellationToken = default) => Task.FromResult(0);
+        public Task<int> RecoverStaleAsync(DateTimeOffset now, CancellationToken cancellationToken = default)
+        {
+            var recovered = 0;
+            for (var index = 0; index < Operations.Count; index++)
+            {
+                var operation = Operations[index];
+                if (operation.Status != AzureProviderOperationStatus.Running
+                    || operation.LeaseExpiresAt is not { } expires
+                    || expires > now)
+                {
+                    continue;
+                }
+
+                Operations[index] = operation with
+                {
+                    Status = AzureProviderOperationStatus.RecoveryRequired,
+                    WorkerId = null,
+                    LeaseExpiresAt = null,
+                    Version = operation.Version + 1,
+                    UpdatedAt = now
+                };
+                recovered++;
+            }
+
+            return Task.FromResult(recovered);
+        }
 
         public Task<IReadOnlyList<AzureProviderOperationTransition>> ListTransitionsAsync(Guid workspaceId, Guid operationId, CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<AzureProviderOperationTransition>>([]);
@@ -848,5 +1016,26 @@ public sealed class AzureProviderOperationWorkerTests
             AzureWorkloadPlan plan,
             CancellationToken cancellationToken = default) =>
             Task.FromResult(new AzurePulumiDispatchResult(false));
+    }
+
+    private sealed class UnusedOperationService : IAzureProviderOperationService
+    {
+        public Task<AzureProviderOperation> SubmitAsync(
+            Guid workspaceId,
+            AzureProviderOperationSubmission submission,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task<AzureProviderOperation> SubmitDeleteAsync(
+            Guid workspaceId,
+            AzureProviderOperationSubmission submission,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task<AzureProviderOperationStatusResponse?> GetStatusAsync(
+            Guid workspaceId,
+            Guid operationId,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
     }
 }

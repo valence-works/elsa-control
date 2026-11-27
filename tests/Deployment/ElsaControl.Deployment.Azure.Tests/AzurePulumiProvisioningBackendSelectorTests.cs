@@ -30,6 +30,22 @@ public sealed class AzurePulumiProvisioningBackendSelectorTests
         Assert.Equal(ElsaInstanceProvisioningBackend.Bicep, selector.SelectForCreate());
     }
 
+    [Theory]
+    [InlineData(null, ElsaInstanceProvisioningBackend.Bicep, true)]
+    [InlineData("bicep", ElsaInstanceProvisioningBackend.Bicep, true)]
+    [InlineData("pulumi", ElsaInstanceProvisioningBackend.Pulumi, true)]
+    [InlineData("unknown", ElsaInstanceProvisioningBackend.Unknown, false)]
+    [InlineData("terraform", ElsaInstanceProvisioningBackend.Unknown, false)]
+    public void Owner_parse_fails_closed_on_unknown_values(
+        string? value,
+        ElsaInstanceProvisioningBackend expected,
+        bool parsed)
+    {
+        Assert.Equal(parsed, ElsaInstanceProvisioningBackendText.TryParse(value, out var backend));
+        Assert.Equal(expected, backend);
+        Assert.Equal(expected, ElsaInstanceProvisioningBackendText.Parse(value));
+    }
+
     [Fact]
     public void Missing_seed_vault_pins_bicep()
     {

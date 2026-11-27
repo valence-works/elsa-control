@@ -1362,6 +1362,49 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
         return ToModel(entity);
     }
 
+    public async Task<AzureProviderOperation?> ReleaseToQueueAsync(
+        Guid workspaceId,
+        Guid operationId,
+        string leaseToken,
+        DateTimeOffset now,
+        long? expectedVersion = null,
+        CancellationToken cancellationToken = default)
+    {
+        AzureProviderOperationValidation.ValidateLeaseToken(leaseToken);
+        var entity = await db.AzureProviderOperations.SingleOrDefaultAsync(
+            x => x.WorkspaceId == workspaceId && x.Id == operationId,
+            cancellationToken);
+        if (entity is null
+            || entity.Status != AzureProviderOperationStatus.Running
+            || !LeaseMatches(entity, leaseToken, now)
+            || expectedVersion.HasValue && entity.Version != expectedVersion.Value)
+        {
+            return null;
+        }
+
+        entity.Status = AzureProviderOperationStatus.Queued;
+        entity.StatusChangedAt = now;
+        entity.UpdatedAt = now;
+        entity.Version++;
+        entity.CompletedAt = null;
+        entity.CompletionLeaseTokenHash = null;
+        entity.CompletionFingerprint = null;
+        entity.LeaseTokenHash = null;
+        entity.LeaseExpiresAt = null;
+        entity.WorkerId = null;
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            db.ChangeTracker.Clear();
+            return null;
+        }
+
+        return ToModel(entity);
+    }
+
     public async Task<int> RecoverStaleAsync(DateTimeOffset now, CancellationToken cancellationToken = default)
     {
         db.ChangeTracker.Clear();

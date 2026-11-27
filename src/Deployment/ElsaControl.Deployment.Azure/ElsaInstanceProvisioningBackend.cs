@@ -7,7 +7,8 @@ namespace ElsaControl.Deployment.Azure;
 public enum ElsaInstanceProvisioningBackend
 {
     Bicep = 0,
-    Pulumi = 1
+    Pulumi = 1,
+    Unknown = 2
 }
 
 public static class ElsaInstanceProvisioningBackendText
@@ -16,11 +17,32 @@ public static class ElsaInstanceProvisioningBackendText
     public const string Pulumi = "pulumi";
     public const int MaxLength = 16;
 
-    public static string Format(ElsaInstanceProvisioningBackend value) =>
-        value == ElsaInstanceProvisioningBackend.Pulumi ? Pulumi : Bicep;
+    public static string Format(ElsaInstanceProvisioningBackend value) => value switch
+    {
+        ElsaInstanceProvisioningBackend.Pulumi => Pulumi,
+        ElsaInstanceProvisioningBackend.Bicep => Bicep,
+        _ => throw new ArgumentOutOfRangeException(nameof(value))
+    };
+
+    public static bool TryParse(string? value, out ElsaInstanceProvisioningBackend backend)
+    {
+        if (string.IsNullOrWhiteSpace(value)
+            || string.Equals(value, Bicep, StringComparison.OrdinalIgnoreCase))
+        {
+            backend = ElsaInstanceProvisioningBackend.Bicep;
+            return true;
+        }
+
+        if (string.Equals(value, Pulumi, StringComparison.OrdinalIgnoreCase))
+        {
+            backend = ElsaInstanceProvisioningBackend.Pulumi;
+            return true;
+        }
+
+        backend = ElsaInstanceProvisioningBackend.Unknown;
+        return false;
+    }
 
     public static ElsaInstanceProvisioningBackend Parse(string? value) =>
-        string.Equals(value, Pulumi, StringComparison.OrdinalIgnoreCase)
-            ? ElsaInstanceProvisioningBackend.Pulumi
-            : ElsaInstanceProvisioningBackend.Bicep;
+        TryParse(value, out var backend) ? backend : ElsaInstanceProvisioningBackend.Unknown;
 }

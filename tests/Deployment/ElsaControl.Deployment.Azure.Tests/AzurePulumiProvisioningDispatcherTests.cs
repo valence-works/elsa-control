@@ -110,16 +110,31 @@ public sealed class AzurePulumiProvisioningDispatcherTests
         Assert.False((await dispatcher.DispatchAsync(Operation(), Plan())).Dispatched);
     }
 
+    [Fact]
+    public async Task Dispatch_retries_an_idempotent_enqueue_after_a_commit_exception()
+    {
+        var provisioning = new FlakyThenSucceedProvisioningService();
+        var logger = new RecordingLogger();
+        var dispatcher = Dispatcher(provisioning, CompleteOptions(), logger: logger);
+        var result = await dispatcher.DispatchAsync(Operation(), Plan());
+        Assert.True(result.Dispatched);
+        Assert.Equal(2, provisioning.Attempts);
+        Assert.Contains(logger.Messages, message => message.Contains("InvalidOperationException", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Messages, message => message.Contains("enqueue failed", StringComparison.Ordinal));
+    }
+
     private static AzurePulumiProvisioningDispatcher Dispatcher(
         IProvisioningService provisioning,
         AzurePulumiDispatchOptions options,
         bool workerEnabled = true,
-        string providerId = "azure") =>
+        string providerId = "azure",
+        Microsoft.Extensions.Logging.ILogger<AzurePulumiProvisioningDispatcher>? logger = null) =>
         new(
             provisioning,
             Options.Create(options),
             Options.Create(new ProvisioningOptions { WorkerEnabled = workerEnabled }),
-            new StubInfrastructureProvider(providerId));
+            new StubInfrastructureProvider(providerId),
+            logger);
 
     private static AzurePulumiDispatchOptions CompleteOptions() => new()
     {
@@ -241,6 +256,71 @@ public sealed class AzurePulumiProvisioningDispatcherTests
         {
             Requests.Add(request);
             return Task.FromResult(new ProvisioningEnqueueResult(Guid.NewGuid(), ProvisioningOperationState.Queued, false, false));
+        }
+    }
+
+    private sealed class FlakyThenSucceedProvisioningService : IProvisioningService
+    {
+        public int Attempts { get; private set; }
+
+        public Task<ProvisioningEnqueueResult> PreviewAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            Enqueue();
+        public Task<ProvisioningEnqueueResult> ProvisionAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            Enqueue();
+        public Task<ProvisioningEnqueueResult> UpdateAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            Enqueue();
+        public Task<ProvisioningEnqueueResult> RefreshAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            Enqueue();
+        public Task<ProvisioningEnqueueResult> CancelAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            Enqueue();
+        public Task<ProvisioningEnqueueResult> DestroyAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            Enqueue();
+        public Task<ProvisioningOperation?> GetOperationAsync(Guid operationId, CancellationToken cancellationToken = default) =>
+            Task.FromResult<ProvisioningOperation?>(null);
+        public Task<IReadOnlyList<ProvisioningEvent>> ListEventsAsync(Guid operationId, CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<ProvisioningEvent>>([]);
+        public async IAsyncEnumerable<ProvisioningEvent> WatchAsync(
+            Guid operationId,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await Task.CompletedTask;
+            yield break;
+        }
+
+        private Task<ProvisioningEnqueueResult> Enqueue()
+        {
+            Attempts++;
+            if (Attempts == 1)
+                throw new InvalidOperationException("enqueue failed");
+            return Task.FromResult(new ProvisioningEnqueueResult(Guid.NewGuid(), ProvisioningOperationState.Queued, false, true));
+        }
+    }
+
+    private sealed class RecordingLogger : Microsoft.Extensions.Logging.ILogger<AzurePulumiProvisioningDispatcher>
+    {
+        public List<string> Messages { get; } = [];
+
+        public IDisposable BeginScope<TState>(TState state) where TState : notnull => NullScope.Instance;
+
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            Microsoft.Extensions.Logging.LogLevel logLevel,
+            Microsoft.Extensions.Logging.EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            Messages.Add(formatter(state, exception));
+        }
+
+        private sealed class NullScope : IDisposable
+        {
+            public static readonly NullScope Instance = new();
+            public void Dispose()
+            {
+            }
         }
     }
 

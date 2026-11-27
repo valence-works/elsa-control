@@ -215,6 +215,12 @@ public sealed class LocalPulumiAutomationClient(
             var text = pair.Value.Value?.ToString();
             if (string.IsNullOrWhiteSpace(text))
                 continue;
+            if (IsControlHandoffOutput(pair.Key, text))
+            {
+                result[pair.Key] = text;
+                continue;
+            }
+
             if (ElsaControl.Provisioning.Core.ProvisioningEventSanitizer.ContainsSensitiveToken(pair.Key)
                 || ElsaControl.Provisioning.Core.ProvisioningEventSanitizer.ContainsSensitiveToken(text))
             {
@@ -225,5 +231,34 @@ public sealed class LocalPulumiAutomationClient(
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Control-owned handoff keys. The engine origin is admitted only as an
+    /// absolute HTTPS origin; revision names and ARM resource IDs stay in the
+    /// module run so Azure health/promotion can reuse the Bicep path.
+    /// </summary>
+    private static bool IsControlHandoffOutput(string key, string text)
+    {
+        if (string.Equals(key, PulumiStackOutputs.EngineEndpoint, StringComparison.Ordinal))
+        {
+            return Uri.TryCreate(text, UriKind.Absolute, out var uri)
+                   && uri.Scheme == Uri.UriSchemeHttps
+                   && string.IsNullOrEmpty(uri.UserInfo)
+                   && uri.AbsolutePath is "" or "/"
+                   && string.IsNullOrEmpty(uri.Query)
+                   && string.IsNullOrEmpty(uri.Fragment);
+        }
+
+        if (string.Equals(key, PulumiStackOutputs.WorkloadRevisionName, StringComparison.Ordinal)
+            || string.Equals(key, PulumiStackOutputs.OwnedResourceGroupName, StringComparison.Ordinal))
+        {
+            return text.Length is > 0 and <= 128
+                   && !ElsaControl.Provisioning.Core.ProvisioningEventSanitizer.ContainsSensitiveToken(text);
+        }
+
+        return string.Equals(key, PulumiStackOutputs.WorkloadResourceId, StringComparison.Ordinal)
+               && text.Length is > 0 and <= 1024
+               && !text.Contains("..", StringComparison.Ordinal);
     }
 }

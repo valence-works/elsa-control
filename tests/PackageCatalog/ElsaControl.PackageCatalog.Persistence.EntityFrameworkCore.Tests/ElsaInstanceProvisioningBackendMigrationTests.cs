@@ -1,3 +1,4 @@
+using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -41,7 +42,35 @@ public sealed class ElsaInstanceProvisioningBackendMigrationTests : IAsyncLifeti
     [Fact]
     public async Task Sqlite_existing_rows_default_to_bicep()
     {
-        await _sqlite.Database.MigrateAsync();
+        await _sqlite.Database.MigrateAsync(PreviousSqliteMigration);
+        var workspace = new Workspace { Name = "Legacy backend workspace" };
+        _sqlite.Workspaces.Add(workspace);
+        await _sqlite.SaveChangesAsync();
+        var instance = ElsaInstancePersistenceTests.NewInstance(workspace.OrganizationId, workspace.Id);
+        await _sqlite.Database.ExecuteSqlInterpolatedAsync($"""
+            INSERT INTO ElsaInstances
+                (Id, OrganizationId, WorkspaceId, Name, Slug, DistributionId,
+                 ReleaseLine, Channel, PatchUpdates, MinorUpdates, MajorMigrations,
+                 TopologyId, FeatureOverridesJson, TargetMode, RequiresProvisioningContext,
+                 RegionCode, IsolationProfile, CapacityProfile, NetworkOutcome, DomainOutcome,
+                 DesiredLifecycle, ObservedLifecycle, Health, Version, CreatedAt, UpdatedAt,
+                 CurrentDeploymentManagedHandoff, CurrentDeploymentStudioGrants)
+            VALUES
+                ({instance.Id}, {instance.OrganizationId}, {instance.WorkspaceId}, {instance.Name}, {instance.Slug}, {instance.DistributionId},
+                 {instance.ReleaseLine}, {instance.Channel}, {instance.PatchUpdates}, {instance.MinorUpdates}, {instance.MajorMigrations},
+                 {instance.TopologyId}, {instance.FeatureOverridesJson}, {instance.TargetMode}, {false},
+                 {instance.RegionCode}, {instance.IsolationProfile}, {instance.CapacityProfile}, {instance.NetworkOutcome}, {instance.DomainOutcome},
+                 {instance.DesiredLifecycle.ToString()}, {instance.ObservedLifecycle.ToString()}, {instance.Health.ToString()},
+                 {instance.Version}, {instance.CreatedAt.UtcTicks}, {instance.UpdatedAt.UtcTicks},
+                 {false}, {false})
+            """);
+
+        await _sqlite.Database.MigrateAsync(SqliteMigration);
+        var backend = await _sqlite.Database
+            .SqlQueryRaw<string>("SELECT ProvisioningBackend AS Value FROM ElsaInstances")
+            .SingleAsync();
+        Assert.Equal(ElsaControl.Deployment.Azure.ElsaInstanceProvisioningBackendText.Bicep, backend);
+
         var defaultValue = await _sqlite.Database
             .SqlQueryRaw<string>("SELECT dflt_value AS Value FROM pragma_table_info('ElsaInstances') WHERE name = 'ProvisioningBackend'")
             .SingleAsync();

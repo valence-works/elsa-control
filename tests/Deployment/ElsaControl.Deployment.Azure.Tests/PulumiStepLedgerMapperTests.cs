@@ -128,22 +128,22 @@ public sealed class PulumiStepLedgerMapperTests
     }
 
     [Fact]
-    public void Operation_succeeded_finalizes_traffic_promoted_as_healthy()
+    public void Operation_succeeded_stops_at_workload_ready_until_health_runs()
     {
         var mapped = PulumiStepLedgerMapper.TryMap(
             Event(ProvisioningEventKind.OperationSucceeded, ProvisioningCapability.ContainerRuntime, "Operation succeeded."),
             AzureProviderOperationPhase.WorkloadReady);
         Assert.NotNull(mapped);
-        Assert.True(mapped.Finalize);
-        Assert.Equal(AzureProviderOperationStatus.Succeeded, mapped.Status);
-        Assert.Equal(AzureProviderOperationPhase.TrafficPromoted, mapped.Phase);
-        Assert.Equal(PulumiStepLedgerMapper.OperationSucceededCode, mapped.Code);
-        Assert.Equal(AzureProviderHealth.Healthy, mapped.Health);
+        Assert.False(mapped.Finalize);
+        Assert.Equal(AzureProviderOperationStatus.Running, mapped.Status);
+        Assert.Equal(AzureProviderOperationPhase.WorkloadReady, mapped.Phase);
+        Assert.Equal(PulumiStepLedgerMapper.ApplyCompletedCode, mapped.Code);
+        Assert.Equal(AzureProviderHealth.Unknown, mapped.Health);
         Assert.True(PulumiStepLedgerMapper.IsCustomerSafe(mapped));
     }
 
     [Fact]
-    public void A_successful_update_stream_finalizes_ready()
+    public void A_successful_update_stream_stops_at_workload_ready()
     {
         var phase = AzureProviderOperationPhase.Planned;
         PulumiLedgerCheckpoint? last = null;
@@ -162,10 +162,10 @@ public sealed class PulumiStepLedgerMapperTests
         }
 
         Assert.NotNull(last);
-        Assert.True(last.Finalize);
-        Assert.Equal(AzureProviderOperationStatus.Succeeded, last.Status);
-        Assert.Equal(AzureProviderOperationPhase.TrafficPromoted, last.Phase);
-        Assert.Equal(PulumiStepLedgerMapper.OperationSucceededCode, last.Code);
+        Assert.False(last.Finalize);
+        Assert.Equal(AzureProviderOperationStatus.Running, last.Status);
+        Assert.Equal(AzureProviderOperationPhase.WorkloadReady, last.Phase);
+        Assert.Equal(PulumiStepLedgerMapper.ApplyCompletedCode, last.Code);
     }
 
     [Fact]
@@ -202,10 +202,10 @@ public sealed class PulumiStepLedgerMapperTests
         Assert.True(PulumiStepLedgerMapper.IsResourceGroupAbsentReceipt(
             Event(
                 ProvisioningEventKind.ResourceSucceeded,
-                "resource-group",
+                PulumiStepLedgerMapper.OwnedResourceGroupAbsentKind,
                 PulumiStepLedgerMapper.ResourceGroupAbsentMessage)));
         Assert.False(PulumiStepLedgerMapper.IsResourceGroupAbsentReceipt(
-            Event(ProvisioningEventKind.ResourceSucceeded, "resource-group", "Resource succeeded.")));
+            Event(ProvisioningEventKind.ResourceSucceeded, "resource-group", PulumiStepLedgerMapper.ResourceGroupAbsentMessage)));
         var checkpoint = PulumiStepLedgerMapper.ResourceGroupAbsent();
         Assert.True(checkpoint.ReplaceResources);
         Assert.Equal(new AzureProviderResourceReferences(), checkpoint.Resources);

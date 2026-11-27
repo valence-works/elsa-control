@@ -1,3 +1,4 @@
+using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.Provisioning.Abstractions;
 using ElsaControl.Provisioning.Core;
@@ -27,7 +28,13 @@ public static class PulumiStepLedgerMapper
     public const string TrafficRoutedCode = "traffic.routed";
     public const string OperationSucceededCode = "azure.operation.succeeded";
     public const string CleanupSucceededCode = "azure.cleanup.succeeded";
+    public const string EngineEndpointOutputKey = "engineEndpoint";
+    public const string WorkloadRevisionNameOutputKey = "workloadRevisionName";
+    public const string WorkloadResourceIdOutputKey = "workloadResourceId";
+    public const string OwnedResourceGroupNameOutputKey = "ownedResourceGroupName";
+    public const string OwnedResourceGroupAbsentKind = "owned-resource-group-absent";
     public const string ResourceGroupAbsentMessage = "Owned resource group is absent.";
+    public const string WorkloadOutputsUnavailableMessage = "Workload outputs are unavailable.";
 
     public const string FoundationPreparingMessage = "Foundation is preparing.";
     public const string FoundationReadyMessage = "Foundation is ready.";
@@ -77,15 +84,14 @@ public static class PulumiStepLedgerMapper
 
         if (value.Kind == ProvisioningEventKind.OperationSucceeded)
         {
-            var phase = Max(currentPhase, AzureProviderOperationPhase.TrafficPromoted);
+            var phase = Max(currentPhase, AzureProviderOperationPhase.WorkloadReady);
             return new PulumiLedgerCheckpoint(
                 phase,
-                AzureProviderRunnerStep.Promotion,
-                AzureProviderOperationStatus.Succeeded,
-                OperationSucceededCode,
-                OperationSucceededMessage,
-                Finalize: true,
-                AzureProviderHealth.Healthy);
+                AzureProviderRunnerStep.Workload,
+                AzureProviderOperationStatus.Running,
+                ApplyCompletedCode,
+                ApplyCompletedMessage,
+                Finalize: false);
         }
 
         if (value.Kind == ProvisioningEventKind.OperationCancelled)
@@ -127,8 +133,7 @@ public static class PulumiStepLedgerMapper
     {
         ArgumentNullException.ThrowIfNull(value);
         return value.Kind == ProvisioningEventKind.ResourceSucceeded
-               && value.ResourceKind == "resource-group"
-               && string.Equals(value.Message, ResourceGroupAbsentMessage, StringComparison.Ordinal);
+               && string.Equals(value.ResourceKind, OwnedResourceGroupAbsentKind, StringComparison.Ordinal);
     }
 
     public static PulumiLedgerCheckpoint ResourceGroupAbsent() =>
@@ -152,6 +157,46 @@ public static class PulumiStepLedgerMapper
             Finalize: true,
             ReplaceResources: true,
             Resources: new AzureProviderResourceReferences());
+
+    public static PulumiLedgerCheckpoint WithStackOutputs(
+        PulumiLedgerCheckpoint checkpoint,
+        IReadOnlyDictionary<string, string>? outputs)
+    {
+        ArgumentNullException.ThrowIfNull(checkpoint);
+        if (!TryReadEngineEndpoint(outputs, out var endpoint))
+        {
+            return checkpoint with
+            {
+                Status = AzureProviderOperationStatus.RecoveryRequired,
+                Code = ManagedElsaReasonCodeCatalog.AzureRecoveryWorkloadOutputsUnavailable,
+                Message = WorkloadOutputsUnavailableMessage,
+                Finalize = true,
+                Health = AzureProviderHealth.Unknown,
+                Endpoint = null
+            };
+        }
+
+        return checkpoint with
+        {
+            Endpoint = endpoint,
+            Resources = new AzureProviderResourceReferences(
+                ResourceGroupName: ReadOutput(outputs, OwnedResourceGroupNameOutputKey),
+                WorkloadRevisionName: ReadOutput(outputs, WorkloadRevisionNameOutputKey),
+                WorkloadResourceId: ReadOutput(outputs, WorkloadResourceIdOutputKey))
+        };
+    }
+
+    public static bool TryReadEngineEndpoint(
+        IReadOnlyDictionary<string, string>? outputs,
+        out string endpoint)
+    {
+        endpoint = "";
+        var value = ReadOutput(outputs, EngineEndpointOutputKey);
+        if (value is null || !ElsaManagedEndpointOrigin.TryCreate(value, out var origin))
+            return false;
+        endpoint = origin.Value;
+        return true;
+    }
 
     public static PulumiLedgerCheckpoint HealthVerified() =>
         new(
@@ -339,6 +384,13 @@ public static class PulumiStepLedgerMapper
         || value.Contains("secret", StringComparison.OrdinalIgnoreCase)
         || value.Contains("connectionstring", StringComparison.OrdinalIgnoreCase)
         || value.Contains("stack trace", StringComparison.OrdinalIgnoreCase);
+
+    private static string? ReadOutput(IReadOnlyDictionary<string, string>? outputs, string key)
+    {
+        if (outputs is null || !outputs.TryGetValue(key, out var value) || string.IsNullOrWhiteSpace(value))
+            return null;
+        return value.Trim();
+    }
 
     private static bool TryReadGuid(
         IReadOnlyDictionary<string, string> stackConfig,

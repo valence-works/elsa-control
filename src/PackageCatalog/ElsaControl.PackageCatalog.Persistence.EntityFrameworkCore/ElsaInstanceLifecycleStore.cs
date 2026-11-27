@@ -74,7 +74,9 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             .Select(x => x.ProvisioningBackend)
             .SingleOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false);
-        return ElsaInstanceProvisioningBackendText.Parse(value);
+        return ElsaInstanceProvisioningBackendText.TryParse(value, out var backend)
+            ? backend
+            : ElsaInstanceProvisioningBackend.Unknown;
     }
 
     public async Task<ElsaInstanceProviderReconciliationTarget?> GetTargetAsync(

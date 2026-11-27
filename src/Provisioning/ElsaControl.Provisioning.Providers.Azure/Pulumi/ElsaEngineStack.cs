@@ -390,10 +390,17 @@ public sealed class ElsaEngineStack : Stack
                 runtimeUser
             }
         });
-        _ = app;
         _ = database;
 
         EngineName = Output.Create(values.GetValueOrDefault("engineName") ?? $"engine-{parsed:N}");
+        EngineEndpoint = app.LatestRevisionFqdn.Apply(fqdn =>
+            string.IsNullOrWhiteSpace(fqdn)
+                ? ""
+                : fqdn.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+                    ? fqdn.Trim().TrimEnd('/')
+                    : $"https://{fqdn.Trim().TrimEnd('/')}");
+        WorkloadRevisionName = app.LatestRevisionName.Apply(name => name ?? "");
+        WorkloadResourceId = app.Id.Apply(id => id ?? "");
         PlatformEnvironmentKind = Output.Create("dedicated-container-environment");
         EndpointKind = Output.Create(Provisioning.Abstractions.ProvisioningCapability.Ingress);
         DatabaseKind = Output.Create(Provisioning.Abstractions.ProvisioningCapability.ManagedSql);
@@ -411,6 +418,12 @@ public sealed class ElsaEngineStack : Stack
     }
 
     [Output] public Output<string> EngineName { get; set; }
+
+    [Output] public Output<string> EngineEndpoint { get; set; }
+
+    [Output] public Output<string> WorkloadRevisionName { get; set; }
+
+    [Output] public Output<string> WorkloadResourceId { get; set; }
 
     [Output] public Output<string> PlatformEnvironmentKind { get; set; }
 

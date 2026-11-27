@@ -47,10 +47,18 @@ public sealed class AzureProviderOperationStepLedger : IProvisioningStepLedger
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
+    public Task<ProvisioningStepLedgerResult> TryWriteAsync(
+        ProvisioningOperation operation,
+        ProvisioningRequest? request,
+        IReadOnlyList<ProvisioningEvent> events,
+        CancellationToken cancellationToken = default) =>
+        TryWriteAsync(operation, request, events, outputs: null, cancellationToken);
+
     public async Task<ProvisioningStepLedgerResult> TryWriteAsync(
         ProvisioningOperation operation,
         ProvisioningRequest? request,
         IReadOnlyList<ProvisioningEvent> events,
+        IReadOnlyDictionary<string, string>? outputs,
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -76,7 +84,7 @@ public sealed class AzureProviderOperationStepLedger : IProvisioningStepLedger
                 if (current is null)
                     return Stale();
 
-                var checkpoint = MapCheckpoint(current, value);
+                var checkpoint = MapCheckpoint(current, value, outputs);
                 if (checkpoint is null || !PulumiStepLedgerMapper.IsCustomerSafe(checkpoint))
                     continue;
 
@@ -196,6 +204,26 @@ public sealed class AzureProviderOperationStepLedger : IProvisioningStepLedger
                 if (saved is null)
                     return Stale();
                 written = ProvisioningStepLedgerResult.Written;
+                if (value.Kind == ProvisioningEventKind.OperationSucceeded
+                    && saved.Action == AzureProviderOperationAction.Reconcile
+                    && saved.Phase == AzureProviderOperationPhase.WorkloadReady
+                    && saved.Status == AzureProviderOperationStatus.Running
+                    && PulumiStepLedgerMapper.TryReadEngineEndpoint(outputs, out _))
+                {
+                    var queued = await store.ReleaseToQueueAsync(
+                            workspaceId,
+                            providerOperationId,
+                            lease.Token,
+                            now,
+                            saved.Version,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    if (queued is null)
+                        return Stale();
+                    Forget(operation.Id);
+                    continue;
+                }
+
                 if (value.Kind is ProvisioningEventKind.OperationSucceeded
                     or ProvisioningEventKind.OperationFailed
                     or ProvisioningEventKind.OperationCancelled)
@@ -305,7 +333,7 @@ public sealed class AzureProviderOperationStepLedger : IProvisioningStepLedger
         {
             var resources = checkpoint.ReplaceResources
                 ? checkpoint.Resources ?? new AzureProviderResourceReferences()
-                : current.Resources;
+                : MergeResources(current.Resources, checkpoint.Resources);
             return await store.CheckpointAsync(
                     workspaceId,
                     providerOperationId,
@@ -333,10 +361,16 @@ public sealed class AzureProviderOperationStepLedger : IProvisioningStepLedger
 
     private static PulumiLedgerCheckpoint? MapCheckpoint(
         AzureProviderOperation current,
-        ProvisioningEvent value)
+        ProvisioningEvent value,
+        IReadOnlyDictionary<string, string>? outputs)
     {
         if (current.Action != AzureProviderOperationAction.Delete)
-            return PulumiStepLedgerMapper.TryMap(value, current.Phase);
+        {
+            var mapped = PulumiStepLedgerMapper.TryMap(value, current.Phase);
+            return value.Kind == ProvisioningEventKind.OperationSucceeded && mapped is not null
+                ? PulumiStepLedgerMapper.WithStackOutputs(mapped, outputs)
+                : mapped;
+        }
 
         if (PulumiStepLedgerMapper.IsResourceGroupAbsentReceipt(value))
             return PulumiStepLedgerMapper.ResourceGroupAbsent();
@@ -422,6 +456,32 @@ public sealed class AzureProviderOperationStepLedger : IProvisioningStepLedger
             if (key.OperationId == provisioningOperationId)
                 _seen.TryRemove(key, out _);
         }
+    }
+
+    private static AzureProviderResourceReferences MergeResources(
+        AzureProviderResourceReferences current,
+        AzureProviderResourceReferences? incoming)
+    {
+        if (incoming is null)
+            return current;
+        return new(
+            incoming.ResourceGroupName ?? current.ResourceGroupName,
+            incoming.FoundationDeploymentId ?? current.FoundationDeploymentId,
+            incoming.WorkloadDeploymentId ?? current.WorkloadDeploymentId,
+            incoming.WorkloadResourceId ?? current.WorkloadResourceId,
+            incoming.WorkloadRevisionName ?? current.WorkloadRevisionName,
+            incoming.StableTrafficRevisionName ?? current.StableTrafficRevisionName,
+            incoming.WorkloadIdentityResourceId ?? current.WorkloadIdentityResourceId,
+            incoming.WorkloadIdentityClientId ?? current.WorkloadIdentityClientId,
+            incoming.WorkloadIdentityPrincipalId ?? current.WorkloadIdentityPrincipalId,
+            incoming.KeyVaultResourceId ?? current.KeyVaultResourceId,
+            incoming.KeyVaultUri ?? current.KeyVaultUri,
+            incoming.SqlServerResourceId ?? current.SqlServerResourceId,
+            incoming.SqlServerFqdn ?? current.SqlServerFqdn,
+            incoming.ContainerAppsEnvironmentResourceId ?? current.ContainerAppsEnvironmentResourceId,
+            incoming.RegistryResourceId ?? current.RegistryResourceId,
+            incoming.AcrPullDeploymentId ?? current.AcrPullDeploymentId,
+            incoming.AcrPullRoleAssignmentId ?? current.AcrPullRoleAssignmentId);
     }
 
     internal static string LeaseTokenFor(Guid provisioningOperationId) =>

@@ -13,6 +13,14 @@ public interface IProvisioningStepLedger
         IReadOnlyList<ProvisioningEvent> events,
         CancellationToken cancellationToken = default);
 
+    Task<ProvisioningStepLedgerResult> TryWriteAsync(
+        ProvisioningOperation operation,
+        ProvisioningRequest? request,
+        IReadOnlyList<ProvisioningEvent> events,
+        IReadOnlyDictionary<string, string>? outputs,
+        CancellationToken cancellationToken = default) =>
+        TryWriteAsync(operation, request, events, cancellationToken);
+
     Task HeartbeatAsync(
         ProvisioningOperation operation,
         ProvisioningRequest? request,

@@ -1,5 +1,4 @@
 using ElsaControl.Deployment.Core.Instances;
-using ElsaControl.Provisioning.Core;
 
 namespace ElsaControl.Deployment.Azure;
 
@@ -99,9 +98,28 @@ public sealed class AzureProviderOperationWorker(
                 continue;
             }
 
-            if (await IsPulumiOwnedAsync(operation, cancellationToken).ConfigureAwait(false))
+            var backend = await ReadBackendAsync(operation, cancellationToken).ConfigureAwait(false);
+            if (backend == ElsaInstanceProvisioningBackend.Unknown)
             {
-                await DispatchPulumiAsync(operation, plan, now, cancellationToken).ConfigureAwait(false);
+                await FailClosedAsync(operation, now, cancellationToken).ConfigureAwait(false);
+                processed++;
+                continue;
+            }
+
+            if (backend == ElsaInstanceProvisioningBackend.Pulumi)
+            {
+                if (operation.Action != AzureProviderOperationAction.Delete
+                    && AzureProviderOperationPhaseOrdering.Compare(
+                        operation.Phase,
+                        AzureProviderOperationPhase.WorkloadReady) >= 0)
+                {
+                    await executor.ExecuteAsync(request, cancellationToken);
+                }
+                else
+                {
+                    await DispatchPulumiAsync(operation, plan, now, cancellationToken).ConfigureAwait(false);
+                }
+
                 processed++;
                 continue;
             }
@@ -113,15 +131,14 @@ public sealed class AzureProviderOperationWorker(
         return processed;
     }
 
-    private async Task<bool> IsPulumiOwnedAsync(
+    private async Task<ElsaInstanceProvisioningBackend> ReadBackendAsync(
         AzureProviderOperation operation,
         CancellationToken cancellationToken)
     {
         if (backends is null || operation.InstanceId is not { } instanceId || instanceId == Guid.Empty)
-            return false;
-        var backend = await backends.GetBackendAsync(operation.WorkspaceId, instanceId, cancellationToken)
+            return ElsaInstanceProvisioningBackend.Bicep;
+        return await backends.GetBackendAsync(operation.WorkspaceId, instanceId, cancellationToken)
             .ConfigureAwait(false);
-        return backend == ElsaInstanceProvisioningBackend.Pulumi;
     }
 
     private async Task DispatchPulumiAsync(
@@ -170,26 +187,8 @@ public sealed class AzureProviderOperationWorker(
         if (pulumi is not null)
             dispatched = await pulumi.DispatchAsync(operation, plan, cancellationToken).ConfigureAwait(false);
 
-        if (dispatched is { Dispatched: true, ProvisioningOperationId: { } provisioningId })
-        {
-            var claimed = await store.ClaimAsync(
-                    operation.WorkspaceId,
-                    operation.Id,
-                    AzureProviderOperationStepLedger.WorkerId,
-                    AzureProviderOperationStepLedger.LeaseTokenFor(provisioningId),
-                    TimeSpan.FromSeconds(ProvisioningReplicaIdentity.DefaultLeaseSeconds),
-                    now,
-                    operation.Version,
-                    cancellationToken)
-                .ConfigureAwait(false);
-            if (claimed is null)
-            {
-                // Already claimed by the ledger or another replica. The enqueue
-                // is idempotent; leaving the row as-is is the fail-closed path.
-            }
-
+        if (dispatched is { Dispatched: true })
             return;
-        }
 
         await FailClosedAsync(operation, now, cancellationToken).ConfigureAwait(false);
     }

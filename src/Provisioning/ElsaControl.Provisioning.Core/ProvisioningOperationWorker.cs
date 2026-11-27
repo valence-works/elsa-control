@@ -109,6 +109,7 @@ public sealed class ProvisioningOperationWorker(
                     continue;
 
                 liveEvents?.SetFailureCode(claimed.Id, result.FailureCode);
+                liveEvents?.SetOutputs(claimed.Id, result.Outputs);
                 await PublishAsync(claimed.Id, result.Events, cancellationToken).ConfigureAwait(false);
                 var terminal = TerminalState(claimed, result, linked, cancellationToken);
                 var needsCancel = terminal != ProvisioningOperationState.Succeeded;
