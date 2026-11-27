@@ -219,7 +219,9 @@ check is not widened to cover them; this replaces the #1039 r2 hand-off to Bicep
 - *Traffic:* the stack is the only owner of Container Apps traffic (latest revision for
   now), with no CLI weight changes.
 - *Health:* a Pulumi-side HTTP probe of `{endpoint}/health`, with the endpoint taken
-  from the stack outputs (`AzurePulumiReadinessVerifier`). It uses the Bicep Promotion
+  from the stack's `EngineEndpoint` output (`AzurePulumiReadinessVerifier`). That output
+  is the stable Container App ingress host, never a per-revision host such as
+  `LatestRevisionFqdn`, so the ledger and Hub keep one address across revisions. It uses the Bicep Promotion
   curl contract (`--fail`, `--retry 30 --retry-delay 5 --max-time 10`,
   `AzureBicepProviderRunner.ExecuteHealthProbeAsync`) inside `ObservationAttempts` (60)
   attempts `ObservationDelay` (5 s) apart (`AzureProviderRunnerOptions`). A runtime
