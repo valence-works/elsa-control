@@ -218,13 +218,18 @@ check is not widened to cover them; this replaces the #1039 r2 hand-off to Bicep
 
 - *Traffic:* the stack is the only owner of Container Apps traffic (latest revision for
   now), with no CLI weight changes.
-- *Health:* a Pulumi-side probe of the endpoint from the stack outputs, using the Bicep
-  provisioning Health contract and thresholds: the candidate revision's
-  `properties.healthState` must read `Healthy` within `ObservationAttempts` (60) polls
-  `ObservationDelay` (5 s) apart, failing as crash-loop or timeout
-  (`AzureBicepProviderRunner.RunHealthAsync`, `AzureProviderRunnerOptions`). The Promotion
-  `/health` probe and the Ready monitor (`ElsaInstanceHealthMonitor`) have other bounds
-  and are not the contract.
+- *Health:* a Pulumi-side HTTP probe of `{endpoint}/health`, with the endpoint taken
+  from the stack's `EngineEndpoint` output (`AzurePulumiReadinessVerifier`). That output
+  is the stable Container App ingress host, never a per-revision host such as
+  `LatestRevisionFqdn`, so the ledger and Hub keep one address across revisions. It uses the Bicep Promotion
+  curl contract (`--fail`, `--retry 30 --retry-delay 5 --max-time 10`,
+  `AzureBicepProviderRunner.ExecuteHealthProbeAsync`) inside `ObservationAttempts` (60)
+  attempts `ObservationDelay` (5 s) apart (`AzureProviderRunnerOptions`). A runtime
+  report of `Healthy` or `Degraded` passes; `Unhealthy` or an unknown report keeps
+  polling, and no pass within the budget fails with `provisioning.timeout.health`. The
+  Container App `properties.healthState` check in the Bicep Health step
+  (`RunHealthAsync`) and the Ready monitor (`ElsaInstanceHealthMonitor`) are not the
+  contract.
 - *Promotion:* a read-only check that traffic is on the latest ready revision.
 - *Allowed operations until #1046:* Create; Retry of a Create whose instance has never
   recorded Ready (`HasReachedReadyAsync` is false); and Delete. Every other lifecycle
