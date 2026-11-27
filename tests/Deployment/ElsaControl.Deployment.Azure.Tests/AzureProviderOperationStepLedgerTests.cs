@@ -418,9 +418,9 @@ public sealed class AzureProviderOperationStepLedgerTests
     private static IReadOnlyDictionary<string, string> StackOutputs() =>
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
-            [PulumiStepLedgerMapper.EngineEndpointOutputKey] = "https://runtime.example.test",
-            [PulumiStepLedgerMapper.WorkloadRevisionNameOutputKey] = "engine-app--candidate",
-            [PulumiStepLedgerMapper.OwnedResourceGroupNameOutputKey] = "rg-engine-test"
+            ["engineEndpoint"] = "https://runtime.example.test",
+            ["workloadRevisionName"] = "engine-app--candidate",
+            ["ownedResourceGroupName"] = "rg-engine-test"
         };
 
     private static AzureProviderOperation Operation() =>

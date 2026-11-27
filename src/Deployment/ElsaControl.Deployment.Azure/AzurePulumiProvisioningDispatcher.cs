@@ -51,7 +51,8 @@ public sealed class AzurePulumiProvisioningDispatcher(
         ArgumentNullException.ThrowIfNull(plan);
         if (!CanDispatch
             || operation.InstanceId is not { } instanceId
-            || instanceId == Guid.Empty)
+            || instanceId == Guid.Empty
+            || !AzurePulumiAllowedOperations.AllowsLifecycle(operation))
         {
             return new AzurePulumiDispatchResult(false);
         }

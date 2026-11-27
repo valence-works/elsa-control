@@ -15,6 +15,7 @@ internal static class ManagedElsaReasonLiteralScanner
         "provider.handoff.",
         "provider.reconciliation.",
         "provider.identity-binding",
+        "provider.pulumi.",
         "azure.deployment.",
         "azure.recovery.",
         "provisioning.timeout.",

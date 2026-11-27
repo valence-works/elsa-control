@@ -49,6 +49,9 @@ public sealed class ProvisioningStackNameTests
             ProvisioningEngineResourceGroup.Resolve(
                 ProvisioningStackName.ForEngine(instanceId),
                 new Dictionary<string, string>(StringComparer.Ordinal)));
+        Assert.Equal(
+            "ca-eng-aaaaaaaabbbbccccddddeeeeeeeeee"[..32],
+            ProvisioningEngineContainerApp.ForInstance(instanceId));
     }
 
     [Fact]

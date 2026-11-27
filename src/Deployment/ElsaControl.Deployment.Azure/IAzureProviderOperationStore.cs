@@ -64,6 +64,18 @@ public interface IAzureProviderOperationStore
         Guid instanceId,
         CancellationToken cancellationToken = default) =>
         Task.FromResult(true);
+
+    /// <summary>
+    /// True when this instance has ever reached Ready (a succeeded reconcile with
+    /// Healthy or Degraded health and a managed endpoint). Lightweight stores fail
+    /// closed by reporting Ready so Retry is rejected unless a store proves otherwise.
+    /// </summary>
+    Task<bool> HasReachedReadyAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult(true);
+
     /// <summary>
     /// Lists accepted, queued, and entitlement-held provider operations that are not currently
     /// leased. Recovery-required rows are durable but excluded from the automatic queue before

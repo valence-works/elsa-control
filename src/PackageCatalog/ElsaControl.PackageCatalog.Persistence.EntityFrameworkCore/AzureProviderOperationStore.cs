@@ -682,6 +682,26 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
             .AnyAsync(x => x.WorkspaceId == workspaceId && x.InstanceId == instanceId, cancellationToken);
     }
 
+    public async Task<bool> HasReachedReadyAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        CancellationToken cancellationToken = default)
+    {
+        if (workspaceId == Guid.Empty || instanceId == Guid.Empty)
+            return true;
+
+        var endpoints = await db.AzureProviderOperations.AsNoTracking()
+            .Where(x => x.WorkspaceId == workspaceId
+                        && x.InstanceId == instanceId
+                        && x.Action == AzureProviderOperationAction.Reconcile
+                        && x.Status == AzureProviderOperationStatus.Succeeded
+                        && (x.Health == AzureProviderHealth.Healthy || x.Health == AzureProviderHealth.Degraded)
+                        && x.Endpoint != null)
+            .Select(x => x.Endpoint)
+            .ToListAsync(cancellationToken);
+        return endpoints.Any(endpoint => ElsaManagedEndpointOrigin.TryCreate(endpoint, out _));
+    }
+
     async Task<AzureProviderResourceAssignment> IAzureProviderResourceAssignmentStore.CreateOrGetAsync(
         AzureProviderResourceAssignmentRequest request,
         DateTimeOffset now,

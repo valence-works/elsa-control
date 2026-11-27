@@ -8,6 +8,15 @@ namespace ElsaControl.Deployment.Azure.Tests;
 public sealed class PulumiStepLedgerMapperTests
 {
     [Fact]
+    public void Engine_handoff_output_keys_match_the_stack_contract()
+    {
+        Assert.Equal("engineEndpoint", PulumiStepLedgerMapper.EngineEndpointOutputKey);
+        Assert.Equal("workloadRevisionName", PulumiStepLedgerMapper.WorkloadRevisionNameOutputKey);
+        Assert.Equal("workloadResourceId", PulumiStepLedgerMapper.WorkloadResourceIdOutputKey);
+        Assert.Equal("ownedResourceGroupName", PulumiStepLedgerMapper.OwnedResourceGroupNameOutputKey);
+    }
+
+    [Fact]
     public void Foundation_then_runtime_advances_projector_stages_in_order()
     {
         var phase = AzureProviderOperationPhase.Planned;

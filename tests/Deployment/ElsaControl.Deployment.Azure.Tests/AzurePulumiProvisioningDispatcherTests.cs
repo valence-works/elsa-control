@@ -79,6 +79,33 @@ public sealed class AzurePulumiProvisioningDispatcherTests
         Assert.Equal(AzureWorkloadPlanProvisioningMapper.EngineStackName(operation.InstanceId!.Value), request.Target.StackName);
     }
 
+    [Theory]
+    [InlineData(ElsaInstanceOperationAction.Reconcile)]
+    [InlineData(ElsaInstanceOperationAction.UpdateIntent)]
+    [InlineData(ElsaInstanceOperationAction.Start)]
+    [InlineData(ElsaInstanceOperationAction.Stop)]
+    [InlineData(ElsaInstanceOperationAction.Restart)]
+    [InlineData(ElsaInstanceOperationAction.ApproveMinorUpgrade)]
+    [InlineData(ElsaInstanceOperationAction.Recover)]
+    public async Task Unsupported_lifecycle_action_does_not_enqueue(ElsaInstanceOperationAction action)
+    {
+        var provisioning = new RecordingProvisioningService();
+        var dispatcher = Dispatcher(provisioning, CompleteOptions());
+        var operation = Operation() with { LifecycleAction = action };
+        Assert.False((await dispatcher.DispatchAsync(operation, Plan())).Dispatched);
+        Assert.Empty(provisioning.Requests);
+    }
+
+    [Fact]
+    public async Task Retry_enqueues_provision_on_the_same_engine_stack()
+    {
+        var provisioning = new RecordingProvisioningService();
+        var dispatcher = Dispatcher(provisioning, CompleteOptions());
+        var operation = Operation() with { LifecycleAction = ElsaInstanceOperationAction.Retry };
+        Assert.True((await dispatcher.DispatchAsync(operation, Plan())).Dispatched);
+        Assert.Equal(ProvisioningCommand.Provision, Assert.Single(provisioning.Requests).Command);
+    }
+
     [Fact]
     public async Task Retry_reuses_the_engine_stack_name()
     {

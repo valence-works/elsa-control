@@ -417,35 +417,35 @@ public sealed class ElsaEngineStack : Stack
         OwnedResourceGroupName = resourceGroup.Name;
     }
 
-    [Output] public Output<string> EngineName { get; set; }
+    [Output("engineName")] public Output<string> EngineName { get; set; }
 
-    [Output] public Output<string> EngineEndpoint { get; set; }
+    [Output(PulumiStackOutputs.EngineEndpoint)] public Output<string> EngineEndpoint { get; set; }
 
-    [Output] public Output<string> WorkloadRevisionName { get; set; }
+    [Output(PulumiStackOutputs.WorkloadRevisionName)] public Output<string> WorkloadRevisionName { get; set; }
 
-    [Output] public Output<string> WorkloadResourceId { get; set; }
+    [Output(PulumiStackOutputs.WorkloadResourceId)] public Output<string> WorkloadResourceId { get; set; }
 
-    [Output] public Output<string> PlatformEnvironmentKind { get; set; }
+    [Output("platformEnvironmentKind")] public Output<string> PlatformEnvironmentKind { get; set; }
 
-    [Output] public Output<string> EndpointKind { get; set; }
+    [Output("endpointKind")] public Output<string> EndpointKind { get; set; }
 
-    [Output] public Output<string> DatabaseKind { get; set; }
+    [Output("databaseKind")] public Output<string> DatabaseKind { get; set; }
 
-    [Output] public Output<string> SecretsKind { get; set; }
+    [Output("secretsKind")] public Output<string> SecretsKind { get; set; }
 
-    [Output] public Output<string> RuntimeKind { get; set; }
+    [Output("runtimeKind")] public Output<string> RuntimeKind { get; set; }
 
-    [Output] public Output<string> IsolationKind { get; set; }
+    [Output("isolationKind")] public Output<string> IsolationKind { get; set; }
 
-    [Output] public Output<string> ImageIdentityKind { get; set; }
+    [Output("imageIdentityKind")] public Output<string> ImageIdentityKind { get; set; }
 
-    [Output] public Output<string> HandoffKind { get; set; }
+    [Output("handoffKind")] public Output<string> HandoffKind { get; set; }
 
-    [Output] public Output<string> PlanFingerprint { get; set; }
+    [Output("planFingerprint")] public Output<string> PlanFingerprint { get; set; }
 
-    [Output] public Output<string> OwnedResourceGroupKind { get; set; }
+    [Output("ownedResourceGroupKind")] public Output<string> OwnedResourceGroupKind { get; set; }
 
-    [Output] public Output<string> OwnedResourceGroupName { get; set; }
+    [Output(PulumiStackOutputs.OwnedResourceGroupName)] public Output<string> OwnedResourceGroupName { get; set; }
 
     private static Dictionary<string, string> ReadConfig(Config config)
     {
@@ -497,7 +497,7 @@ public sealed class ElsaEngineStack : Stack
         "sql-engine-" + instanceId.ToString("N")[..16];
 
     private static string AppName(Guid instanceId) =>
-        Truncate("ca-eng-" + instanceId.ToString("N"), 32);
+        ProvisioningEngineContainerApp.ForInstance(instanceId);
 
     private static string EnvironmentName(Guid instanceId) =>
         Truncate("aca-eng-" + instanceId.ToString("N"), 32);

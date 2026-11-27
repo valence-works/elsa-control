@@ -1,3 +1,4 @@
+using System.Reflection;
 using ElsaControl.Provisioning.Providers.Azure;
 using ElsaControl.Provisioning.Providers.Azure.Programs;
 using Pulumi;
@@ -15,6 +16,36 @@ namespace ElsaControl.Provisioning.Providers.Azure.Tests;
 [Collection(nameof(PulumiMockTests))]
 public sealed class ElsaEngineStackTests
 {
+    [Fact]
+    public void Engine_outputs_are_registered_under_camelCase_keys()
+    {
+        foreach (var property in typeof(ElsaEngineStack).GetProperties())
+        {
+            var output = property.GetCustomAttribute<OutputAttribute>();
+            if (output is null)
+                continue;
+            var expected = char.ToLowerInvariant(property.Name[0]) + property.Name[1..];
+            Assert.Equal(expected, output.Name);
+        }
+
+        Assert.Equal(
+            PulumiStackOutputs.EngineEndpoint,
+            typeof(ElsaEngineStack).GetProperty(nameof(ElsaEngineStack.EngineEndpoint))!
+                .GetCustomAttribute<OutputAttribute>()!.Name);
+        Assert.Equal(
+            PulumiStackOutputs.WorkloadRevisionName,
+            typeof(ElsaEngineStack).GetProperty(nameof(ElsaEngineStack.WorkloadRevisionName))!
+                .GetCustomAttribute<OutputAttribute>()!.Name);
+        Assert.Equal(
+            PulumiStackOutputs.WorkloadResourceId,
+            typeof(ElsaEngineStack).GetProperty(nameof(ElsaEngineStack.WorkloadResourceId))!
+                .GetCustomAttribute<OutputAttribute>()!.Name);
+        Assert.Equal(
+            PulumiStackOutputs.OwnedResourceGroupName,
+            typeof(ElsaEngineStack).GetProperty(nameof(ElsaEngineStack.OwnedResourceGroupName))!
+                .GetCustomAttribute<OutputAttribute>()!.Name);
+    }
+
     [Fact]
     public async Task Engine_stack_reads_platform_output_through_a_fully_qualified_stack_reference()
     {

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using ElsaControl.Deployment.Core.Instances;
 
 namespace ElsaControl.Deployment.Azure;
@@ -16,9 +17,11 @@ public sealed class AzureProviderOperationWorker(
     TimeProvider? timeProvider = null,
     IAzurePulumiProvisioningDispatcher? pulumi = null,
     IElsaInstanceProvisioningBackendStore? backends = null,
-    IElsaInstanceCommercialGate? commercialGate = null)
+    IElsaInstanceCommercialGate? commercialGate = null,
+    IAzurePulumiReadinessVerifier? readiness = null)
 {
     public const string DispatchWorkerId = "pulumi-dispatch";
+    private readonly ConcurrentDictionary<Guid, byte> _dispatchedPulumi = new();
 
     // Keep the executor-only construction seam available to hosts that predate the persisted
     // plan source; the default source still enforces the same admission checks.
@@ -108,12 +111,44 @@ public sealed class AzureProviderOperationWorker(
 
             if (backend == ElsaInstanceProvisioningBackend.Pulumi)
             {
+                var reachedReady = operation.InstanceId is { } instanceId && instanceId != Guid.Empty
+                    ? await store.HasReachedReadyAsync(operation.WorkspaceId, instanceId, cancellationToken)
+                        .ConfigureAwait(false)
+                    : true;
+                if (!AzurePulumiAllowedOperations.Allows(operation, reachedReady))
+                {
+                    await FailClosedAsync(
+                            operation,
+                            now,
+                            cancellationToken,
+                            ManagedElsaReasonCodeCatalog.ProviderPulumiOperationUnsupported)
+                        .ConfigureAwait(false);
+                    processed++;
+                    continue;
+                }
+
+                if (_dispatchedPulumi.ContainsKey(operation.Id)
+                    && AzureProviderOperationPhaseOrdering.Compare(
+                        operation.Phase,
+                        AzureProviderOperationPhase.WorkloadReady) < 0)
+                {
+                    processed++;
+                    continue;
+                }
+
                 if (operation.Action != AzureProviderOperationAction.Delete
                     && AzureProviderOperationPhaseOrdering.Compare(
                         operation.Phase,
                         AzureProviderOperationPhase.WorkloadReady) >= 0)
                 {
-                    await executor.ExecuteAsync(request, cancellationToken);
+                    if (readiness is null)
+                    {
+                        await FailClosedAsync(operation, now, cancellationToken).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        await readiness.VerifyAsync(operation, cancellationToken).ConfigureAwait(false);
+                    }
                 }
                 else
                 {
@@ -188,7 +223,10 @@ public sealed class AzureProviderOperationWorker(
             dispatched = await pulumi.DispatchAsync(operation, plan, cancellationToken).ConfigureAwait(false);
 
         if (dispatched is { Dispatched: true })
+        {
+            _dispatchedPulumi.TryAdd(operation.Id, 0);
             return;
+        }
 
         await FailClosedAsync(operation, now, cancellationToken).ConfigureAwait(false);
     }
@@ -196,14 +234,15 @@ public sealed class AzureProviderOperationWorker(
     private Task FailClosedAsync(
         AzureProviderOperation operation,
         DateTimeOffset now,
-        CancellationToken cancellationToken) =>
+        CancellationToken cancellationToken,
+        string? code = null) =>
         ParkAsync(
             operation,
             now,
             AzureProviderOperationStatus.Failed,
-            ManagedElsaReasonCodeCatalog.ProviderDispatchFailed,
+            code ?? ManagedElsaReasonCodeCatalog.ProviderDispatchFailed,
             cancellationToken,
-            stampFromPulumi: true);
+            stampFromPulumi: code is null);
 
     private async Task ParkAsync(
         AzureProviderOperation operation,
