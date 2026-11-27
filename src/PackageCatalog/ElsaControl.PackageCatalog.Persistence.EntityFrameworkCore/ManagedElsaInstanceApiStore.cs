@@ -261,6 +261,43 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
         return latest;
     }
 
+    public async Task<IReadOnlyDictionary<Guid, ElsaInstanceOperationSummary>> GetLastCompletedOperationsAsync(
+        Guid workspaceId,
+        IReadOnlyCollection<Guid> instanceIds,
+        CancellationToken cancellationToken = default,
+        Guid organizationId = default)
+    {
+        if (workspaceId == Guid.Empty || instanceIds.Count == 0)
+            return new Dictionary<Guid, ElsaInstanceOperationSummary>();
+
+        var ids = instanceIds.Where(id => id != Guid.Empty).Distinct().ToArray();
+        if (ids.Length == 0)
+            return new Dictionary<Guid, ElsaInstanceOperationSummary>();
+
+        var query = dbContext.ElsaInstanceOperations
+            .AsNoTracking()
+            .Where(x => x.WorkspaceId == workspaceId &&
+                        x.InstanceId != null &&
+                        ids.Contains(x.InstanceId.Value) &&
+                        x.CompletedAt != null);
+        if (organizationId != Guid.Empty)
+            query = query.Where(x => x.OrganizationId == organizationId);
+
+        // Newest completed row per instance is chosen in SQL so a list page
+        // does not materialize each instance's full completed history.
+        // Ordering matches ListOperationsAsync / SelectCustomerLastOperation.
+        var operations = await query
+            .GroupBy(x => x.InstanceId!.Value)
+            .Select(group => group
+                .OrderByDescending(x => x.AcceptedAt)
+                .ThenByDescending(x => x.CreatedAt)
+                .ThenByDescending(x => x.Id)
+                .First())
+            .ToListAsync(cancellationToken);
+
+        return operations.ToDictionary(x => x.InstanceId!.Value, MapOperation);
+    }
+
     public async Task<ElsaInstanceLifecycleTopologySnapshot?> GetLifecycleTopologyAsync(
         Guid workspaceId,
         Guid instanceId,

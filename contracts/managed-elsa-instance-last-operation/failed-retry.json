@@ -1,0 +1,7 @@
+{
+  "action": "Retry",
+  "state": "Failed",
+  "completedAt": "2026-11-27T12:00:00+00:00",
+  "failureCode": "managed.lifecycle.operation-failed",
+  "reasonCode": "provisioning.health.crash-loop"
+}

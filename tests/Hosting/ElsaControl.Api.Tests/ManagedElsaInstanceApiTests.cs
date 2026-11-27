@@ -1,6 +1,8 @@
+using System.Collections.Frozen;
 using System.Net;
 using System.Net.Http.Json;
 using System.Security.Claims;
+using System.Text.Json;
 using ElsaControl.Api.Admin.Workspaces;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -23,6 +25,11 @@ namespace ElsaControl.Api.Tests;
 
 public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInstanceApiTests.Fixture>
 {
+    private static readonly FrozenSet<string> LastOperationDtoProperties =
+        FrozenSet.Create(StringComparer.Ordinal, "action", "state", "completedAt", "failureCode");
+    private static readonly FrozenSet<string> LastOperationOptionalDtoProperties =
+        FrozenSet.Create(StringComparer.Ordinal, "reasonCode");
+
     private static readonly string[] SafeAuditJsonProperties =
     [
         "deploymentRunId", "diagnosticCode", "eventType", "id", "migrationId", "newState",
@@ -1390,6 +1397,117 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.Equal(created.Instance.UpdatedAt, detail.UpdatedAt);
         Assert.Equal(created.Instance.CreatedAt, listed.CreatedAt);
         Assert.Equal(created.Instance.UpdatedAt, listed.UpdatedAt);
+    }
+
+    [Fact]
+    public async Task List_last_operation_is_failed_after_create()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var client = app.CreateTrustedWorkspaceClient("list-last-op-create-owner");
+        var workspaceId = await client.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(client, workspaceId, "list-last-op-create");
+        await FailCreateOperationAsync(app, created.Operation.Id);
+        await MarkInstanceFailedAsync(app, created.Instance.InstanceId);
+
+        await AssertLastOperationAgreesAsync(
+            client, workspaceId, created.Instance.InstanceId,
+            ElsaInstanceOperationAction.Create, ElsaInstanceOperationState.Failed);
+    }
+
+    [Fact]
+    public async Task List_last_operation_is_failed_after_retry()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var client = app.CreateTrustedWorkspaceClient("list-last-op-retry-owner");
+        var workspaceId = await client.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(client, workspaceId, "list-last-op-retry");
+        await FailCreateOperationAsync(app, created.Operation.Id);
+        await MarkInstanceFailedAsync(app, created.Instance.InstanceId);
+        using var current = await client.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}");
+        using var retry = await SendOperationAsync(
+            client, workspaceId, created.Instance.InstanceId, current.Headers.ETag!.Tag!,
+            "list-last-op-retry", new(ElsaInstanceOperationAction.Retry));
+        Assert.Equal(HttpStatusCode.Accepted, retry.StatusCode);
+        var retryBody = await retry.Content.ReadControlJsonAsync<ManagedElsaInstanceAcceptedResponse>();
+        await FailCreateOperationAsync(app, retryBody!.Operation.Id);
+        await MarkInstanceFailedAsync(app, created.Instance.InstanceId);
+
+        await AssertLastOperationAgreesAsync(
+            client, workspaceId, created.Instance.InstanceId,
+            ElsaInstanceOperationAction.Retry, ElsaInstanceOperationState.Failed);
+    }
+
+    [Fact]
+    public async Task List_last_operation_is_failed_after_ready()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var client = app.CreateTrustedWorkspaceClient("list-last-op-ready-owner");
+        var workspaceId = await client.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateReadyInstanceAsync(app, client, workspaceId, "list-last-op-ready");
+        using var restart = await SendOperationAsync(
+            client, workspaceId, created.Instance.InstanceId, created.Instance.ETag,
+            "list-last-op-ready-restart", new(ElsaInstanceOperationAction.Restart));
+        Assert.Equal(HttpStatusCode.Accepted, restart.StatusCode);
+        var restarted = await restart.Content.ReadControlJsonAsync<ManagedElsaInstanceAcceptedResponse>();
+        await FailCreateOperationAsync(app, restarted!.Operation.Id);
+        await MarkInstanceFailedAsync(app, created.Instance.InstanceId);
+
+        var last = await AssertLastOperationAgreesAsync(
+            client, workspaceId, created.Instance.InstanceId,
+            ElsaInstanceOperationAction.Restart, ElsaInstanceOperationState.Failed);
+        Assert.NotEqual(ElsaInstanceOperationAction.Create, last!.Action);
+        Assert.NotEqual(ElsaInstanceOperationAction.Retry, last.Action);
+    }
+
+    [Fact]
+    public async Task List_last_operation_is_null_when_the_instance_has_no_completed_operation()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var client = app.CreateTrustedWorkspaceClient("list-last-op-none-owner");
+        var workspaceId = await client.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(client, workspaceId, "list-last-op-none");
+
+        var last = await AssertLastOperationAgreesAsync(
+            client, workspaceId, created.Instance.InstanceId, expectedAction: null, expectedState: null);
+        Assert.Null(last);
+        Assert.Null(created.Instance.LastOperation);
+    }
+
+    [Fact]
+    public void Canonical_projection_maps_last_operation_with_the_overview_shape()
+    {
+        var instanceId = Guid.NewGuid();
+        var instance = ElsaInstance.Hydrate(
+            instanceId, Guid.NewGuid(), Guid.NewGuid(), "Claims runtime", "claims-runtime",
+            Intent(), ElsaObservedLifecycle.Failed, ElsaInstanceHealth.Unreachable, 2);
+        var now = DateTimeOffset.Parse("2026-11-27T12:00:00Z");
+        var lastOperation = new ElsaInstanceOperationSummary(
+            Guid.Parse("40000000-0000-0000-0000-000000000002"),
+            instanceId,
+            ElsaInstanceOperationAction.Create,
+            ElsaInstanceOperationState.Failed,
+            1, 1, now, now, now, null, null, null,
+            "azure.step.failed",
+            ElsaObservedLifecycle.Failed,
+            ElsaInstanceHealth.Unreachable,
+            ReasonCode: ManagedElsaProvisioningFailureReason.AzureHealthCrashLoop);
+
+        var response = ManagedElsaInstanceEndpoints.ToResponse(
+            instance, canOpen: true, instance.WorkspaceId, lastOperation: lastOperation);
+        var expected = ManagedElsaInstanceOverviewProjection.ToLastOperation(lastOperation);
+
+        Assert.Equal(expected, response.LastOperation);
+        Assert.Equal(ElsaInstanceOperationAction.Create, response.LastOperation!.Action);
+        Assert.Equal(ElsaInstanceOperationState.Failed, response.LastOperation.State);
+        Assert.Equal(now, response.LastOperation.CompletedAt);
+        Assert.Equal(ManagedElsaReasonCodeCatalog.ProvisioningHealthCrashLoop, response.LastOperation.ReasonCode);
+        Assert.NotEqual(response.LastOperation.ReasonCode, response.LastOperation.FailureCode);
+        Assert.DoesNotContain("azure.step.failed", JsonSerializer.Serialize(response.LastOperation, ControlApiTestApplication.JsonOptions), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -4513,8 +4631,10 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
 
         Assert.Equal(ElsaObservedLifecycle.Unknown, storedUnknown.ObservedLifecycle);
         Assert.Equal("instance.unknown", storedUnknown.UnavailableReasonCode);
+        Assert.Null(storedUnknown.LastOperation);
         Assert.Equal(ElsaObservedLifecycle.RecoveryRequired, alreadyProjected.ObservedLifecycle);
         Assert.Equal("instance.recovery-required", alreadyProjected.UnavailableReasonCode);
+        Assert.Null(alreadyProjected.LastOperation);
         Assert.DoesNotContain("alerted", alreadyProjected.UnavailableReason, StringComparison.OrdinalIgnoreCase);
 
         await app.AddWorkspaceMemberAsync(workspaceId, "legacy-parked-topology-reader", WorkspaceRole.Reader);
@@ -5975,6 +6095,71 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
             $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}/delete-confirmations", null);
         var body = await confirmation.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
         return new(ElsaInstanceOperationAction.Delete, DeleteConfirmationId: body!.ConfirmationId);
+    }
+
+    private static async Task<ManagedElsaInstanceOverviewLastOperationResponse?> AssertLastOperationAgreesAsync(
+        HttpClient client,
+        Guid workspaceId,
+        Guid instanceId,
+        ElsaInstanceOperationAction? expectedAction,
+        ElsaInstanceOperationState? expectedState)
+    {
+        using var listResponse = await client.GetAsync($"/api/workspaces/{workspaceId:D}/instances");
+        var listJson = await listResponse.Content.ReadAsStringAsync();
+        var list = JsonSerializer.Deserialize<ManagedElsaInstanceListResponse>(
+            listJson, ControlApiTestApplication.JsonOptions);
+        var listed = Assert.Single(list!.Items, item => item.InstanceId == instanceId);
+
+        using var detailResponse = await client.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}");
+        var detailJson = await detailResponse.Content.ReadAsStringAsync();
+        var detail = JsonSerializer.Deserialize<ManagedElsaInstanceResponse>(
+            detailJson, ControlApiTestApplication.JsonOptions);
+
+        using var overviewResponse = await client.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}/overview");
+        var overviewJson = await overviewResponse.Content.ReadAsStringAsync();
+        var overview = JsonSerializer.Deserialize<ManagedElsaInstanceOverviewResponse>(
+            overviewJson, ControlApiTestApplication.JsonOptions);
+
+        Assert.Equal(HttpStatusCode.OK, listResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, detailResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, overviewResponse.StatusCode);
+        Assert.NotNull(detail);
+        Assert.NotNull(overview);
+        AssertLastOperationDtoShape(listJson, instanceId);
+        AssertLastOperationDtoShape(detailJson);
+        Assert.Equal(overview!.LastOperation, listed.LastOperation);
+        Assert.Equal(overview.LastOperation, detail!.LastOperation);
+        Assert.Equal(expectedAction, listed.LastOperation?.Action);
+        Assert.Equal(expectedState, listed.LastOperation?.State);
+        Assert.DoesNotContain("providerId", listJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("serializedPlan", listJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("azure.step", listJson, StringComparison.OrdinalIgnoreCase);
+        if (listed.LastOperation is not null)
+            Assert.DoesNotContain("azure.", JsonSerializer.Serialize(listed.LastOperation, ControlApiTestApplication.JsonOptions), StringComparison.OrdinalIgnoreCase);
+        return listed.LastOperation;
+    }
+
+    private static void AssertLastOperationDtoShape(string json, Guid? instanceId = null)
+    {
+        using var document = JsonDocument.Parse(json);
+        var lastOperation = instanceId is { } id
+            ? document.RootElement.GetProperty("items").EnumerateArray()
+                .Single(item => item.GetProperty("instanceId").GetGuid() == id)
+                .GetProperty("lastOperation")
+            : document.RootElement.GetProperty("lastOperation");
+        if (lastOperation.ValueKind == JsonValueKind.Null)
+            return;
+
+        var actual = lastOperation.EnumerateObject().Select(property => property.Name).ToArray();
+        Assert.Equal(
+            LastOperationDtoProperties.Order(StringComparer.Ordinal),
+            actual.Where(name => !LastOperationOptionalDtoProperties.Contains(name)).Order(StringComparer.Ordinal));
+        Assert.All(actual, name =>
+            Assert.True(
+                LastOperationDtoProperties.Contains(name) || LastOperationOptionalDtoProperties.Contains(name),
+                $"lastOperation serialized unexpected '{name}'."));
     }
 
     private static async Task MarkInstanceFailedAsync(ControlApiTestApplication app, Guid instanceId)
