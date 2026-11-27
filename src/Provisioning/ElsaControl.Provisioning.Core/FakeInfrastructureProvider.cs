@@ -268,6 +268,9 @@ public sealed class FakeInfrastructureProvider : IInfrastructureProvider, ICrede
         }
 
         outputs["engineName"] = request.Target.StackName;
+        outputs["engineEndpoint"] = "https://runtime.example.test";
+        outputs["workloadRevisionName"] = "engine-app--candidate";
+        outputs["ownedResourceGroupName"] = "rg-engine-test";
         outputs["endpointKind"] = request.Spec.EndpointKind ?? "https-ingress";
         outputs["databaseKind"] = request.Spec.DatabaseKind ?? "managed-sql";
         outputs["secretsKind"] = request.Spec.SecretsKind ?? "managed-secrets";

@@ -114,7 +114,7 @@ public sealed class AzureInfrastructureProvider(
             var receipt = new ProvisioningEvent(
                 operation.Id,
                 ProvisioningEventKind.ResourceSucceeded,
-                "resource-group",
+                "owned-resource-group-absent",
                 "Owned resource group is absent.",
                 _timeProvider.GetUtcNow());
             return ProviderRunResult.Ok([..result.Events, receipt], result.Outputs, ownedResourcesAbsent: true);

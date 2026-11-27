@@ -682,6 +682,26 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
             .AnyAsync(x => x.WorkspaceId == workspaceId && x.InstanceId == instanceId, cancellationToken);
     }
 
+    public async Task<bool> HasReachedReadyAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        CancellationToken cancellationToken = default)
+    {
+        if (workspaceId == Guid.Empty || instanceId == Guid.Empty)
+            return true;
+
+        var endpoints = await db.AzureProviderOperations.AsNoTracking()
+            .Where(x => x.WorkspaceId == workspaceId
+                        && x.InstanceId == instanceId
+                        && x.Action == AzureProviderOperationAction.Reconcile
+                        && x.Status == AzureProviderOperationStatus.Succeeded
+                        && (x.Health == AzureProviderHealth.Healthy || x.Health == AzureProviderHealth.Degraded)
+                        && x.Endpoint != null)
+            .Select(x => x.Endpoint)
+            .ToListAsync(cancellationToken);
+        return endpoints.Any(endpoint => ElsaManagedEndpointOrigin.TryCreate(endpoint, out _));
+    }
+
     async Task<AzureProviderResourceAssignment> IAzureProviderResourceAssignmentStore.CreateOrGetAsync(
         AzureProviderResourceAssignmentRequest request,
         DateTimeOffset now,
@@ -1170,14 +1190,24 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
         db.ChangeTracker.Clear();
         return await db.ExecuteInTransactionAsync<AzureProviderOperation?>(IsolationLevel.Unspecified, async () =>
         {
+            // The step ledger may take over a live pulumi-dispatch lease so an
+            // OperationSucceeded batch that lands during enqueue is not dropped
+            // as StaleFence. Any other worker still waits for expiry.
+            var dispatchHandoff = !allowRecovery
+                && string.Equals(workerId, AzureProviderOperationStepLedger.WorkerId, StringComparison.Ordinal);
             var changed = await db.AzureProviderOperations.Where(x => x.WorkspaceId == workspaceId && x.Id == operationId &&
                      (allowRecovery
                          ? x.Status == AzureProviderOperationStatus.RecoveryRequired
-                         : x.Status == AzureProviderOperationStatus.Accepted
-                           || x.Status == AzureProviderOperationStatus.Queued
-                           || x.Status == AzureProviderOperationStatus.EntitlementHeld
-                           || (x.Status == AzureProviderOperationStatus.Running && x.WorkerId == workerId)) &&
-                     (x.LeaseExpiresAt == null || x.LeaseExpiresAt <= now) && (!expectedVersion.HasValue || x.Version == expectedVersion.Value) &&
+                           && (x.LeaseExpiresAt == null || x.LeaseExpiresAt <= now)
+                         : (dispatchHandoff
+                            && x.Status == AzureProviderOperationStatus.Running
+                            && x.WorkerId == AzureProviderOperationWorker.DispatchWorkerId)
+                           || ((x.Status == AzureProviderOperationStatus.Accepted
+                                || x.Status == AzureProviderOperationStatus.Queued
+                                || x.Status == AzureProviderOperationStatus.EntitlementHeld
+                                || (x.Status == AzureProviderOperationStatus.Running && x.WorkerId == workerId))
+                               && (x.LeaseExpiresAt == null || x.LeaseExpiresAt <= now))) &&
+                     (!expectedVersion.HasValue || x.Version == expectedVersion.Value) &&
                      !db.AzureProviderOperations.Any(other => other.Id != operationId && other.WorkspaceId == workspaceId &&
                          other.TargetKey == x.TargetKey &&
                          (other.Status == AzureProviderOperationStatus.Accepted || other.Status == AzureProviderOperationStatus.Queued || other.Status == AzureProviderOperationStatus.EntitlementHeld ||
@@ -1359,6 +1389,49 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
         }
         AddTransition(entity, code, code, now);
         try { await db.SaveChangesAsync(cancellationToken); } catch (DbUpdateConcurrencyException) { db.ChangeTracker.Clear(); return null; }
+        return ToModel(entity);
+    }
+
+    public async Task<AzureProviderOperation?> ReleaseToQueueAsync(
+        Guid workspaceId,
+        Guid operationId,
+        string leaseToken,
+        DateTimeOffset now,
+        long? expectedVersion = null,
+        CancellationToken cancellationToken = default)
+    {
+        AzureProviderOperationValidation.ValidateLeaseToken(leaseToken);
+        var entity = await db.AzureProviderOperations.SingleOrDefaultAsync(
+            x => x.WorkspaceId == workspaceId && x.Id == operationId,
+            cancellationToken);
+        if (entity is null
+            || entity.Status != AzureProviderOperationStatus.Running
+            || !LeaseMatches(entity, leaseToken, now)
+            || expectedVersion.HasValue && entity.Version != expectedVersion.Value)
+        {
+            return null;
+        }
+
+        entity.Status = AzureProviderOperationStatus.Queued;
+        entity.StatusChangedAt = now;
+        entity.UpdatedAt = now;
+        entity.Version++;
+        entity.CompletedAt = null;
+        entity.CompletionLeaseTokenHash = null;
+        entity.CompletionFingerprint = null;
+        entity.LeaseTokenHash = null;
+        entity.LeaseExpiresAt = null;
+        entity.WorkerId = null;
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            db.ChangeTracker.Clear();
+            return null;
+        }
+
         return ToModel(entity);
     }
 

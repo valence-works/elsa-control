@@ -1,4 +1,8 @@
 using ElsaControl.Deployment.Abstractions.Instances;
+using ElsaControl.Deployment.Azure;
+using ElsaControl.Deployment.Core.Instances;
+using ElsaControl.Provisioning.Abstractions;
+using ElsaControl.Provisioning.Core;
 
 namespace ElsaControl.Deployment.Azure.Tests;
 
@@ -193,6 +197,619 @@ public sealed class AzureProviderOperationWorkerTests
         Assert.NotEmpty(runner.Steps);
     }
 
+    [Fact]
+    public async Task Pulumi_owned_create_dispatches_and_never_calls_bicep()
+    {
+        var operation = RunnableOperation();
+        var store = new WorkerStore(operation, execute: true);
+        var runner = new CompletingRunner();
+        var executor = new AzureProviderExecutor(store, runner, assignmentStore: new OperationAssignmentStore(operation));
+        var dispatcher = new RecordingDispatcher();
+        var worker = new AzureProviderOperationWorker(
+            store, executor, new PersistedAzureProviderPlanSource(), new FixedTimeProvider(),
+            dispatcher, new StaticBackendStore(ElsaInstanceProvisioningBackend.Pulumi));
+
+        var processed = await worker.ProcessOnceAsync();
+
+        Assert.Equal(1, processed);
+        Assert.Single(dispatcher.Operations);
+        Assert.Equal(AzureProviderOperationAction.Reconcile, dispatcher.Operations[0].Action);
+        Assert.Equal(ElsaInstanceOperationAction.Create, dispatcher.Operations[0].LifecycleAction);
+        Assert.Empty(runner.Steps);
+        Assert.Equal(AzureProviderOperationStatus.Queued, store.Operation.Status);
+        Assert.Null(store.Operation.WorkerId);
+        Assert.Null(store.Operation.LeaseExpiresAt);
+        Assert.Equal(AzureProviderOperationPhase.Planned, store.Operation.Phase);
+        Assert.Equal(AzureProviderHealth.Unknown, store.Operation.Health);
+    }
+
+    [Fact]
+    public async Task Pulumi_owned_delete_dispatches_destroy_and_never_calls_bicep()
+    {
+        var operation = WithComputedMetadata(RunnableOperation() with { Action = AzureProviderOperationAction.Delete });
+        var store = new WorkerStore(operation, execute: true);
+        var runner = new CompletingRunner();
+        var executor = new AzureProviderExecutor(store, runner, assignmentStore: new OperationAssignmentStore(operation));
+        var dispatcher = new RecordingDispatcher();
+        var worker = new AzureProviderOperationWorker(
+            store, executor, new PersistedAzureProviderPlanSource(), new FixedTimeProvider(),
+            dispatcher, new StaticBackendStore(ElsaInstanceProvisioningBackend.Pulumi));
+
+        Assert.Equal(1, await worker.ProcessOnceAsync());
+        Assert.Equal(AzureProviderOperationAction.Delete, Assert.Single(dispatcher.Operations).Action);
+        Assert.Empty(runner.Steps);
+    }
+
+    [Fact]
+    public async Task Pulumi_owned_retry_dispatches_provision_and_never_calls_bicep()
+    {
+        var operation = WithComputedMetadata(RunnableOperation() with { LifecycleAction = ElsaInstanceOperationAction.Retry });
+        var store = new WorkerStore(operation, execute: true);
+        var runner = new CompletingRunner();
+        var executor = new AzureProviderExecutor(store, runner, assignmentStore: new OperationAssignmentStore(operation));
+        var dispatcher = new RecordingDispatcher();
+        var worker = new AzureProviderOperationWorker(
+            store, executor, new PersistedAzureProviderPlanSource(), new FixedTimeProvider(),
+            dispatcher, new StaticBackendStore(ElsaInstanceProvisioningBackend.Pulumi));
+
+        Assert.Equal(1, await worker.ProcessOnceAsync());
+        Assert.Equal(AzureProviderOperationAction.Reconcile, Assert.Single(dispatcher.Operations).Action);
+        Assert.Equal(ElsaInstanceOperationAction.Retry, dispatcher.Operations[0].LifecycleAction);
+        Assert.Empty(runner.Steps);
+    }
+
+    [Fact]
+    public async Task Pulumi_owned_retry_after_ready_fails_closed_without_pulumi_or_bicep()
+    {
+        var operation = WithComputedMetadata(RunnableOperation() with { LifecycleAction = ElsaInstanceOperationAction.Retry });
+        await AssertPulumiRejectedAsync(operation, reachedReady: true);
+    }
+
+    [Theory]
+    [InlineData(ElsaInstanceOperationAction.Reconcile)]
+    [InlineData(ElsaInstanceOperationAction.UpdateIntent)]
+    [InlineData(ElsaInstanceOperationAction.Start)]
+    [InlineData(ElsaInstanceOperationAction.Stop)]
+    [InlineData(ElsaInstanceOperationAction.Restart)]
+    [InlineData(ElsaInstanceOperationAction.ApproveMinorUpgrade)]
+    [InlineData(ElsaInstanceOperationAction.MajorMigration)]
+    [InlineData(ElsaInstanceOperationAction.Recover)]
+    public async Task Pulumi_owned_unsupported_operation_fails_closed_without_pulumi_or_bicep(
+        ElsaInstanceOperationAction action)
+    {
+        var operation = WithComputedMetadata(RunnableOperation() with { LifecycleAction = action });
+        await AssertPulumiRejectedAsync(operation);
+    }
+
+    [Fact]
+    public async Task Well_formed_null_lifecycle_reconcile_cannot_reach_the_pulumi_gate()
+    {
+        // An org-bound row cannot recompute a request hash with a null lifecycle
+        // action (lifecycleAction.required). Overlaying null without recomputing
+        // is an invalid plan, not a Pulumi allow-list miss.
+        Assert.Throws<ArgumentException>(() =>
+            WithComputedMetadata(RunnableOperation() with { LifecycleAction = null }));
+
+        var tampered = WithComputedMetadata(RunnableOperation());
+        tampered = tampered with { LifecycleAction = null };
+        var unrestorable = new WorkerStore(tampered);
+        Assert.Equal(0, await new AzureProviderOperationWorker(
+            unrestorable,
+            new AzureProviderExecutor(unrestorable, new NeverCalledRunner()),
+            new PersistedAzureProviderPlanSource(),
+            new FixedTimeProvider()).ProcessOnceAsync());
+        Assert.Equal(1, unrestorable.MarkUnrestorableCount);
+        Assert.Equal(AzureProviderOperationStatus.Failed, unrestorable.Operation.Status);
+        Assert.Contains(unrestorable.Transitions, transition => transition.Code == "azure.plan.unrestorable");
+
+        // The only well-formed null-lifecycle shape is unbound identity. That row
+        // has no instance id, so ReadBackendAsync never consults the backend store
+        // and the Pulumi allow-list is unreachable.
+        var backends = new StaticBackendStore(ElsaInstanceProvisioningBackend.Pulumi);
+        var operation = WithComputedMetadata(RunnableOperation() with
+        {
+            OrganizationId = null,
+            InstanceId = null,
+            LifecycleAction = null,
+            ProviderAssignmentId = null
+        });
+        var phase = operation.Phase;
+        var health = operation.Health;
+        var endpoint = operation.Endpoint;
+        var resources = operation.Resources;
+        var store = new WorkerStore(operation, execute: true);
+        var runner = new CompletingRunner();
+        var dispatcher = new RecordingDispatcher();
+        var worker = new AzureProviderOperationWorker(
+            store,
+            new AzureProviderExecutor(store, runner),
+            new PersistedAzureProviderPlanSource(),
+            new FixedTimeProvider(),
+            dispatcher,
+            backends);
+
+        Assert.Equal(1, await worker.ProcessOnceAsync());
+        Assert.Empty(dispatcher.Operations);
+        Assert.Empty(runner.Steps);
+        Assert.Equal(0, backends.Reads);
+        Assert.Equal(AzureProviderOperationStatus.RecoveryRequired, store.Operation.Status);
+        Assert.Contains(
+            store.Transitions,
+            transition => transition.Code == ManagedElsaReasonCodeCatalog.ProviderIdentityBindingMissing);
+        Assert.Equal(phase, store.Operation.Phase);
+        Assert.Equal(health, store.Operation.Health);
+        Assert.Equal(endpoint, store.Operation.Endpoint);
+        Assert.Equal(resources, store.Operation.Resources);
+    }
+
+    [Fact]
+    public async Task Bicep_owned_delete_never_calls_pulumi_even_with_dispatcher()
+    {
+        var operation = WithComputedMetadata(RunnableOperation() with { Action = AzureProviderOperationAction.Delete });
+        var store = new WorkerStore(operation, execute: true);
+        var runner = new CompletingRunner();
+        var executor = new AzureProviderExecutor(store, runner, assignmentStore: new OperationAssignmentStore(operation));
+        var dispatcher = new RecordingDispatcher();
+        var worker = new AzureProviderOperationWorker(
+            store, executor, new PersistedAzureProviderPlanSource(), new FixedTimeProvider(),
+            dispatcher, new StaticBackendStore(ElsaInstanceProvisioningBackend.Bicep));
+
+        Assert.Equal(1, await worker.ProcessOnceAsync());
+        Assert.Empty(dispatcher.Operations);
+        Assert.NotEmpty(runner.Steps);
+    }
+
+    [Fact]
+    public async Task Dispatch_failure_on_pulumi_instance_fails_closed_without_bicep()
+    {
+        var operation = RunnableOperation();
+        var store = new WorkerStore(operation, execute: true);
+        var runner = new CompletingRunner();
+        var executor = new AzureProviderExecutor(store, runner, assignmentStore: new OperationAssignmentStore(operation));
+        var worker = new AzureProviderOperationWorker(
+            store, executor, new PersistedAzureProviderPlanSource(), new FixedTimeProvider(),
+            new FailingDispatcher(), new StaticBackendStore(ElsaInstanceProvisioningBackend.Pulumi));
+
+        Assert.Equal(1, await worker.ProcessOnceAsync());
+        Assert.Empty(runner.Steps);
+        Assert.Equal(AzureProviderOperationStatus.Failed, store.Operation.Status);
+        Assert.Contains(store.Transitions, transition => transition.Code == ManagedElsaReasonCodeCatalog.ProviderDispatchFailed);
+    }
+
+    [Fact]
+    public async Task Pulumi_owned_create_holds_entitlement_without_dispatching()
+    {
+        var operation = RunnableOperation();
+        var store = new WorkerStore(operation, execute: true);
+        var runner = new CompletingRunner();
+        var executor = new AzureProviderExecutor(store, runner, assignmentStore: new OperationAssignmentStore(operation));
+        var dispatcher = new RecordingDispatcher();
+        var worker = new AzureProviderOperationWorker(
+            store, executor, new PersistedAzureProviderPlanSource(), new FixedTimeProvider(),
+            dispatcher, new StaticBackendStore(ElsaInstanceProvisioningBackend.Pulumi), new DenyingGate());
+
+        Assert.Equal(1, await worker.ProcessOnceAsync());
+        Assert.Empty(dispatcher.Operations);
+        Assert.Empty(runner.Steps);
+        Assert.Equal(AzureProviderOperationStatus.EntitlementHeld, store.Operation.Status);
+        Assert.Contains(store.Transitions, transition => transition.Code == ElsaInstanceCommercialOperation.EntitlementRequired);
+    }
+
+    [Fact]
+    public async Task Pulumi_owned_delete_skips_the_commercial_gate()
+    {
+        var operation = WithComputedMetadata(RunnableOperation() with { Action = AzureProviderOperationAction.Delete });
+        var store = new WorkerStore(operation, execute: true);
+        var runner = new CompletingRunner();
+        var executor = new AzureProviderExecutor(store, runner, assignmentStore: new OperationAssignmentStore(operation));
+        var dispatcher = new RecordingDispatcher();
+        var worker = new AzureProviderOperationWorker(
+            store, executor, new PersistedAzureProviderPlanSource(), new FixedTimeProvider(),
+            dispatcher, new StaticBackendStore(ElsaInstanceProvisioningBackend.Pulumi), new DenyingGate());
+
+        Assert.Equal(1, await worker.ProcessOnceAsync());
+        Assert.Equal(AzureProviderOperationAction.Delete, Assert.Single(dispatcher.Operations).Action);
+        Assert.Empty(runner.Steps);
+        Assert.Equal(AzureProviderOperationStatus.Queued, store.Operation.Status);
+        Assert.Null(store.Operation.WorkerId);
+    }
+
+    [Fact]
+    public async Task Missing_dispatcher_on_pulumi_instance_fails_closed_without_bicep()
+    {
+        var operation = RunnableOperation();
+        var store = new WorkerStore(operation, execute: true);
+        var runner = new CompletingRunner();
+        var executor = new AzureProviderExecutor(store, runner, assignmentStore: new OperationAssignmentStore(operation));
+        var worker = new AzureProviderOperationWorker(
+            store, executor, new PersistedAzureProviderPlanSource(), new FixedTimeProvider(),
+            pulumi: null, backends: new StaticBackendStore(ElsaInstanceProvisioningBackend.Pulumi));
+
+        Assert.Equal(1, await worker.ProcessOnceAsync());
+        Assert.Empty(runner.Steps);
+        Assert.Equal(AzureProviderOperationStatus.Failed, store.Operation.Status);
+        Assert.Contains(store.Transitions, transition => transition.Code == ManagedElsaReasonCodeCatalog.ProviderDispatchFailed);
+    }
+
+    [Fact]
+    public async Task Unknown_owner_fails_closed_without_bicep()
+    {
+        var operation = RunnableOperation();
+        var store = new WorkerStore(operation, execute: true);
+        var runner = new CompletingRunner();
+        var executor = new AzureProviderExecutor(store, runner, assignmentStore: new OperationAssignmentStore(operation));
+        var dispatcher = new RecordingDispatcher();
+        var worker = new AzureProviderOperationWorker(
+            store, executor, new PersistedAzureProviderPlanSource(), new FixedTimeProvider(),
+            dispatcher, new StaticBackendStore(ElsaInstanceProvisioningBackend.Unknown));
+
+        Assert.Equal(1, await worker.ProcessOnceAsync());
+        Assert.Empty(dispatcher.Operations);
+        Assert.Empty(runner.Steps);
+        Assert.Equal(AzureProviderOperationStatus.Failed, store.Operation.Status);
+        Assert.Contains(store.Transitions, transition => transition.Code == ManagedElsaReasonCodeCatalog.ProviderDispatchFailed);
+    }
+
+    [Fact]
+    public async Task Two_queued_pulumi_creates_stay_queued_across_a_stale_sweep()
+    {
+        var first = RunnableOperation();
+        var second = WithComputedMetadata(RunnableOperation() with
+        {
+            Id = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaab"),
+            TargetKey = "workload-b",
+            IdempotencyKey = "request-2"
+        });
+        var store = new MultiOperationWorkerStore(first, second);
+        var runner = new CompletingRunner();
+        var executor = new AzureProviderExecutor(store, runner, assignmentStore: new OperationAssignmentStore(first));
+        var dispatcher = new RecordingDispatcher();
+        var now = DateTimeOffset.UtcNow;
+        var worker = new AzureProviderOperationWorker(
+            store, executor, new PersistedAzureProviderPlanSource(), new FixedTimeProvider(),
+            dispatcher, new StaticBackendStore(ElsaInstanceProvisioningBackend.Pulumi));
+
+        Assert.Equal(2, await worker.ProcessOnceAsync());
+        Assert.Equal(2, dispatcher.Operations.Count);
+        Assert.Empty(runner.Steps);
+        Assert.All(store.Operations, operation =>
+        {
+            Assert.Equal(AzureProviderOperationStatus.Queued, operation.Status);
+            Assert.Null(operation.WorkerId);
+            Assert.Null(operation.LeaseExpiresAt);
+        });
+
+        Assert.Equal(0, await store.RecoverStaleAsync(now.AddSeconds(31)));
+        Assert.All(store.Operations, operation =>
+            Assert.Equal(AzureProviderOperationStatus.Queued, operation.Status));
+        Assert.DoesNotContain(
+            store.Operations,
+            operation => operation.Status == AzureProviderOperationStatus.RecoveryRequired);
+    }
+
+    [Fact]
+    public async Task Dispatched_pulumi_create_is_not_re_enqueued_on_a_new_worker_scope()
+    {
+        var operation = RunnableOperation();
+        var store = new WorkerStore(operation, execute: true);
+        var runner = new CompletingRunner();
+        var dispatcher = new RecordingDispatcher();
+        var backends = new StaticBackendStore(ElsaInstanceProvisioningBackend.Pulumi);
+        var first = new AzureProviderOperationWorker(
+            store,
+            new AzureProviderExecutor(store, runner, assignmentStore: new OperationAssignmentStore(operation)),
+            new PersistedAzureProviderPlanSource(),
+            new FixedTimeProvider(),
+            dispatcher,
+            backends);
+
+        Assert.Equal(1, await first.ProcessOnceAsync());
+        Assert.Single(dispatcher.Operations);
+
+        var second = new AzureProviderOperationWorker(
+            store,
+            new AzureProviderExecutor(store, runner, assignmentStore: new OperationAssignmentStore(operation)),
+            new PersistedAzureProviderPlanSource(),
+            new FixedTimeProvider(),
+            dispatcher,
+            backends);
+        Assert.Equal(1, await second.ProcessOnceAsync());
+        Assert.Single(dispatcher.Operations);
+        Assert.Empty(runner.Steps);
+        Assert.Equal(AzureProviderOperationStatus.Queued, store.Operation.Status);
+    }
+
+    [Fact]
+    public async Task Redispatch_of_a_succeeded_pulumi_run_reconciles_outputs_and_reaches_ready()
+    {
+        var lifecycleOperationId = Guid.Parse("33333333-3333-3333-3333-333333333333");
+        var instanceId = Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd");
+        var appName = ProvisioningEngineContainerApp.ForInstance(instanceId);
+        var resourceGroup = ProvisioningEngineResourceGroup.ForInstance(instanceId);
+        var endpoint = ProvisioningEngineIngress.OriginForInstance(
+            instanceId,
+            ProvisioningEngineIngress.MockEnvironmentDomain);
+        var revision = appName + "--candidate";
+        var operation = WithComputedMetadata(RunnableOperation() with
+        {
+            IdempotencyKey = AzureProviderOperationValidation.LifecycleIdempotencyKey(lifecycleOperationId),
+            TargetKey = AzureElsaInstanceProvider.WorkloadName(instanceId),
+            InstanceId = instanceId,
+            ProviderScopeFingerprint = new string('a', 64)
+        });
+        var store = new WorkerStore(operation, execute: true);
+        var runner = new CompletingRunner();
+        var dispatcher = new TerminalDispatcher(
+            ProvisioningOperationState.Succeeded,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [PulumiStepLedgerMapper.EngineEndpointOutputKey] = endpoint,
+                [PulumiStepLedgerMapper.WorkloadRevisionNameOutputKey] = revision,
+                [PulumiStepLedgerMapper.OwnedResourceGroupNameOutputKey] = resourceGroup,
+                [PulumiStepLedgerMapper.WorkloadResourceIdOutputKey] =
+                    $"/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/{resourceGroup}/providers/Microsoft.App/containerApps/{appName}"
+            });
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("--retry") && args[^1].EndsWith("/health", StringComparison.Ordinal), "Healthy");
+        process.Success(
+            args => args.Contains("containerapp") && args.Contains("show") && args.Contains(appName) && args.Contains(resourceGroup),
+            """[{"latestRevision":true,"weight":100}]""");
+        var worker = new AzureProviderOperationWorker(
+            store,
+            new AzureProviderExecutor(store, runner, assignmentStore: new OperationAssignmentStore(operation)),
+            new PersistedAzureProviderPlanSource(),
+            new FixedTimeProvider(),
+            dispatcher,
+            new StaticBackendStore(ElsaInstanceProvisioningBackend.Pulumi),
+            commercialGate: null,
+            readiness: new AzurePulumiReadinessVerifier(ReadinessOptions(), ReadinessScope(), store, process));
+
+        Assert.Equal(1, await worker.ProcessOnceAsync());
+        Assert.Single(dispatcher.Operations);
+        Assert.Empty(runner.Steps);
+        Assert.Equal(AzureProviderOperationStatus.Queued, store.Operation.Status);
+        Assert.Equal(AzureProviderOperationPhase.WorkloadReady, store.Operation.Phase);
+        Assert.Equal(endpoint, store.Operation.Endpoint);
+        Assert.Equal(resourceGroup, store.Operation.Resources.ResourceGroupName);
+        Assert.Equal(revision, store.Operation.Resources.WorkloadRevisionName);
+
+        Assert.Equal(1, await worker.ProcessOnceAsync());
+        Assert.Single(dispatcher.Operations);
+        Assert.Equal(AzureProviderOperationStatus.Succeeded, store.Operation.Status);
+        Assert.Equal(AzureProviderOperationPhase.TrafficPromoted, store.Operation.Phase);
+        Assert.Equal(AzureProviderHealth.Healthy, store.Operation.Health);
+        Assert.Equal(endpoint, store.Operation.Endpoint);
+    }
+
+    [Fact]
+    public async Task Redispatch_of_a_failed_pulumi_run_parks_needs_person_instead_of_requeueing()
+    {
+        var operation = RunnableOperation();
+        var store = new WorkerStore(operation, execute: true);
+        var runner = new CompletingRunner();
+        var dispatcher = new TerminalDispatcher(ProvisioningOperationState.Failed, failureCode: "QuotaExceeded");
+        var worker = new AzureProviderOperationWorker(
+            store,
+            new AzureProviderExecutor(store, runner, assignmentStore: new OperationAssignmentStore(operation)),
+            new PersistedAzureProviderPlanSource(),
+            new FixedTimeProvider(),
+            dispatcher,
+            new StaticBackendStore(ElsaInstanceProvisioningBackend.Pulumi));
+
+        Assert.Equal(1, await worker.ProcessOnceAsync());
+        Assert.Single(dispatcher.Operations);
+        Assert.Empty(runner.Steps);
+        Assert.Equal(AzureProviderOperationStatus.Failed, store.Operation.Status);
+        Assert.Contains(
+            store.Transitions,
+            transition => transition.Code == ManagedElsaReasonCodeCatalog.AzureDeploymentFailed);
+        Assert.Equal(AzureProviderOperationPhase.Planned, store.Operation.Phase);
+    }
+
+    [Fact]
+    public async Task Pulumi_apply_success_reaches_ready_through_health_then_observation()
+    {
+        var lifecycleOperationId = Guid.Parse("33333333-3333-3333-3333-333333333333");
+        var instanceId = Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd");
+        var appName = ProvisioningEngineContainerApp.ForInstance(instanceId);
+        var resourceGroup = ProvisioningEngineResourceGroup.ForInstance(instanceId);
+        var endpoint = ProvisioningEngineIngress.OriginForInstance(
+            instanceId,
+            ProvisioningEngineIngress.MockEnvironmentDomain);
+        var revision = appName + "--candidate";
+        var operation = WithComputedMetadata(RunnableOperation() with
+        {
+            Status = AzureProviderOperationStatus.Queued,
+            Phase = AzureProviderOperationPhase.WorkloadReady,
+            Endpoint = endpoint,
+            Resources = new AzureProviderResourceReferences(
+                ResourceGroupName: resourceGroup,
+                WorkloadRevisionName: revision,
+                WorkloadResourceId: $"/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/{resourceGroup}/providers/Microsoft.App/containerApps/{appName}"),
+            IdempotencyKey = AzureProviderOperationValidation.LifecycleIdempotencyKey(lifecycleOperationId),
+            TargetKey = AzureElsaInstanceProvider.WorkloadName(instanceId),
+            InstanceId = instanceId,
+            ProviderScopeFingerprint = new string('a', 64)
+        });
+        var store = new WorkerStore(operation, execute: true);
+        var runner = new CompletingRunner();
+        var executor = new AzureProviderExecutor(store, runner, assignmentStore: new OperationAssignmentStore(operation));
+        var dispatcher = new RecordingDispatcher();
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("--retry") && args[^1].EndsWith("/health", StringComparison.Ordinal), "Healthy");
+        process.Success(
+            args => args.Contains("containerapp") && args.Contains("show") && args.Contains(appName) && args.Contains(resourceGroup),
+            """[{"latestRevision":true,"weight":100}]""");
+        var worker = new AzureProviderOperationWorker(
+            store, executor, new PersistedAzureProviderPlanSource(), new FixedTimeProvider(),
+            dispatcher, new StaticBackendStore(ElsaInstanceProvisioningBackend.Pulumi),
+            commercialGate: null,
+            readiness: new AzurePulumiReadinessVerifier(ReadinessOptions(), ReadinessScope(), store, process));
+
+        Assert.Equal(1, await worker.ProcessOnceAsync());
+        Assert.Empty(dispatcher.Operations);
+        Assert.Empty(runner.Steps);
+        Assert.Contains(
+            process.Calls,
+            args => args.Contains("--retry")
+                    && args.Contains("30")
+                    && args.Contains("--retry-all-errors")
+                    && args.Contains("--retry-delay")
+                    && args.Contains("--max-time"));
+        Assert.DoesNotContain(process.Calls, args => args.Contains("traffic") && args.Contains("set"));
+        Assert.Equal(AzureProviderOperationStatus.Succeeded, store.Operation.Status);
+        Assert.Equal(AzureProviderOperationPhase.TrafficPromoted, store.Operation.Phase);
+        Assert.Equal(AzureProviderHealth.Healthy, store.Operation.Health);
+        Assert.Equal(endpoint, store.Operation.Endpoint);
+
+        var provider = new AzureElsaInstanceProvider(
+            new UnusedOperationService(),
+            store,
+            new OperationAssignmentStore(store.Operation),
+            options: new AzureElsaInstanceProviderOptions
+            {
+                Enabled = true,
+                TemplateFingerprint = new string('b', 64),
+                ProviderScopeFingerprint = new string('a', 64),
+                SubscriptionId = "11111111-1111-1111-1111-111111111111",
+                ResourceGroupNamePrefix = "rg-elsa"
+            });
+        var observation = await provider.ObserveAsync(new(
+            store.Operation.WorkspaceId,
+            instanceId,
+            lifecycleOperationId,
+            store.Operation.AttemptNumber,
+            ElsaDesiredLifecycle.Running,
+            null,
+            null));
+
+        Assert.Equal(ElsaInstanceProviderObservationKind.Confirmed, observation.Kind);
+        Assert.Equal(ElsaObservedLifecycle.Ready, observation.ObservedLifecycle);
+        Assert.Equal(ElsaInstanceProviderHealthGate.Passed, observation.HealthGate);
+        Assert.Equal(endpoint, observation.CurrentDeploymentReference?.EndpointUri);
+    }
+
+    [Fact]
+    public async Task Pulumi_stack_outputs_through_the_ledger_reach_ready()
+    {
+        var lifecycleOperationId = Guid.Parse("33333333-3333-3333-3333-333333333333");
+        var instanceId = Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd");
+        var appName = ProvisioningEngineContainerApp.ForInstance(instanceId);
+        var resourceGroup = ProvisioningEngineResourceGroup.ForInstance(instanceId);
+        var endpoint = ProvisioningEngineIngress.OriginForInstance(
+            instanceId,
+            ProvisioningEngineIngress.MockEnvironmentDomain);
+        var revision = appName + "--candidate";
+        var resourceId = $"/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/{resourceGroup}/providers/Microsoft.App/containerApps/{appName}";
+        var operation = WithComputedMetadata(RunnableOperation() with
+        {
+            IdempotencyKey = AzureProviderOperationValidation.LifecycleIdempotencyKey(lifecycleOperationId),
+            TargetKey = AzureElsaInstanceProvider.WorkloadName(instanceId),
+            InstanceId = instanceId,
+            ProviderScopeFingerprint = new string('a', 64)
+        });
+        var store = new WorkerStore(operation, execute: true);
+        var ledger = new AzureProviderOperationStepLedger(store);
+        var (moduleOperation, request) = Bound(operation.WorkspaceId, operation.Id, instanceId);
+        Assert.Equal(
+            ProvisioningStepLedgerResult.Written,
+            await ledger.TryWriteAsync(
+                moduleOperation,
+                request,
+                [
+                    Event(moduleOperation.Id, 1, ProvisioningEventKind.OperationSucceeded, ProvisioningCapability.ContainerRuntime)
+                ],
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["engineEndpoint"] = endpoint,
+                    ["workloadRevisionName"] = revision,
+                    ["workloadResourceId"] = resourceId,
+                    ["ownedResourceGroupName"] = resourceGroup
+                }));
+        Assert.Equal(AzureProviderOperationStatus.Queued, store.Operation.Status);
+        Assert.Equal(AzureProviderOperationPhase.WorkloadReady, store.Operation.Phase);
+        Assert.Equal(endpoint, store.Operation.Endpoint);
+
+        var runner = new CompletingRunner();
+        var dispatcher = new RecordingDispatcher();
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("--retry") && args[^1].EndsWith("/health", StringComparison.Ordinal), "Healthy");
+        process.Success(
+            args => args.Contains("containerapp") && args.Contains("show") && args.Contains(appName) && args.Contains(resourceGroup),
+            """[{"latestRevision":true,"weight":100}]""");
+        var worker = new AzureProviderOperationWorker(
+            store,
+            new AzureProviderExecutor(store, runner, assignmentStore: new OperationAssignmentStore(store.Operation)),
+            new PersistedAzureProviderPlanSource(),
+            new FixedTimeProvider(),
+            dispatcher,
+            new StaticBackendStore(ElsaInstanceProvisioningBackend.Pulumi),
+            commercialGate: null,
+            readiness: new AzurePulumiReadinessVerifier(ReadinessOptions(), ReadinessScope(), store, process));
+
+        Assert.Equal(1, await worker.ProcessOnceAsync());
+        Assert.Empty(dispatcher.Operations);
+        Assert.Empty(runner.Steps);
+        Assert.Equal(AzureProviderOperationStatus.Succeeded, store.Operation.Status);
+        Assert.Equal(AzureProviderOperationPhase.TrafficPromoted, store.Operation.Phase);
+        Assert.Equal(AzureProviderHealth.Healthy, store.Operation.Health);
+
+        var observation = await new AzureElsaInstanceProvider(
+            new UnusedOperationService(),
+            store,
+            new OperationAssignmentStore(store.Operation),
+            options: new AzureElsaInstanceProviderOptions
+            {
+                Enabled = true,
+                TemplateFingerprint = new string('b', 64),
+                ProviderScopeFingerprint = new string('a', 64),
+                SubscriptionId = "11111111-1111-1111-1111-111111111111",
+                ResourceGroupNamePrefix = "rg-elsa"
+            }).ObserveAsync(new(
+            store.Operation.WorkspaceId,
+            instanceId,
+            lifecycleOperationId,
+            store.Operation.AttemptNumber,
+            ElsaDesiredLifecycle.Running,
+            null,
+            null));
+        Assert.Equal(ElsaObservedLifecycle.Ready, observation.ObservedLifecycle);
+        Assert.Equal(endpoint, observation.CurrentDeploymentReference?.EndpointUri);
+    }
+
+    [Fact]
+    public async Task Pulumi_revision_label_host_fails_closed_before_health()
+    {
+        var instanceId = Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd");
+        var appName = ProvisioningEngineContainerApp.ForInstance(instanceId);
+        await AssertEndpointRejectedAsync(
+            instanceId,
+            ProvisioningEngineIngress.RevisionOrigin(
+                appName,
+                "candidate",
+                ProvisioningEngineIngress.MockEnvironmentDomain));
+    }
+
+    [Fact]
+    public async Task Pulumi_non_container_apps_host_fails_closed_before_health()
+    {
+        await AssertEndpointRejectedAsync(
+            Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd"),
+            "https://runtime.example.test");
+    }
+
+    private static AzureProviderOperation RunnableOperation()
+    {
+        var digest = "sha256:" + new string('f', 64);
+        return WithComputedMetadata(Operation() with
+        {
+            ReleaseManifestDigest = digest,
+            ReleaseManifestSignatureDigest = digest,
+            ReleaseManifestReference = "oci://evidence.example/manifest",
+            ReleaseManifestSignatureReference = "oci://evidence.example/signature"
+        });
+    }
+
     private static AzureProviderOperation Operation()
     {
         var operation = new AzureProviderOperation(
@@ -238,10 +855,152 @@ public sealed class AzureProviderOperationWorkerTests
         {
             OrganizationId = Guid.Parse("cccccccc-cccc-cccc-cccc-cccccccccccc"),
             InstanceId = Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd"),
-            LifecycleAction = ElsaInstanceOperationAction.Reconcile,
+            LifecycleAction = ElsaInstanceOperationAction.Create,
             ProviderAssignmentId = Guid.Parse("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee")
         });
     }
+
+    private static async Task AssertEndpointRejectedAsync(Guid instanceId, string endpoint)
+    {
+        var appName = ProvisioningEngineContainerApp.ForInstance(instanceId);
+        var resourceGroup = ProvisioningEngineResourceGroup.ForInstance(instanceId);
+        var operation = WithComputedMetadata(RunnableOperation() with
+        {
+            Status = AzureProviderOperationStatus.Queued,
+            Phase = AzureProviderOperationPhase.WorkloadReady,
+            Endpoint = endpoint,
+            Resources = new AzureProviderResourceReferences(
+                ResourceGroupName: resourceGroup,
+                WorkloadRevisionName: appName + "--candidate",
+                WorkloadResourceId: $"/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/{resourceGroup}/providers/Microsoft.App/containerApps/{appName}"),
+            InstanceId = instanceId,
+            ProviderScopeFingerprint = new string('a', 64)
+        });
+        var store = new WorkerStore(operation, execute: true);
+        var runner = new CompletingRunner();
+        var dispatcher = new RecordingDispatcher();
+        var process = new FakeCommandProcess();
+        var worker = new AzureProviderOperationWorker(
+            store,
+            new AzureProviderExecutor(store, runner, assignmentStore: new OperationAssignmentStore(operation)),
+            new PersistedAzureProviderPlanSource(),
+            new FixedTimeProvider(),
+            dispatcher,
+            new StaticBackendStore(ElsaInstanceProvisioningBackend.Pulumi),
+            commercialGate: null,
+            readiness: new AzurePulumiReadinessVerifier(ReadinessOptions(), ReadinessScope(), store, process));
+
+        Assert.Equal(1, await worker.ProcessOnceAsync());
+        Assert.Empty(dispatcher.Operations);
+        Assert.Empty(runner.Steps);
+        Assert.Empty(process.Calls);
+        Assert.Equal(AzureProviderOperationStatus.Failed, store.Operation.Status);
+        Assert.Contains(
+            store.Transitions,
+            transition => transition.Code == ManagedElsaReasonCodeCatalog.AzureRecoveryWorkloadOutputsInvalid);
+    }
+
+    private static async Task AssertPulumiRejectedAsync(
+        AzureProviderOperation operation,
+        bool reachedReady = false)
+    {
+        var store = new WorkerStore(operation, execute: true, reachedReady: reachedReady);
+        var runner = new CompletingRunner();
+        var executor = new AzureProviderExecutor(store, runner, assignmentStore: new OperationAssignmentStore(operation));
+        var dispatcher = new RecordingDispatcher();
+        var phase = store.Operation.Phase;
+        var health = store.Operation.Health;
+        var endpoint = store.Operation.Endpoint;
+        var resources = store.Operation.Resources;
+        var worker = new AzureProviderOperationWorker(
+            store, executor, new PersistedAzureProviderPlanSource(), new FixedTimeProvider(),
+            dispatcher, new StaticBackendStore(ElsaInstanceProvisioningBackend.Pulumi));
+
+        Assert.Equal(1, await worker.ProcessOnceAsync());
+        Assert.Empty(dispatcher.Operations);
+        Assert.Empty(runner.Steps);
+        Assert.Equal(AzureProviderOperationStatus.Failed, store.Operation.Status);
+        Assert.Contains(
+            store.Transitions,
+            transition => transition.Code == ManagedElsaReasonCodeCatalog.ProviderPulumiOperationUnsupported);
+        Assert.Equal(phase, store.Operation.Phase);
+        Assert.Equal(health, store.Operation.Health);
+        Assert.Equal(endpoint, store.Operation.Endpoint);
+        Assert.Equal(resources, store.Operation.Resources);
+    }
+
+    private static AzureProviderRunnerOptions ReadinessOptions()
+    {
+        var tool = OperatingSystem.IsWindows() ? @"C:\Windows\System32\cmd.exe" : "/bin/sh";
+        return new AzureProviderRunnerOptions
+        {
+            AzureCliPath = tool,
+            CurlPath = tool,
+            ObservationAttempts = 1,
+            ObservationDelay = TimeSpan.Zero
+        };
+    }
+
+    private static AzureProviderTargetScope ReadinessScope() => new(
+        "11111111-1111-1111-1111-111111111111",
+        "proof-rg",
+        "22222222-2222-2222-2222-222222222222",
+        "registry-rg",
+        "valenceruntimeimages",
+        "westeurope");
+
+    private static (ProvisioningOperation Operation, ProvisioningRequest Request) Bound(
+        Guid workspaceId,
+        Guid providerOperationId,
+        Guid instanceId)
+    {
+        var operation = new ProvisioningOperation(
+            Guid.NewGuid(),
+            ProvisioningCommand.Provision,
+            ProvisioningOperationState.Running,
+            "azure",
+            ProvisioningStackKind.Engine,
+            ProvisioningStackName.ForEngine(instanceId),
+            "pulumi-ledger",
+            "hash",
+            DateTimeOffset.UtcNow)
+        {
+            FencingToken = 1
+        };
+        var request = new ProvisioningRequest(
+            ProvisioningCommand.Provision,
+            new EngineSpec(
+                "elsa-server:test",
+                new HashSet<string>(StringComparer.Ordinal) { ProvisioningCapability.ContainerRuntime }),
+            new ProvisioningTarget(
+                "azure",
+                ProvisioningStackKind.Engine,
+                operation.StackName,
+                new CredentialReference(CredentialReference.AzureWorkloadIdentityKind, "workload-identity"),
+                new StateBackendReference(StateBackendReference.AzureBlobKind, "stelsaplatform/pulumi-state"),
+                new SecretsProviderReference(SecretsProviderReference.AzureKeyVaultKind, "kv-elsa-platform/pulumi-secrets"),
+                "staging"),
+            "pulumi-ledger",
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [PulumiStepLedgerMapper.ControlWorkspaceIdKey] = workspaceId.ToString("D"),
+                [PulumiStepLedgerMapper.ControlProviderOperationIdKey] = providerOperationId.ToString("D")
+            });
+        return (operation, request);
+    }
+
+    private static ProvisioningEvent Event(
+        Guid operationId,
+        int sequence,
+        ProvisioningEventKind kind,
+        string resourceKind) =>
+        new(
+            operationId,
+            kind,
+            resourceKind,
+            "Resource succeeded.",
+            DateTimeOffset.UtcNow,
+            sequence);
 
     private static AzureProviderOperation WithComputedMetadata(AzureProviderOperation operation)
     {
@@ -347,7 +1106,8 @@ public sealed class AzureProviderOperationWorkerTests
     private sealed class WorkerStore(
         AzureProviderOperation operation,
         bool failAfterClaim = false,
-        bool execute = false) : IAzureProviderOperationStore
+        bool execute = false,
+        bool reachedReady = false) : IAzureProviderOperationStore
     {
         public AzureProviderOperation Operation { get; private set; } = operation;
         public List<AzureProviderOperationTransition> Transitions { get; } = [];
@@ -369,8 +1129,18 @@ public sealed class AzureProviderOperationWorkerTests
         public Task<IReadOnlyList<AzureProviderOperation>> ListRunnableAsync(DateTimeOffset now, int limit, CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<AzureProviderOperation>>(Operation.Status is AzureProviderOperationStatus.Accepted or AzureProviderOperationStatus.Queued ? [Operation] : []);
 
+        public Task<bool> HasReachedReadyAsync(
+            Guid workspaceId,
+            Guid instanceId,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(reachedReady);
+
         public Task<AzureProviderOperation?> GetLatestReconcileAsync(Guid workspaceId, string targetKey, string? providerScopeFingerprint, CancellationToken cancellationToken = default) =>
-            Task.FromResult<AzureProviderOperation?>(null);
+            Task.FromResult<AzureProviderOperation?>(
+                Operation.Action == AzureProviderOperationAction.Reconcile
+                && string.Equals(Operation.TargetKey, targetKey, StringComparison.OrdinalIgnoreCase)
+                    ? Operation
+                    : null);
 
         public Task<AzureProviderOperation?> MarkUnrestorableAsync(Guid workspaceId, Guid operationId, DateTimeOffset now, long? expectedVersion = null, CancellationToken cancellationToken = default)
         {
@@ -420,21 +1190,82 @@ public sealed class AzureProviderOperationWorkerTests
                 })
                 : Task.FromResult<AzureProviderOperation?>(null);
 
-        public Task<AzureProviderOperation?> FinalizeAsync(Guid workspaceId, Guid operationId, string leaseToken, AzureProviderOperationStatus status, string code, DateTimeOffset now, long? expectedVersion = null, CancellationToken cancellationToken = default) =>
-            _execute && Operation.Status == AzureProviderOperationStatus.Running &&
-            (!expectedVersion.HasValue || expectedVersion.Value == Operation.Version)
-                ? Task.FromResult<AzureProviderOperation?>(Operation = Operation with
-                {
-                    Status = status,
-                    CompletedAt = status is AzureProviderOperationStatus.RecoveryRequired or AzureProviderOperationStatus.EntitlementHeld ? null : now,
-                    Version = Operation.Version + 1,
-                    UpdatedAt = now,
-                    WorkerId = null,
-                    LeaseExpiresAt = null
-                })
-                : Task.FromResult<AzureProviderOperation?>(null);
+        public Task<AzureProviderOperation?> FinalizeAsync(Guid workspaceId, Guid operationId, string leaseToken, AzureProviderOperationStatus status, string code, DateTimeOffset now, long? expectedVersion = null, CancellationToken cancellationToken = default)
+        {
+            if (!_execute
+                || Operation.Status != AzureProviderOperationStatus.Running
+                || expectedVersion.HasValue && expectedVersion.Value != Operation.Version)
+            {
+                return Task.FromResult<AzureProviderOperation?>(null);
+            }
 
-        public Task<int> RecoverStaleAsync(DateTimeOffset now, CancellationToken cancellationToken = default) => Task.FromResult(0);
+            Operation = Operation with
+            {
+                Status = status,
+                CompletedAt = status is AzureProviderOperationStatus.RecoveryRequired or AzureProviderOperationStatus.EntitlementHeld ? null : now,
+                Version = Operation.Version + 1,
+                UpdatedAt = now,
+                WorkerId = null,
+                LeaseExpiresAt = null
+            };
+            Transitions.Add(new(
+                Operation.Id,
+                Operation.Id,
+                Transitions.Count + 1,
+                status,
+                Operation.Phase,
+                code,
+                code,
+                now));
+            return Task.FromResult<AzureProviderOperation?>(Operation);
+        }
+
+        public Task<AzureProviderOperation?> ReleaseToQueueAsync(
+            Guid workspaceId,
+            Guid operationId,
+            string leaseToken,
+            DateTimeOffset now,
+            long? expectedVersion = null,
+            CancellationToken cancellationToken = default)
+        {
+            if (!_execute
+                || Operation.Status != AzureProviderOperationStatus.Running
+                || expectedVersion.HasValue && expectedVersion.Value != Operation.Version)
+            {
+                return Task.FromResult<AzureProviderOperation?>(null);
+            }
+
+            Operation = Operation with
+            {
+                Status = AzureProviderOperationStatus.Queued,
+                Version = Operation.Version + 1,
+                UpdatedAt = now,
+                WorkerId = null,
+                LeaseExpiresAt = null,
+                CompletedAt = null
+            };
+            return Task.FromResult<AzureProviderOperation?>(Operation);
+        }
+
+        public Task<int> RecoverStaleAsync(DateTimeOffset now, CancellationToken cancellationToken = default)
+        {
+            if (Operation.Status != AzureProviderOperationStatus.Running
+                || Operation.LeaseExpiresAt is not { } expires
+                || expires > now)
+            {
+                return Task.FromResult(0);
+            }
+
+            Operation = Operation with
+            {
+                Status = AzureProviderOperationStatus.RecoveryRequired,
+                WorkerId = null,
+                LeaseExpiresAt = null,
+                Version = Operation.Version + 1,
+                UpdatedAt = now
+            };
+            return Task.FromResult(1);
+        }
 
         public Task<IReadOnlyList<AzureProviderOperationTransition>> ListTransitionsAsync(Guid workspaceId, Guid operationId, CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<AzureProviderOperationTransition>>(Transitions);
@@ -486,6 +1317,12 @@ public sealed class AzureProviderOperationWorkerTests
 
         public Task<IReadOnlyList<AzureProviderOperation>> ListRunnableAsync(DateTimeOffset now, int limit, CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<AzureProviderOperation>>(Operations.Where(operation => operation.Status is AzureProviderOperationStatus.Accepted or AzureProviderOperationStatus.Queued).ToList());
+
+        public Task<bool> HasReachedReadyAsync(
+            Guid workspaceId,
+            Guid instanceId,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(false);
 
         public Task<AzureProviderOperation?> GetLatestReconcileAsync(Guid workspaceId, string targetKey, string? providerScopeFingerprint, CancellationToken cancellationToken = default) =>
             Task.FromResult<AzureProviderOperation?>(null);
@@ -561,7 +1398,58 @@ public sealed class AzureProviderOperationWorkerTests
             return Task.FromResult<AzureProviderOperation?>(updated);
         }
 
-        public Task<int> RecoverStaleAsync(DateTimeOffset now, CancellationToken cancellationToken = default) => Task.FromResult(0);
+        public Task<AzureProviderOperation?> ReleaseToQueueAsync(
+            Guid workspaceId,
+            Guid operationId,
+            string leaseToken,
+            DateTimeOffset now,
+            long? expectedVersion = null,
+            CancellationToken cancellationToken = default)
+        {
+            var index = Operations.FindIndex(operation => operation.Id == operationId && operation.Status == AzureProviderOperationStatus.Running &&
+                (!expectedVersion.HasValue || operation.Version == expectedVersion.Value));
+            if (index < 0)
+                return Task.FromResult<AzureProviderOperation?>(null);
+
+            var updated = Operations[index] with
+            {
+                Status = AzureProviderOperationStatus.Queued,
+                Version = Operations[index].Version + 1,
+                UpdatedAt = now,
+                WorkerId = null,
+                LeaseExpiresAt = null,
+                CompletedAt = null
+            };
+            Operations[index] = updated;
+            return Task.FromResult<AzureProviderOperation?>(updated);
+        }
+
+        public Task<int> RecoverStaleAsync(DateTimeOffset now, CancellationToken cancellationToken = default)
+        {
+            var recovered = 0;
+            for (var index = 0; index < Operations.Count; index++)
+            {
+                var operation = Operations[index];
+                if (operation.Status != AzureProviderOperationStatus.Running
+                    || operation.LeaseExpiresAt is not { } expires
+                    || expires > now)
+                {
+                    continue;
+                }
+
+                Operations[index] = operation with
+                {
+                    Status = AzureProviderOperationStatus.RecoveryRequired,
+                    WorkerId = null,
+                    LeaseExpiresAt = null,
+                    Version = operation.Version + 1,
+                    UpdatedAt = now
+                };
+                recovered++;
+            }
+
+            return Task.FromResult(recovered);
+        }
 
         public Task<IReadOnlyList<AzureProviderOperationTransition>> ListTransitionsAsync(Guid workspaceId, Guid operationId, CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<AzureProviderOperationTransition>>([]);
@@ -625,5 +1513,131 @@ public sealed class AzureProviderOperationWorkerTests
                 1,
                 DateTimeOffset.UtcNow,
                 DateTimeOffset.UtcNow));
+    }
+
+    private sealed class StaticBackendStore(ElsaInstanceProvisioningBackend backend) : IElsaInstanceProvisioningBackendStore
+    {
+        public int Reads { get; private set; }
+
+        public Task<ElsaInstanceProvisioningBackend> GetBackendAsync(
+            Guid workspaceId,
+            Guid instanceId,
+            CancellationToken cancellationToken = default)
+        {
+            Reads++;
+            return Task.FromResult(backend);
+        }
+    }
+
+    private sealed class RecordingDispatcher : IAzurePulumiProvisioningDispatcher
+    {
+        public bool CanDispatch => true;
+        public List<AzureProviderOperation> Operations { get; } = [];
+        public bool HasDispatched(Guid operationId) => Operations.Exists(operation => operation.Id == operationId);
+
+        public Task<AzurePulumiDispatchResult> DispatchAsync(
+            AzureProviderOperation operation,
+            AzureWorkloadPlan plan,
+            CancellationToken cancellationToken = default)
+        {
+            Operations.Add(operation);
+            return Task.FromResult(new AzurePulumiDispatchResult(true, Guid.NewGuid()));
+        }
+    }
+
+    private sealed class TerminalDispatcher(
+        ProvisioningOperationState state,
+        IReadOnlyDictionary<string, string>? outputs = null,
+        string? failureCode = null) : IAzurePulumiProvisioningDispatcher
+    {
+        public bool CanDispatch => true;
+        public List<AzureProviderOperation> Operations { get; } = [];
+        public bool HasDispatched(Guid operationId) => Operations.Exists(operation => operation.Id == operationId);
+
+        public Task<AzurePulumiDispatchResult> DispatchAsync(
+            AzureProviderOperation operation,
+            AzureWorkloadPlan plan,
+            CancellationToken cancellationToken = default)
+        {
+            Operations.Add(operation);
+            return Task.FromResult(new AzurePulumiDispatchResult(true, Guid.NewGuid(), state, failureCode, outputs));
+        }
+    }
+
+    private sealed class DenyingGate : IElsaInstanceCommercialGate
+    {
+        public Task<ElsaInstanceCommercialGateDecision> EvaluateAsync(
+            Guid organizationId,
+            ElsaInstanceOperationAction action,
+            int? activeInstanceCount = null,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(new ElsaInstanceCommercialGateDecision(
+                false,
+                ElsaInstanceCommercialOperation.EntitlementRequired,
+                "Managed hosting is not enabled for this organization."));
+    }
+
+    private sealed class FailingDispatcher : IAzurePulumiProvisioningDispatcher
+    {
+        public bool CanDispatch => false;
+
+        public Task<AzurePulumiDispatchResult> DispatchAsync(
+            AzureProviderOperation operation,
+            AzureWorkloadPlan plan,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(new AzurePulumiDispatchResult(false));
+    }
+
+    private sealed class FakeCommandProcess : IAzureCommandProcess
+    {
+        private readonly Queue<Response> _responses = new();
+        public List<string[]> Calls { get; } = [];
+
+        public void Success(Func<string[], bool> matcher, string output = "") =>
+            _responses.Enqueue(new(matcher, output));
+
+        public Task<AzureCommandProcessResult<T>> ExecuteAsync<T>(
+            AzureCommandProcessRequest request,
+            AzureCommandOutputProjector<T> outputProjector,
+            CancellationToken cancellationToken = default)
+            where T : AzureCommandSafeOutput
+        {
+            var args = request.Arguments.Select(x => x.Value).ToArray();
+            Calls.Add(args);
+            var response = _responses.Count > 0
+                ? _responses.Dequeue()
+                : throw new InvalidOperationException("Unexpected Azure command.");
+            Assert.True(response.Matcher(args), $"Unexpected command: {string.Join(' ', args)}");
+            return Task.FromResult(new AzureCommandProcessResult<T>(
+                AzureCommandProcessStatus.Succeeded,
+                AzureCommandProcessFailureKind.None,
+                0,
+                outputProjector(response.Output.AsMemory()),
+                "test.command.succeeded",
+                "The test command completed."));
+        }
+
+        private sealed record Response(Func<string[], bool> Matcher, string Output);
+    }
+
+    private sealed class UnusedOperationService : IAzureProviderOperationService
+    {
+        public Task<AzureProviderOperation> SubmitAsync(
+            Guid workspaceId,
+            AzureProviderOperationSubmission submission,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task<AzureProviderOperation> SubmitDeleteAsync(
+            Guid workspaceId,
+            AzureProviderOperationSubmission submission,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task<AzureProviderOperationStatusResponse?> GetStatusAsync(
+            Guid workspaceId,
+            Guid operationId,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
     }
 }

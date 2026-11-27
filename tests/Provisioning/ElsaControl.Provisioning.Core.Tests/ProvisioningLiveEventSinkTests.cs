@@ -31,6 +31,26 @@ public sealed class ProvisioningLiveEventSinkTests
     }
 
     [Fact]
+    public async Task SetFailureCode_is_forwarded_on_the_next_ledger_write()
+    {
+        var store = new InMemoryProvisioningStore();
+        var ledger = new RecordingLedger();
+        var sink = new ProvisioningLiveEventSink(store, store, Logger(), ledger);
+        var (operation, request) = await ClaimAsync(store);
+
+        using (sink.Bind(operation, request))
+        {
+            sink.SetFailureCode(operation.Id, "QuotaExceeded");
+            await sink.PublishAsync(operation.Id, [
+                Event(operation.Id, 1, ProvisioningEventKind.ResourceFailed, ProvisioningCapability.ContainerRuntime)
+            ]);
+        }
+
+        var written = Assert.Single(ledger.Operations);
+        Assert.Equal("QuotaExceeded", written.FailureCode);
+    }
+
+    [Fact]
     public async Task A_stale_fence_cannot_write_ledger_rows_or_events()
     {
         var operations = new FenceStore { HoldsFence = false };
@@ -245,6 +265,7 @@ public sealed class ProvisioningLiveEventSinkTests
     {
         public ProvisioningStepLedgerResult Result { get; init; } = ProvisioningStepLedgerResult.Written;
         public List<IReadOnlyList<ProvisioningEvent>> Writes { get; } = [];
+        public List<ProvisioningOperation> Operations { get; } = [];
 
         public Task<ProvisioningStepLedgerResult> TryWriteAsync(
             ProvisioningOperation operation,
@@ -253,6 +274,7 @@ public sealed class ProvisioningLiveEventSinkTests
             CancellationToken cancellationToken = default)
         {
             Writes.Add(events);
+            Operations.Add(operation);
             return Task.FromResult(Result);
         }
 

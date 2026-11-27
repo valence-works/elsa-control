@@ -31,6 +31,24 @@ public sealed class ProvisioningLiveEventSink(
         return bound.DisposeAction(() => _runs.TryRemove(operation.Id, out _));
     }
 
+    public void SetFailureCode(Guid operationId, string? failureCode)
+    {
+        if (string.IsNullOrWhiteSpace(failureCode))
+            return;
+        if (!_runs.TryGetValue(operationId, out var bound))
+            return;
+        bound.Operation = bound.Operation with { FailureCode = failureCode.Trim() };
+    }
+
+    public void SetOutputs(Guid operationId, IReadOnlyDictionary<string, string>? outputs)
+    {
+        if (outputs is null || outputs.Count == 0)
+            return;
+        if (!_runs.TryGetValue(operationId, out var bound))
+            return;
+        bound.Outputs = outputs;
+    }
+
     public async Task PublishAsync(
         Guid operationId,
         IReadOnlyList<ProvisioningEvent> events,
@@ -118,8 +136,9 @@ public sealed class ProvisioningLiveEventSink(
             .ToArray();
         try
         {
+            var outputs = _runs.TryGetValue(operation.Id, out var bound) ? bound.Outputs : null;
             await _ledger
-                .TryWriteAsync(operation, request, ordered, cancellationToken)
+                .TryWriteAsync(operation, request, ordered, outputs, cancellationToken)
                 .ConfigureAwait(false);
         }
         catch (Exception exception)
@@ -131,8 +150,12 @@ public sealed class ProvisioningLiveEventSink(
         }
     }
 
-    private sealed record BoundRun(ProvisioningOperation Operation, ProvisioningRequest? Request)
+    private sealed class BoundRun(ProvisioningOperation operation, ProvisioningRequest? request)
     {
+        public ProvisioningOperation Operation { get; set; } = operation;
+        public ProvisioningRequest? Request { get; } = request;
+        public IReadOnlyDictionary<string, string>? Outputs { get; set; }
+
         public IDisposable DisposeAction(Action release) => new Binder(release);
 
         private sealed class Binder(Action release) : IDisposable

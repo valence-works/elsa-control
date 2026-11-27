@@ -390,10 +390,13 @@ public sealed class ElsaEngineStack : Stack
                 runtimeUser
             }
         });
-        _ = app;
         _ = database;
 
         EngineName = Output.Create(values.GetValueOrDefault("engineName") ?? $"engine-{parsed:N}");
+        EngineEndpoint = app.Configuration.Apply(configuration =>
+            HttpsOrigin(configuration?.Ingress?.Fqdn));
+        WorkloadRevisionName = app.LatestRevisionName.Apply(name => name ?? "");
+        WorkloadResourceId = app.Id.Apply(id => id ?? "");
         PlatformEnvironmentKind = Output.Create("dedicated-container-environment");
         EndpointKind = Output.Create(Provisioning.Abstractions.ProvisioningCapability.Ingress);
         DatabaseKind = Output.Create(Provisioning.Abstractions.ProvisioningCapability.ManagedSql);
@@ -410,29 +413,35 @@ public sealed class ElsaEngineStack : Stack
         OwnedResourceGroupName = resourceGroup.Name;
     }
 
-    [Output] public Output<string> EngineName { get; set; }
+    [Output("engineName")] public Output<string> EngineName { get; set; }
 
-    [Output] public Output<string> PlatformEnvironmentKind { get; set; }
+    [Output(PulumiStackOutputs.EngineEndpoint)] public Output<string> EngineEndpoint { get; set; }
 
-    [Output] public Output<string> EndpointKind { get; set; }
+    [Output(PulumiStackOutputs.WorkloadRevisionName)] public Output<string> WorkloadRevisionName { get; set; }
 
-    [Output] public Output<string> DatabaseKind { get; set; }
+    [Output(PulumiStackOutputs.WorkloadResourceId)] public Output<string> WorkloadResourceId { get; set; }
 
-    [Output] public Output<string> SecretsKind { get; set; }
+    [Output("platformEnvironmentKind")] public Output<string> PlatformEnvironmentKind { get; set; }
 
-    [Output] public Output<string> RuntimeKind { get; set; }
+    [Output("endpointKind")] public Output<string> EndpointKind { get; set; }
 
-    [Output] public Output<string> IsolationKind { get; set; }
+    [Output("databaseKind")] public Output<string> DatabaseKind { get; set; }
 
-    [Output] public Output<string> ImageIdentityKind { get; set; }
+    [Output("secretsKind")] public Output<string> SecretsKind { get; set; }
 
-    [Output] public Output<string> HandoffKind { get; set; }
+    [Output("runtimeKind")] public Output<string> RuntimeKind { get; set; }
 
-    [Output] public Output<string> PlanFingerprint { get; set; }
+    [Output("isolationKind")] public Output<string> IsolationKind { get; set; }
 
-    [Output] public Output<string> OwnedResourceGroupKind { get; set; }
+    [Output("imageIdentityKind")] public Output<string> ImageIdentityKind { get; set; }
 
-    [Output] public Output<string> OwnedResourceGroupName { get; set; }
+    [Output("handoffKind")] public Output<string> HandoffKind { get; set; }
+
+    [Output("planFingerprint")] public Output<string> PlanFingerprint { get; set; }
+
+    [Output("ownedResourceGroupKind")] public Output<string> OwnedResourceGroupKind { get; set; }
+
+    [Output(PulumiStackOutputs.OwnedResourceGroupName)] public Output<string> OwnedResourceGroupName { get; set; }
 
     private static Dictionary<string, string> ReadConfig(Config config)
     {
@@ -483,8 +492,18 @@ public sealed class ElsaEngineStack : Stack
     private static string SqlName(Guid instanceId) =>
         "sql-engine-" + instanceId.ToString("N")[..16];
 
+    private static string HttpsOrigin(string? fqdn)
+    {
+        if (string.IsNullOrWhiteSpace(fqdn))
+            return "";
+        var trimmed = fqdn.Trim().TrimEnd('/');
+        return trimmed.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+            ? trimmed
+            : $"https://{trimmed}";
+    }
+
     private static string AppName(Guid instanceId) =>
-        Truncate("ca-eng-" + instanceId.ToString("N"), 32);
+        ProvisioningEngineContainerApp.ForInstance(instanceId);
 
     private static string EnvironmentName(Guid instanceId) =>
         Truncate("aca-eng-" + instanceId.ToString("N"), 32);

@@ -1205,6 +1205,10 @@ internal sealed class ElsaInstanceConfiguration : IEntityTypeConfiguration<ElsaI
         builder.Property(x => x.ConfigurationShapeRevisionId).HasMaxLength(128);
         builder.Property(x => x.TargetMode).HasMaxLength(128).IsRequired();
         builder.Property(x => x.RequiresProvisioningContext).IsRequired();
+        builder.Property(x => x.ProvisioningBackend)
+            .HasMaxLength(ElsaInstanceProvisioningBackendText.MaxLength)
+            .IsRequired()
+            .HasDefaultValue(ElsaInstanceProvisioningBackendText.Bicep);
         builder.Property(x => x.RegionCode).HasMaxLength(128).IsRequired();
         builder.Property(x => x.IsolationProfile).HasMaxLength(128).IsRequired();
         builder.Property(x => x.CapacityProfile).HasMaxLength(128).IsRequired();

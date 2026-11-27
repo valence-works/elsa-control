@@ -104,7 +104,7 @@ public sealed class AzureProviderOperationStepLedgerTests
     }
 
     [Fact]
-    public async Task Operation_succeeded_checkpoints_workload_ready_without_finalizing()
+    public async Task Operation_succeeded_queues_workload_ready_with_the_engine_endpoint()
     {
         var providerOperation = Operation();
         var store = new LedgerStore(providerOperation);
@@ -119,12 +119,84 @@ public sealed class AzureProviderOperationStepLedgerTests
                 Event(operation.Id, 2, ProvisioningEventKind.ResourceSucceeded, "resource-group"),
                 Event(operation.Id, 3, ProvisioningEventKind.ResourceSucceeded, ProvisioningCapability.ContainerRuntime),
                 Event(operation.Id, 4, ProvisioningEventKind.OperationSucceeded, ProvisioningCapability.ContainerRuntime)
+            ],
+            StackOutputs());
+
+        Assert.Equal(ProvisioningStepLedgerResult.Written, result);
+        Assert.Equal(AzureProviderOperationStatus.Queued, store.Operation.Status);
+        Assert.Equal(AzureProviderOperationPhase.WorkloadReady, store.Operation.Phase);
+        Assert.Equal(AzureProviderHealth.Unknown, store.Operation.Health);
+        Assert.Equal("https://runtime.example.test", store.Operation.Endpoint);
+        Assert.Equal("engine-app--candidate", store.Operation.Resources.WorkloadRevisionName);
+        Assert.Null(store.Operation.LeaseExpiresAt);
+        Assert.Null(store.Operation.WorkerId);
+        Assert.DoesNotContain(store.Transitions, item => item.Code == PulumiStepLedgerMapper.HealthVerifiedCode);
+        Assert.DoesNotContain(store.Transitions, item => item.Code == PulumiStepLedgerMapper.TrafficRoutedCode);
+        Assert.DoesNotContain(store.Transitions, item => item.Code == PulumiStepLedgerMapper.OperationSucceededCode);
+    }
+
+    [Fact]
+    public async Task Delete_operation_succeeded_finalizes_cleanup()
+    {
+        var providerOperation = Operation() with { Action = AzureProviderOperationAction.Delete };
+        var store = new LedgerStore(providerOperation);
+        var ledger = new AzureProviderOperationStepLedger(store);
+        var (operation, request) = Bound(providerOperation.WorkspaceId, providerOperation.Id);
+
+        var result = await ledger.TryWriteAsync(
+            operation,
+            request,
+            [
+                Event(
+                    operation.Id,
+                    1,
+                    ProvisioningEventKind.ResourceSucceeded,
+                    PulumiStepLedgerMapper.OwnedResourceGroupAbsentKind,
+                    PulumiStepLedgerMapper.ResourceGroupAbsentMessage),
+                Event(operation.Id, 2, ProvisioningEventKind.OperationSucceeded, ProvisioningCapability.ContainerRuntime)
             ]);
 
         Assert.Equal(ProvisioningStepLedgerResult.Written, result);
+        Assert.Equal(AzureProviderOperationStatus.Succeeded, store.Operation.Status);
+        Assert.Equal(AzureProviderOperationPhase.CleanupVerified, store.Operation.Phase);
+        Assert.Equal(new AzureProviderResourceReferences(), store.Operation.Resources);
+        Assert.Contains(store.Transitions, item => item.Code == PulumiStepLedgerMapper.CleanupSucceededCode);
+    }
+
+    [Fact]
+    public async Task Delete_does_not_finalize_without_the_resource_group_absent_receipt()
+    {
+        var providerOperation = Operation() with { Action = AzureProviderOperationAction.Delete };
+        var store = new LedgerStore(providerOperation);
+        var ledger = new AzureProviderOperationStepLedger(store);
+        var (operation, request) = Bound(providerOperation.WorkspaceId, providerOperation.Id);
+
+        var result = await ledger.TryWriteAsync(
+            operation,
+            request,
+            [Event(operation.Id, 1, ProvisioningEventKind.OperationSucceeded, ProvisioningCapability.ContainerRuntime)]);
+
+        Assert.Equal(ProvisioningStepLedgerResult.Ignored, result);
+        Assert.Equal(AzureProviderOperationStatus.Accepted, store.Operation.Status);
+        Assert.Empty(store.Transitions);
+    }
+
+    [Fact]
+    public async Task Operation_succeeded_does_not_finalize_when_a_readiness_checkpoint_is_rejected()
+    {
+        var providerOperation = Operation();
+        var store = new LedgerStore(providerOperation) { ThrowOnCheckpoint = true };
+        var ledger = new AzureProviderOperationStepLedger(store);
+        var (operation, request) = Bound(providerOperation.WorkspaceId, providerOperation.Id);
+
+        var result = await ledger.TryWriteAsync(
+            operation,
+            request,
+            [Event(operation.Id, 1, ProvisioningEventKind.OperationSucceeded, ProvisioningCapability.ContainerRuntime)]);
+
+        Assert.Equal(ProvisioningStepLedgerResult.StaleFence, result);
         Assert.Equal(AzureProviderOperationStatus.Running, store.Operation.Status);
-        Assert.Equal(AzureProviderOperationPhase.WorkloadReady, store.Operation.Phase);
-        Assert.Contains(store.Transitions, item => item.Code == PulumiStepLedgerMapper.RuntimeDeployedCode);
+        Assert.Null(store.Operation.CompletedAt);
     }
 
     [Fact]
@@ -237,6 +309,28 @@ public sealed class AzureProviderOperationStepLedgerTests
     }
 
     [Fact]
+    public async Task Operation_failed_stamps_FromPulumi_failure_class()
+    {
+        var providerOperation = Operation();
+        var store = new LedgerStore(providerOperation);
+        var ledger = new AzureProviderOperationStepLedger(store);
+        var (operation, request) = Bound(providerOperation.WorkspaceId, providerOperation.Id);
+        operation = operation with { FailureCode = AzureTransientArmFailure.QuotaExceeded };
+
+        var result = await ledger.TryWriteAsync(
+            operation,
+            request,
+            [Event(operation.Id, 1, ProvisioningEventKind.OperationFailed, ProvisioningCapability.ContainerRuntime)]);
+
+        Assert.Equal(ProvisioningStepLedgerResult.Written, result);
+        Assert.Equal(AzureProviderOperationStatus.Failed, store.Operation.Status);
+        Assert.Equal(ElsaInstanceOperationFailureClass.Terminal, store.LastFailureClass);
+        Assert.Equal(
+            ElsaInstanceOperationFailureClass.Terminal,
+            AzureTransientArmFailure.FromPulumi(AzureTransientArmFailure.QuotaExceeded));
+    }
+
+    [Fact]
     public async Task A_failure_finalizes_the_ledger_with_the_phase_zero_reason()
     {
         var providerOperation = Operation();
@@ -305,12 +399,13 @@ public sealed class AzureProviderOperationStepLedgerTests
         Guid operationId,
         int sequence,
         ProvisioningEventKind kind,
-        string resourceKind) =>
+        string resourceKind,
+        string? message = null) =>
         new(
             operationId,
             kind,
             resourceKind,
-            kind switch
+            message ?? kind switch
             {
                 ProvisioningEventKind.ResourceFailed or ProvisioningEventKind.OperationFailed => "Resource failed.",
                 ProvisioningEventKind.ResourceSucceeded or ProvisioningEventKind.OperationSucceeded => "Resource succeeded.",
@@ -319,6 +414,14 @@ public sealed class AzureProviderOperationStepLedgerTests
             },
             DateTimeOffset.UtcNow,
             sequence);
+
+    private static IReadOnlyDictionary<string, string> StackOutputs() =>
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["engineEndpoint"] = "https://runtime.example.test",
+            ["workloadRevisionName"] = "engine-app--candidate",
+            ["ownedResourceGroupName"] = "rg-engine-test"
+        };
 
     private static AzureProviderOperation Operation() =>
         new(
@@ -358,16 +461,17 @@ public sealed class AzureProviderOperationStepLedgerTests
             InstanceId: Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd"),
             LifecycleAction: ElsaInstanceOperationAction.Create);
 
-    private static ElsaInstanceLifecycleTopologyOperation Lifecycle() =>
+    private static ElsaInstanceLifecycleTopologyOperation Lifecycle(
+        ElsaInstanceOperationState state = ElsaInstanceOperationState.Running) =>
         new(
             Guid.Parse("33333333-3333-3333-3333-333333333333"),
             ElsaInstanceOperationAction.Create,
-            ElsaInstanceOperationState.Running,
+            state,
             1,
             1,
             DateTimeOffset.UtcNow,
             DateTimeOffset.UtcNow,
-            null,
+            state == ElsaInstanceOperationState.Succeeded ? DateTimeOffset.UtcNow : null,
             null,
             null,
             null,
@@ -379,9 +483,11 @@ public sealed class AzureProviderOperationStepLedgerTests
         private string? _leaseToken;
         public AzureProviderOperation Operation { get; private set; } = operation;
         public List<AzureProviderOperationTransition> Transitions { get; } = [];
+        public ElsaInstanceOperationFailureClass? LastFailureClass { get; private set; }
         public bool RejectClaim { get; init; }
         public bool RejectFinalize { get; set; }
         public bool ThrowOnWrite { get; set; }
+        public bool ThrowOnCheckpoint { get; set; }
 
         public void Reopen()
         {
@@ -513,7 +619,7 @@ public sealed class AzureProviderOperationStepLedgerTests
             CancellationToken cancellationToken = default)
         {
             AzureProviderOperationValidation.ValidateCheckpoint(checkpoint);
-            if (ThrowOnWrite)
+            if (ThrowOnWrite || ThrowOnCheckpoint)
                 throw new InvalidOperationException("The Azure provider operation store failed.");
             if (_leaseToken != leaseToken
                 || Operation.Status != AzureProviderOperationStatus.Running
@@ -534,6 +640,11 @@ public sealed class AzureProviderOperationStepLedgerTests
             {
                 Phase = checkpoint.Phase,
                 AttemptedStep = checkpoint.AttemptedStep,
+                Health = checkpoint.Health == AzureProviderHealth.Unknown ? Operation.Health : checkpoint.Health,
+                Endpoint = checkpoint.Endpoint ?? Operation.Endpoint,
+                Resources = checkpoint.ReplaceResources
+                    ? checkpoint.Resources
+                    : MergeResources(Operation.Resources, checkpoint.Resources),
                 CheckpointSequence = Operation.CheckpointSequence + 1,
                 Version = Operation.Version + 1,
                 UpdatedAt = now
@@ -593,6 +704,34 @@ public sealed class AzureProviderOperationStepLedgerTests
             return Task.FromResult<AzureProviderOperation?>(Operation);
         }
 
+        public Task<AzureProviderOperation?> ReleaseToQueueAsync(
+            Guid workspaceId,
+            Guid operationId,
+            string leaseToken,
+            DateTimeOffset now,
+            long? expectedVersion = null,
+            CancellationToken cancellationToken = default)
+        {
+            if (_leaseToken != leaseToken
+                || Operation.Status != AzureProviderOperationStatus.Running
+                || expectedVersion.HasValue && expectedVersion.Value != Operation.Version)
+            {
+                return Task.FromResult<AzureProviderOperation?>(null);
+            }
+
+            Operation = Operation with
+            {
+                Status = AzureProviderOperationStatus.Queued,
+                Version = Operation.Version + 1,
+                UpdatedAt = now,
+                WorkerId = null,
+                LeaseExpiresAt = null,
+                CompletedAt = null
+            };
+            _leaseToken = null;
+            return Task.FromResult<AzureProviderOperation?>(Operation);
+        }
+
         public Task<int> RecoverStaleAsync(DateTimeOffset now, CancellationToken cancellationToken = default) =>
             Task.FromResult(0);
 
@@ -601,5 +740,44 @@ public sealed class AzureProviderOperationStepLedgerTests
             Guid operationId,
             CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<AzureProviderOperationTransition>>(Transitions);
+
+        public Task RecordArmObservationClockAsync(
+            Guid workspaceId,
+            Guid operationId,
+            DateTimeOffset observedAt,
+            int backoffSeconds,
+            string? reasonCode,
+            ElsaInstanceOperationFailureClass? failureClass,
+            CancellationToken cancellationToken = default)
+        {
+            LastFailureClass = failureClass;
+            return Task.CompletedTask;
+        }
+
+        private static AzureProviderResourceReferences MergeResources(
+            AzureProviderResourceReferences current,
+            AzureProviderResourceReferences? incoming)
+        {
+            if (incoming is null)
+                return current;
+            return new(
+                incoming.ResourceGroupName ?? current.ResourceGroupName,
+                incoming.FoundationDeploymentId ?? current.FoundationDeploymentId,
+                incoming.WorkloadDeploymentId ?? current.WorkloadDeploymentId,
+                incoming.WorkloadResourceId ?? current.WorkloadResourceId,
+                incoming.WorkloadRevisionName ?? current.WorkloadRevisionName,
+                incoming.StableTrafficRevisionName ?? current.StableTrafficRevisionName,
+                incoming.WorkloadIdentityResourceId ?? current.WorkloadIdentityResourceId,
+                incoming.WorkloadIdentityClientId ?? current.WorkloadIdentityClientId,
+                incoming.WorkloadIdentityPrincipalId ?? current.WorkloadIdentityPrincipalId,
+                incoming.KeyVaultResourceId ?? current.KeyVaultResourceId,
+                incoming.KeyVaultUri ?? current.KeyVaultUri,
+                incoming.SqlServerResourceId ?? current.SqlServerResourceId,
+                incoming.SqlServerFqdn ?? current.SqlServerFqdn,
+                incoming.ContainerAppsEnvironmentResourceId ?? current.ContainerAppsEnvironmentResourceId,
+                incoming.RegistryResourceId ?? current.RegistryResourceId,
+                incoming.AcrPullDeploymentId ?? current.AcrPullDeploymentId,
+                incoming.AcrPullRoleAssignmentId ?? current.AcrPullRoleAssignmentId);
+        }
     }
 }

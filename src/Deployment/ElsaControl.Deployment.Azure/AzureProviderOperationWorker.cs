@@ -1,3 +1,6 @@
+using ElsaControl.Deployment.Core.Instances;
+using ElsaControl.Provisioning.Abstractions;
+
 namespace ElsaControl.Deployment.Azure;
 
 /// <summary>
@@ -11,8 +14,14 @@ public sealed class AzureProviderOperationWorker(
     IAzureProviderOperationStore store,
     AzureProviderExecutor executor,
     IAzureProviderPlanSource planSource,
-    TimeProvider? timeProvider = null)
+    TimeProvider? timeProvider = null,
+    IAzurePulumiProvisioningDispatcher? pulumi = null,
+    IElsaInstanceProvisioningBackendStore? backends = null,
+    IElsaInstanceCommercialGate? commercialGate = null,
+    IAzurePulumiReadinessVerifier? readiness = null)
 {
+    public const string DispatchWorkerId = "pulumi-dispatch";
+
     // Keep the executor-only construction seam available to hosts that predate the persisted
     // plan source; the default source still enforces the same admission checks.
     public AzureProviderOperationWorker(
@@ -91,10 +100,338 @@ public sealed class AzureProviderOperationWorker(
                 continue;
             }
 
+            var backend = await ReadBackendAsync(operation, cancellationToken).ConfigureAwait(false);
+            if (backend == ElsaInstanceProvisioningBackend.Unknown)
+            {
+                await FailClosedAsync(operation, now, cancellationToken).ConfigureAwait(false);
+                processed++;
+                continue;
+            }
+
+            if (backend == ElsaInstanceProvisioningBackend.Pulumi)
+            {
+                var reachedReady = operation.InstanceId is { } instanceId && instanceId != Guid.Empty
+                    ? await store.HasReachedReadyAsync(operation.WorkspaceId, instanceId, cancellationToken)
+                        .ConfigureAwait(false)
+                    : true;
+                if (!AzurePulumiAllowedOperations.Allows(operation, reachedReady))
+                {
+                    await FailClosedAsync(
+                            operation,
+                            now,
+                            cancellationToken,
+                            ManagedElsaReasonCodeCatalog.ProviderPulumiOperationUnsupported)
+                        .ConfigureAwait(false);
+                    processed++;
+                    continue;
+                }
+
+                if (pulumi is not null
+                    && pulumi.HasDispatched(operation.Id)
+                    && AzureProviderOperationPhaseOrdering.Compare(
+                        operation.Phase,
+                        AzureProviderOperationPhase.WorkloadReady) < 0)
+                {
+                    processed++;
+                    continue;
+                }
+
+                if (operation.Action != AzureProviderOperationAction.Delete
+                    && AzureProviderOperationPhaseOrdering.Compare(
+                        operation.Phase,
+                        AzureProviderOperationPhase.WorkloadReady) >= 0)
+                {
+                    if (readiness is null)
+                    {
+                        await FailClosedAsync(operation, now, cancellationToken).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        await readiness.VerifyAsync(operation, cancellationToken).ConfigureAwait(false);
+                    }
+                }
+                else
+                {
+                    await DispatchPulumiAsync(operation, plan, now, cancellationToken).ConfigureAwait(false);
+                }
+
+                processed++;
+                continue;
+            }
+
             await executor.ExecuteAsync(request, cancellationToken);
             processed++;
         }
 
         return processed;
     }
+
+    private async Task<ElsaInstanceProvisioningBackend> ReadBackendAsync(
+        AzureProviderOperation operation,
+        CancellationToken cancellationToken)
+    {
+        if (backends is null || operation.InstanceId is not { } instanceId || instanceId == Guid.Empty)
+            return ElsaInstanceProvisioningBackend.Bicep;
+        return await backends.GetBackendAsync(operation.WorkspaceId, instanceId, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task DispatchPulumiAsync(
+        AzureProviderOperation operation,
+        AzureWorkloadPlan plan,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        // Claim serializes concurrent dispatches. The step ledger may take over
+        // this live pulumi-dispatch lease so OperationSucceeded is not dropped.
+        var leaseToken = Guid.NewGuid().ToString("N");
+        var claimed = await store.ClaimAsync(
+                operation.WorkspaceId,
+                operation.Id,
+                DispatchWorkerId,
+                leaseToken,
+                TimeSpan.FromMinutes(1),
+                now,
+                operation.Version,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (claimed is null)
+            return;
+
+        if (claimed.Action != AzureProviderOperationAction.Delete)
+        {
+            if (IsIdentityBindingMissing(claimed))
+            {
+                await ParkClaimedAsync(
+                        claimed,
+                        leaseToken,
+                        AzureProviderOperationStatus.RecoveryRequired,
+                        ManagedElsaReasonCodeCatalog.ProviderIdentityBindingMissing,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (commercialGate is not null)
+            {
+                var decision = await commercialGate
+                    .EvaluateAsync(
+                        claimed.OrganizationId!.Value,
+                        claimed.LifecycleAction!.Value,
+                        cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+                if (!decision.Allowed)
+                {
+                    await ParkClaimedAsync(
+                            claimed,
+                            leaseToken,
+                            AzureProviderOperationStatus.EntitlementHeld,
+                            decision.Code,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    return;
+                }
+            }
+        }
+
+        AzurePulumiDispatchResult? dispatched = null;
+        if (pulumi is not null)
+            dispatched = await pulumi.DispatchAsync(claimed, plan, cancellationToken).ConfigureAwait(false);
+
+        if (dispatched is not { Dispatched: true })
+        {
+            await ParkClaimedAsync(
+                    claimed,
+                    leaseToken,
+                    AzureProviderOperationStatus.Failed,
+                    ManagedElsaReasonCodeCatalog.ProviderDispatchFailed,
+                    cancellationToken,
+                    stampFromPulumi: true)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        if (dispatched.State is ProvisioningOperationState.Failed
+            or ProvisioningOperationState.Cancelled
+            or ProvisioningOperationState.LockConflict)
+        {
+            await ParkClaimedAsync(
+                    claimed,
+                    leaseToken,
+                    AzureProviderOperationStatus.Failed,
+                    ManagedElsaReasonCodeCatalog.AzureDeploymentFailed,
+                    cancellationToken,
+                    stampFromPulumi: true,
+                    pulumiFailureCode: dispatched.FailureCode)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        if (dispatched.State == ProvisioningOperationState.Succeeded)
+        {
+            await ReconcileSucceededAsync(claimed, leaseToken, dispatched.Outputs, now, cancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        await store.ReleaseToQueueAsync(
+                claimed.WorkspaceId,
+                claimed.Id,
+                leaseToken,
+                now,
+                claimed.Version,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task ReconcileSucceededAsync(
+        AzureProviderOperation claimed,
+        string leaseToken,
+        IReadOnlyDictionary<string, string>? outputs,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        if (claimed.Action == AzureProviderOperationAction.Delete)
+        {
+            await ParkClaimedAsync(
+                    claimed,
+                    leaseToken,
+                    AzureProviderOperationStatus.Succeeded,
+                    PulumiStepLedgerMapper.CleanupSucceededCode,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        var mapped = PulumiStepLedgerMapper.WithStackOutputs(
+            new PulumiLedgerCheckpoint(
+                AzureProviderOperationPhase.WorkloadReady,
+                AzureProviderRunnerStep.Workload,
+                AzureProviderOperationStatus.Running,
+                PulumiStepLedgerMapper.ApplyCompletedCode,
+                PulumiStepLedgerMapper.ApplyCompletedMessage,
+                Finalize: false),
+            outputs);
+        if (mapped.Status != AzureProviderOperationStatus.Running)
+        {
+            await ParkClaimedAsync(
+                    claimed,
+                    leaseToken,
+                    mapped.Status,
+                    mapped.Code,
+                    cancellationToken,
+                    stampFromPulumi: mapped.Status == AzureProviderOperationStatus.Failed)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        var checkpointed = await store.CheckpointAsync(
+                claimed.WorkspaceId,
+                claimed.Id,
+                leaseToken,
+                new AzureProviderCheckpoint(
+                    mapped.Phase,
+                    mapped.Code,
+                    mapped.Message,
+                    mapped.Resources ?? claimed.Resources,
+                    mapped.Endpoint ?? claimed.Endpoint,
+                    mapped.Health == AzureProviderHealth.Unknown ? claimed.Health : mapped.Health,
+                    [],
+                    AttemptedStep: mapped.AttemptedStep),
+                now,
+                claimed.Version,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (checkpointed is null)
+            return;
+
+        await store.ReleaseToQueueAsync(
+                checkpointed.WorkspaceId,
+                checkpointed.Id,
+                leaseToken,
+                now,
+                checkpointed.Version,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private Task FailClosedAsync(
+        AzureProviderOperation operation,
+        DateTimeOffset now,
+        CancellationToken cancellationToken,
+        string? code = null) =>
+        ParkAsync(
+            operation,
+            now,
+            AzureProviderOperationStatus.Failed,
+            code ?? ManagedElsaReasonCodeCatalog.ProviderDispatchFailed,
+            cancellationToken,
+            stampFromPulumi: code is null);
+
+    private async Task ParkAsync(
+        AzureProviderOperation operation,
+        DateTimeOffset now,
+        AzureProviderOperationStatus status,
+        string code,
+        CancellationToken cancellationToken,
+        bool stampFromPulumi = false)
+    {
+        var leaseToken = Guid.NewGuid().ToString("N");
+        var claimed = await store.ClaimAsync(
+                operation.WorkspaceId,
+                operation.Id,
+                DispatchWorkerId,
+                leaseToken,
+                TimeSpan.FromMinutes(1),
+                now,
+                operation.Version,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (claimed is null)
+            return;
+
+        await ParkClaimedAsync(claimed, leaseToken, status, code, cancellationToken, stampFromPulumi)
+            .ConfigureAwait(false);
+    }
+
+    private async Task ParkClaimedAsync(
+        AzureProviderOperation claimed,
+        string leaseToken,
+        AzureProviderOperationStatus status,
+        string code,
+        CancellationToken cancellationToken,
+        bool stampFromPulumi = false,
+        string? pulumiFailureCode = null)
+    {
+        var finalized = await store.FinalizeAsync(
+                claimed.WorkspaceId,
+                claimed.Id,
+                leaseToken,
+                status,
+                code,
+                _timeProvider.GetUtcNow(),
+                claimed.Version,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (finalized is null)
+            return;
+
+        if (!stampFromPulumi)
+            return;
+
+        await store.RecordArmObservationClockAsync(
+                claimed.WorkspaceId,
+                claimed.Id,
+                _timeProvider.GetUtcNow(),
+                0,
+                code,
+                AzureTransientArmFailure.FromPulumi(pulumiFailureCode),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static bool IsIdentityBindingMissing(AzureProviderOperation operation) =>
+        operation.OrganizationId is not { } organizationId || organizationId == Guid.Empty ||
+        operation.InstanceId is not { } instanceId || instanceId == Guid.Empty ||
+        operation.LifecycleAction is not { };
 }

@@ -279,7 +279,10 @@ public sealed class AzurePulumiAutomationRunnerTests
         Assert.True(result.OwnedResourcesAbsent);
         Assert.Equal("elsa-engine-aaaaaaaabbbbccccddddeeeeeeeeeeee", probe.LastName);
         Assert.Equal(ProvisioningCommand.Destroy, automation.LastCommand);
-        Assert.Contains(result.Events, value => value.Message == "Owned resource group is absent.");
+        Assert.Contains(
+            result.Events,
+            value => value.ResourceKind == "owned-resource-group-absent"
+                     && value.Message == "Owned resource group is absent.");
     }
 
     [Fact]
@@ -493,7 +496,10 @@ public sealed class AzurePulumiAutomationRunnerTests
         Assert.True(result.OwnedResourcesAbsent);
         Assert.Equal("elsa-engine-aaaaaaaabbbbccccddddeeeeeeeeeeee", probe.LastName);
         Assert.Equal(subscription, probe.LastSubscription);
-        Assert.Contains(result.Events, value => value.Message == "Owned resource group is absent.");
+        Assert.Contains(
+            result.Events,
+            value => value.ResourceKind == "owned-resource-group-absent"
+                     && value.Message == "Owned resource group is absent.");
     }
 
     [Fact]

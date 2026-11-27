@@ -12,4 +12,8 @@ public static class PulumiStackOutputs
     public const string ContainerEnvironmentDefaultDomain = "containerEnvironmentDefaultDomain";
     public const string RegistryId = "registryId";
     public const string RegistryLoginServer = "registryLoginServer";
+    public const string EngineEndpoint = "engineEndpoint";
+    public const string WorkloadRevisionName = "workloadRevisionName";
+    public const string WorkloadResourceId = "workloadResourceId";
+    public const string OwnedResourceGroupName = "ownedResourceGroupName";
 }

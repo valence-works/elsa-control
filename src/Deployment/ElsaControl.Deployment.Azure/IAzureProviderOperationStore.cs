@@ -64,6 +64,18 @@ public interface IAzureProviderOperationStore
         Guid instanceId,
         CancellationToken cancellationToken = default) =>
         Task.FromResult(true);
+
+    /// <summary>
+    /// True when this instance has ever reached Ready (a succeeded reconcile with
+    /// Healthy or Degraded health and a managed endpoint). Lightweight stores fail
+    /// closed by reporting Ready so Retry is rejected unless a store proves otherwise.
+    /// </summary>
+    Task<bool> HasReachedReadyAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult(true);
+
     /// <summary>
     /// Lists accepted, queued, and entitlement-held provider operations that are not currently
     /// leased. Recovery-required rows are durable but excluded from the automatic queue before
@@ -88,6 +100,20 @@ public interface IAzureProviderOperationStore
     Task<AzureProviderOperation?> HeartbeatAsync(Guid workspaceId, Guid operationId, string leaseToken, TimeSpan leaseDuration, DateTimeOffset now, long? expectedVersion = null, CancellationToken cancellationToken = default);
     Task<AzureProviderOperation?> CheckpointAsync(Guid workspaceId, Guid operationId, string leaseToken, AzureProviderCheckpoint checkpoint, DateTimeOffset now, long? expectedVersion = null, CancellationToken cancellationToken = default);
     Task<AzureProviderOperation?> FinalizeAsync(Guid workspaceId, Guid operationId, string leaseToken, AzureProviderOperationStatus status, string code, DateTimeOffset now, long? expectedVersion = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Releases a Running lease back to Queued so the Azure worker can claim
+    /// Health and Promotion after a Pulumi apply. Default is a no-op.
+    /// </summary>
+    Task<AzureProviderOperation?> ReleaseToQueueAsync(
+        Guid workspaceId,
+        Guid operationId,
+        string leaseToken,
+        DateTimeOffset now,
+        long? expectedVersion = null,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult<AzureProviderOperation?>(null);
+
     Task<int> RecoverStaleAsync(DateTimeOffset now, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<AzureProviderOperationTransition>> ListTransitionsAsync(Guid workspaceId, Guid operationId, CancellationToken cancellationToken = default);
 

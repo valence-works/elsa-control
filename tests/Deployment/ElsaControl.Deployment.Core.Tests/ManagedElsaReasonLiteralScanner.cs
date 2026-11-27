@@ -15,6 +15,7 @@ internal static class ManagedElsaReasonLiteralScanner
         "provider.handoff.",
         "provider.reconciliation.",
         "provider.identity-binding",
+        "provider.pulumi.",
         "azure.deployment.",
         "azure.recovery.",
         "provisioning.timeout.",
@@ -32,7 +33,8 @@ internal static class ManagedElsaReasonLiteralScanner
     internal static readonly string[] ReasonExactCodes =
     [
         ManagedElsaReasonCodeCatalog.AzurePromotionUncertain,
-        ManagedElsaReasonCodeCatalog.AzurePromotionRollbackUncertain
+        ManagedElsaReasonCodeCatalog.AzurePromotionRollbackUncertain,
+        ManagedElsaReasonCodeCatalog.ProviderDispatchFailed
     ];
 
     internal static readonly Regex ProductionReasonLiteral = new(

@@ -8,6 +8,15 @@ namespace ElsaControl.Deployment.Azure.Tests;
 public sealed class PulumiStepLedgerMapperTests
 {
     [Fact]
+    public void Engine_handoff_output_keys_match_the_stack_contract()
+    {
+        Assert.Equal("engineEndpoint", PulumiStepLedgerMapper.EngineEndpointOutputKey);
+        Assert.Equal("workloadRevisionName", PulumiStepLedgerMapper.WorkloadRevisionNameOutputKey);
+        Assert.Equal("workloadResourceId", PulumiStepLedgerMapper.WorkloadResourceIdOutputKey);
+        Assert.Equal("ownedResourceGroupName", PulumiStepLedgerMapper.OwnedResourceGroupNameOutputKey);
+    }
+
+    [Fact]
     public void Foundation_then_runtime_advances_projector_stages_in_order()
     {
         var phase = AzureProviderOperationPhase.Planned;
@@ -128,7 +137,7 @@ public sealed class PulumiStepLedgerMapperTests
     }
 
     [Fact]
-    public void Operation_succeeded_checkpoints_the_runtime_stage_without_finalizing()
+    public void Operation_succeeded_stops_at_workload_ready_until_health_runs()
     {
         var mapped = PulumiStepLedgerMapper.TryMap(
             Event(ProvisioningEventKind.OperationSucceeded, ProvisioningCapability.ContainerRuntime, "Operation succeeded."),
@@ -137,8 +146,8 @@ public sealed class PulumiStepLedgerMapperTests
         Assert.False(mapped.Finalize);
         Assert.Equal(AzureProviderOperationStatus.Running, mapped.Status);
         Assert.Equal(AzureProviderOperationPhase.WorkloadReady, mapped.Phase);
-        Assert.Equal(PulumiStepLedgerMapper.RuntimeDeployedCode, mapped.Code);
-        Assert.Equal(PulumiStepLedgerMapper.RuntimeDeployedMessage, mapped.Message);
+        Assert.Equal(PulumiStepLedgerMapper.ApplyCompletedCode, mapped.Code);
+        Assert.Equal(AzureProviderHealth.Unknown, mapped.Health);
         Assert.True(PulumiStepLedgerMapper.IsCustomerSafe(mapped));
     }
 
@@ -165,7 +174,7 @@ public sealed class PulumiStepLedgerMapperTests
         Assert.False(last.Finalize);
         Assert.Equal(AzureProviderOperationStatus.Running, last.Status);
         Assert.Equal(AzureProviderOperationPhase.WorkloadReady, last.Phase);
-        Assert.Equal(PulumiStepLedgerMapper.RuntimeDeployedCode, last.Code);
+        Assert.Equal(PulumiStepLedgerMapper.ApplyCompletedCode, last.Code);
     }
 
     [Fact]
@@ -194,6 +203,23 @@ public sealed class PulumiStepLedgerMapperTests
         Assert.Equal(ManagedElsaReasonCodeCatalog.AzureDeploymentFailed, mapped.Code);
         Assert.Equal(PulumiStepLedgerMapper.ResourceFailedMessage, mapped.Message);
         Assert.True(PulumiStepLedgerMapper.IsCustomerSafe(mapped));
+    }
+
+    [Fact]
+    public void Resource_group_absent_receipt_is_recognized()
+    {
+        Assert.True(PulumiStepLedgerMapper.IsResourceGroupAbsentReceipt(
+            Event(
+                ProvisioningEventKind.ResourceSucceeded,
+                PulumiStepLedgerMapper.OwnedResourceGroupAbsentKind,
+                PulumiStepLedgerMapper.ResourceGroupAbsentMessage)));
+        Assert.False(PulumiStepLedgerMapper.IsResourceGroupAbsentReceipt(
+            Event(ProvisioningEventKind.ResourceSucceeded, "resource-group", PulumiStepLedgerMapper.ResourceGroupAbsentMessage)));
+        var checkpoint = PulumiStepLedgerMapper.ResourceGroupAbsent();
+        Assert.True(checkpoint.ReplaceResources);
+        Assert.Equal(new AzureProviderResourceReferences(), checkpoint.Resources);
+        Assert.False(checkpoint.Finalize);
+        Assert.True(PulumiStepLedgerMapper.IsCustomerSafe(checkpoint));
     }
 
     [Fact]

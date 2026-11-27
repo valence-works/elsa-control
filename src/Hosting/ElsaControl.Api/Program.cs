@@ -702,6 +702,12 @@ builder.Services.AddProvisioning(
     builder.Configuration,
     runWorker: !provisioningTesting,
     allowFakeProvider: provisioningTesting);
+builder.Services.Configure<AzurePulumiDispatchOptions>(
+    builder.Configuration.GetSection(AzurePulumiDispatchOptions.ConfigurationSection));
+builder.Services.AddSingleton<IElsaInstanceProvisioningBackendSelector, AzurePulumiProvisioningBackendSelector>();
+builder.Services.AddSingleton<IAzurePulumiProvisioningDispatcher, AzurePulumiProvisioningDispatcher>();
+builder.Services.AddScoped<IElsaInstanceProvisioningBackendStore>(services =>
+    services.GetRequiredService<EfCoreElsaInstanceLifecycleStore>());
 var provisioningWorkerEnabled = builder.Configuration.GetValue("Provisioning:WorkerEnabled", false);
 if (provisioningWorkerEnabled && !provisioningTesting)
 {

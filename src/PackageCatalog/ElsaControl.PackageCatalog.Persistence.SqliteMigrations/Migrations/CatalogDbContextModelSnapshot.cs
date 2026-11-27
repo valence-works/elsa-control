@@ -3184,6 +3184,13 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                         .HasMaxLength(71)
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("ProvisioningBackend")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT")
+                        .HasDefaultValue("bicep");
+
                     b.Property<string>("RegionCode")
                         .IsRequired()
                         .HasMaxLength(128)

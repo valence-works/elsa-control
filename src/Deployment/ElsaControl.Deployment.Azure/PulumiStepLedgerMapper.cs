@@ -1,3 +1,4 @@
+using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.Provisioning.Abstractions;
 using ElsaControl.Provisioning.Core;
@@ -23,6 +24,17 @@ public static class PulumiStepLedgerMapper
     public const string RuntimeDeployingCode = "runtime.deploying";
     public const string RuntimeDeployedCode = "runtime.deployed";
     public const string ApplyCompletedCode = "azure.step.completed";
+    public const string HealthVerifiedCode = "health.verified";
+    public const string TrafficRoutedCode = "traffic.routed";
+    public const string OperationSucceededCode = "azure.operation.succeeded";
+    public const string CleanupSucceededCode = "azure.cleanup.succeeded";
+    public const string EngineEndpointOutputKey = "engineEndpoint";
+    public const string WorkloadRevisionNameOutputKey = "workloadRevisionName";
+    public const string WorkloadResourceIdOutputKey = "workloadResourceId";
+    public const string OwnedResourceGroupNameOutputKey = "ownedResourceGroupName";
+    public const string OwnedResourceGroupAbsentKind = "owned-resource-group-absent";
+    public const string ResourceGroupAbsentMessage = "Owned resource group is absent.";
+    public const string WorkloadOutputsUnavailableMessage = "Workload outputs are unavailable.";
 
     public const string FoundationPreparingMessage = "Foundation is preparing.";
     public const string FoundationReadyMessage = "Foundation is ready.";
@@ -31,6 +43,10 @@ public static class PulumiStepLedgerMapper
     public const string DatabaseReadyMessage = "Database is ready.";
     public const string RuntimeDeployingMessage = "Runtime is deploying.";
     public const string RuntimeDeployedMessage = "Runtime is deployed.";
+    public const string HealthVerifiedMessage = "The candidate is healthy.";
+    public const string TrafficRoutedMessage = "Traffic is routed.";
+    public const string OperationSucceededMessage = "Azure workload reconciliation completed.";
+    public const string CleanupSucceededMessage = "Exact owned-resource cleanup was verified.";
     public const string ResourceFailedMessage = "The provider step failed.";
     public const string UpdateCancelledMessage = "The provider update was cancelled.";
 
@@ -68,15 +84,13 @@ public static class PulumiStepLedgerMapper
 
         if (value.Kind == ProvisioningEventKind.OperationSucceeded)
         {
-            // TODO(#1033): Health verification and traffic promotion own Succeeded.
-            // This checkpoint is the Pulumi/infra step completing, not engine-ready.
             var phase = Max(currentPhase, AzureProviderOperationPhase.WorkloadReady);
             return new PulumiLedgerCheckpoint(
                 phase,
                 AzureProviderRunnerStep.Workload,
                 AzureProviderOperationStatus.Running,
-                RuntimeDeployedCode,
-                RuntimeDeployedMessage,
+                ApplyCompletedCode,
+                ApplyCompletedMessage,
                 Finalize: false);
         }
 
@@ -114,6 +128,95 @@ public static class PulumiStepLedgerMapper
 
         return null;
     }
+
+    public static bool IsResourceGroupAbsentReceipt(ProvisioningEvent value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        return value.Kind == ProvisioningEventKind.ResourceSucceeded
+               && string.Equals(value.ResourceKind, OwnedResourceGroupAbsentKind, StringComparison.Ordinal);
+    }
+
+    public static PulumiLedgerCheckpoint ResourceGroupAbsent() =>
+        new(
+            AzureProviderOperationPhase.CleanupVerified,
+            AzureProviderRunnerStep.Cleanup,
+            AzureProviderOperationStatus.Running,
+            CleanupSucceededCode,
+            CleanupSucceededMessage,
+            Finalize: false,
+            ReplaceResources: true,
+            Resources: new AzureProviderResourceReferences());
+
+    public static PulumiLedgerCheckpoint DeleteSucceeded() =>
+        new(
+            AzureProviderOperationPhase.CleanupVerified,
+            AzureProviderRunnerStep.Cleanup,
+            AzureProviderOperationStatus.Succeeded,
+            CleanupSucceededCode,
+            CleanupSucceededMessage,
+            Finalize: true,
+            ReplaceResources: true,
+            Resources: new AzureProviderResourceReferences());
+
+    public static PulumiLedgerCheckpoint WithStackOutputs(
+        PulumiLedgerCheckpoint checkpoint,
+        IReadOnlyDictionary<string, string>? outputs)
+    {
+        ArgumentNullException.ThrowIfNull(checkpoint);
+        if (!TryReadEngineEndpoint(outputs, out var endpoint))
+        {
+            return checkpoint with
+            {
+                Status = AzureProviderOperationStatus.RecoveryRequired,
+                Code = ManagedElsaReasonCodeCatalog.AzureRecoveryWorkloadOutputsUnavailable,
+                Message = WorkloadOutputsUnavailableMessage,
+                Finalize = true,
+                Health = AzureProviderHealth.Unknown,
+                Endpoint = null
+            };
+        }
+
+        return checkpoint with
+        {
+            Endpoint = endpoint,
+            Resources = new AzureProviderResourceReferences(
+                ResourceGroupName: ReadOutput(outputs, OwnedResourceGroupNameOutputKey),
+                WorkloadRevisionName: ReadOutput(outputs, WorkloadRevisionNameOutputKey),
+                WorkloadResourceId: ReadOutput(outputs, WorkloadResourceIdOutputKey))
+        };
+    }
+
+    public static bool TryReadEngineEndpoint(
+        IReadOnlyDictionary<string, string>? outputs,
+        out string endpoint)
+    {
+        endpoint = "";
+        var value = ReadOutput(outputs, EngineEndpointOutputKey);
+        if (value is null || !ElsaManagedEndpointOrigin.TryCreate(value, out var origin))
+            return false;
+        endpoint = origin.Value;
+        return true;
+    }
+
+    public static PulumiLedgerCheckpoint HealthVerified() =>
+        new(
+            AzureProviderOperationPhase.HealthVerified,
+            AzureProviderRunnerStep.Health,
+            AzureProviderOperationStatus.Running,
+            HealthVerifiedCode,
+            HealthVerifiedMessage,
+            Finalize: false,
+            AzureProviderHealth.Healthy);
+
+    public static PulumiLedgerCheckpoint TrafficPromoted() =>
+        new(
+            AzureProviderOperationPhase.TrafficPromoted,
+            AzureProviderRunnerStep.Promotion,
+            AzureProviderOperationStatus.Running,
+            TrafficRoutedCode,
+            TrafficRoutedMessage,
+            Finalize: false,
+            AzureProviderHealth.Healthy);
 
     public static bool IsCustomerSafe(PulumiLedgerCheckpoint checkpoint)
     {
@@ -282,6 +385,13 @@ public static class PulumiStepLedgerMapper
         || value.Contains("connectionstring", StringComparison.OrdinalIgnoreCase)
         || value.Contains("stack trace", StringComparison.OrdinalIgnoreCase);
 
+    private static string? ReadOutput(IReadOnlyDictionary<string, string>? outputs, string key)
+    {
+        if (outputs is null || !outputs.TryGetValue(key, out var value) || string.IsNullOrWhiteSpace(value))
+            return null;
+        return value.Trim();
+    }
+
     private static bool TryReadGuid(
         IReadOnlyDictionary<string, string> stackConfig,
         string key,
@@ -300,4 +410,8 @@ public sealed record PulumiLedgerCheckpoint(
     AzureProviderOperationStatus Status,
     string Code,
     string Message,
-    bool Finalize);
+    bool Finalize,
+    AzureProviderHealth Health = AzureProviderHealth.Unknown,
+    string? Endpoint = null,
+    bool ReplaceResources = false,
+    AzureProviderResourceReferences? Resources = null);

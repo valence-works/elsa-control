@@ -1,3 +1,4 @@
+using ElsaControl.Deployment.Azure;
 using ElsaControl.Deployment.Core.Cockpit;
 using ElsaControl.Deployment.Core.Workspace;
 using ElsaControl.Deployment.Abstractions.Instances;
@@ -81,6 +82,11 @@ internal sealed class ElsaInstanceEntity
     /// snapshot is missing or corrupted after acceptance.
     /// </summary>
     public bool RequiresProvisioningContext { get; set; }
+    /// <summary>
+    /// Durable realization backend, pinned at the first admitted Create.
+    /// Existing engines default to <c>bicep</c>.
+    /// </summary>
+    public string ProvisioningBackend { get; set; } = ElsaInstanceProvisioningBackendText.Bicep;
     public string RegionCode { get; set; } = "";
     public string IsolationProfile { get; set; } = "";
     public string CapacityProfile { get; set; } = "";

@@ -1,3 +1,5 @@
+using System.Reflection;
+using ElsaControl.Provisioning.Core;
 using ElsaControl.Provisioning.Providers.Azure;
 using ElsaControl.Provisioning.Providers.Azure.Programs;
 using Pulumi;
@@ -15,6 +17,36 @@ namespace ElsaControl.Provisioning.Providers.Azure.Tests;
 [Collection(nameof(PulumiMockTests))]
 public sealed class ElsaEngineStackTests
 {
+    [Fact]
+    public void Engine_outputs_are_registered_under_camelCase_keys()
+    {
+        foreach (var property in typeof(ElsaEngineStack).GetProperties())
+        {
+            var output = property.GetCustomAttribute<OutputAttribute>();
+            if (output is null)
+                continue;
+            var expected = char.ToLowerInvariant(property.Name[0]) + property.Name[1..];
+            Assert.Equal(expected, output.Name);
+        }
+
+        Assert.Equal(
+            PulumiStackOutputs.EngineEndpoint,
+            typeof(ElsaEngineStack).GetProperty(nameof(ElsaEngineStack.EngineEndpoint))!
+                .GetCustomAttribute<OutputAttribute>()!.Name);
+        Assert.Equal(
+            PulumiStackOutputs.WorkloadRevisionName,
+            typeof(ElsaEngineStack).GetProperty(nameof(ElsaEngineStack.WorkloadRevisionName))!
+                .GetCustomAttribute<OutputAttribute>()!.Name);
+        Assert.Equal(
+            PulumiStackOutputs.WorkloadResourceId,
+            typeof(ElsaEngineStack).GetProperty(nameof(ElsaEngineStack.WorkloadResourceId))!
+                .GetCustomAttribute<OutputAttribute>()!.Name);
+        Assert.Equal(
+            PulumiStackOutputs.OwnedResourceGroupName,
+            typeof(ElsaEngineStack).GetProperty(nameof(ElsaEngineStack.OwnedResourceGroupName))!
+                .GetCustomAttribute<OutputAttribute>()!.Name);
+    }
+
     [Fact]
     public async Task Engine_stack_reads_platform_output_through_a_fully_qualified_stack_reference()
     {
@@ -53,6 +85,35 @@ public sealed class ElsaEngineStackTests
             resource => resource.GetResourceType() == EngineSqlContainedUser.ResourceTypeName);
         var stackReference = resources.OfType<StackReference>().Single();
         Assert.Equal("organization/elsa-platform/staging", stackReference.GetResourceName());
+    }
+
+    [Fact]
+    public async Task Engine_endpoint_is_the_stable_ingress_fqdn_the_verifier_accepts()
+    {
+        using var config = PulumiTestConfig.Set(PulumiProjectNames.Engine, EngineTestConfig.Values());
+        var resources = await PulumiDeployment.TestAsync<ElsaEngineStack>(
+            new PlatformStackReferenceMocks(),
+            new TestOptions
+            {
+                IsPreview = false,
+                ProjectName = PulumiProjectNames.Engine,
+                StackName = "engine-" + EngineTestConfig.InstanceId.ToString("N")
+            });
+
+        var appName = ProvisioningEngineContainerApp.ForInstance(EngineTestConfig.InstanceId);
+        var endpoint = await resources.OfType<ElsaEngineStack>().Single().EngineEndpoint.GetValueAsync();
+        Assert.Equal(
+            ProvisioningEngineIngress.Origin(appName, ProvisioningEngineIngress.MockEnvironmentDomain),
+            endpoint);
+        Assert.True(ProvisioningEngineIngress.HostMatchesApp(endpoint, appName));
+        Assert.DoesNotContain("--", new Uri(endpoint).Host, StringComparison.Ordinal);
+        Assert.False(ProvisioningEngineIngress.HostMatchesApp(
+            ProvisioningEngineIngress.RevisionOrigin(
+                appName,
+                "candidate",
+                ProvisioningEngineIngress.MockEnvironmentDomain),
+            appName));
+        Assert.False(ProvisioningEngineIngress.HostMatchesApp("https://runtime.example.test", appName));
     }
 
     [Fact]
