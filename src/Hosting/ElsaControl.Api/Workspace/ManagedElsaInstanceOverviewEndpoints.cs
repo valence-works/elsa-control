@@ -27,8 +27,10 @@ public static class ManagedElsaInstanceOverviewEndpoints
     internal const string PermissionRequiredCode = "instance.permission-required";
     internal const string OperationActiveCode = "instance.operation-active";
     internal const string ActivityLimitInvalidCode = "instance.activity-limit-invalid";
-    internal const string DeploymentStatusUnclearMessage = "Deployment status unclear. We're still confirming the result.";
+    internal const string DeploymentStatusUnclearMessage = "Deployment result not confirmed.";
     internal const string CheckingDeploymentStatusMessage = "Checking deployment status";
+    internal const string DeploymentResultUnconfirmedCode = "deployment.result-unconfirmed";
+    internal const string DeploymentStatusCheckingCode = "deployment.status-checking";
     internal const string SubmissionUncertainCode =
         ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain;
     internal const string UnknownFieldCode = "request.unknown-field";
@@ -623,7 +625,10 @@ public static class ManagedElsaInstanceOverviewEndpoints
         // when the operation is Failed (or there is no operation); then informational.
         // FailureCode is not applied to cancelled, superseded, hold, or earlier rows.
         if (IsWarningActivityCode(diagnosticCode) || IsWarningActivityCode(operationFailureCode))
-            return new(null, ManagedElsaInstanceActivitySeverity.Warning, DeploymentStatusUnclearMessage);
+            return new(
+                DeploymentResultUnconfirmedCode,
+                ManagedElsaInstanceActivitySeverity.Warning,
+                DeploymentStatusUnclearMessage);
 
         if (IsFailedReasonCode(diagnosticCode) || IsFailedReasonCode(operationFailureCode))
             return FailedActivity(diagnosticCode ?? operationFailureCode);
@@ -635,11 +640,18 @@ public static class ManagedElsaInstanceOverviewEndpoints
 
         if (IsInformationalActivityCode(diagnosticCode))
         {
-            var informational = string.Equals(
-                diagnosticCode, ElsaInstanceProviderReconciliationService.UnavailableCode, StringComparison.Ordinal)
-                ? CheckingDeploymentStatusMessage
-                : null;
-            return new(null, ManagedElsaInstanceActivitySeverity.Informational, informational);
+            if (string.Equals(
+                    diagnosticCode,
+                    ElsaInstanceProviderReconciliationService.UnavailableCode,
+                    StringComparison.Ordinal))
+            {
+                return new(
+                    DeploymentStatusCheckingCode,
+                    ManagedElsaInstanceActivitySeverity.Informational,
+                    CheckingDeploymentStatusMessage);
+            }
+
+            return new(null, ManagedElsaInstanceActivitySeverity.Informational, null);
         }
 
         if (!string.IsNullOrWhiteSpace(diagnosticCode) &&

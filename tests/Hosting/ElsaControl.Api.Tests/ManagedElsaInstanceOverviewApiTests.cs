@@ -304,16 +304,34 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
             ElsaInstanceCommercialOperation.EntitlementRequired,
             ManagedElsaInstanceOverviewEndpoints.CustomerActivityDiagnosticCode(
                 ElsaInstanceCommercialOperation.EntitlementRequired));
-        Assert.Null(ManagedElsaInstanceOverviewEndpoints.CustomerActivityDiagnosticCode(
-            ElsaInstanceProviderReconciliationService.UnavailableCode));
-        Assert.Null(ManagedElsaInstanceOverviewEndpoints.CustomerActivityDiagnosticCode(
-            ElsaInstanceProviderReconciliationService.AmbiguousCode));
-        Assert.Null(ManagedElsaInstanceOverviewEndpoints.CustomerActivityDiagnosticCode(
-            ElsaInstanceProviderReconciliationService.RetrySafeCode));
-        Assert.Null(ManagedElsaInstanceOverviewEndpoints.CustomerActivityDiagnosticCode(
-            ElsaInstanceProviderReconciliationService.CorrelationMismatchCode));
-        Assert.Null(ManagedElsaInstanceOverviewEndpoints.CustomerActivityDiagnosticCode(
-            ManagedElsaInstanceOverviewEndpoints.SubmissionUncertainCode));
+        Assert.Equal(
+            ManagedElsaInstanceOverviewEndpoints.DeploymentStatusCheckingCode,
+            ManagedElsaInstanceOverviewEndpoints.CustomerActivityDiagnosticCode(
+                ElsaInstanceProviderReconciliationService.UnavailableCode));
+        Assert.Equal(
+            ManagedElsaInstanceOverviewEndpoints.DeploymentResultUnconfirmedCode,
+            ManagedElsaInstanceOverviewEndpoints.CustomerActivityDiagnosticCode(
+                ElsaInstanceProviderReconciliationService.AmbiguousCode));
+        Assert.Equal(
+            ManagedElsaInstanceOverviewEndpoints.DeploymentResultUnconfirmedCode,
+            ManagedElsaInstanceOverviewEndpoints.CustomerActivityDiagnosticCode(
+                ElsaInstanceProviderReconciliationService.RetrySafeCode));
+        Assert.Equal(
+            ManagedElsaInstanceOverviewEndpoints.DeploymentResultUnconfirmedCode,
+            ManagedElsaInstanceOverviewEndpoints.CustomerActivityDiagnosticCode(
+                ElsaInstanceProviderReconciliationService.CorrelationMismatchCode));
+        Assert.Equal(
+            ManagedElsaInstanceOverviewEndpoints.DeploymentResultUnconfirmedCode,
+            ManagedElsaInstanceOverviewEndpoints.CustomerActivityDiagnosticCode(
+                ManagedElsaInstanceOverviewEndpoints.SubmissionUncertainCode));
+        Assert.NotEqual(
+            ElsaInstanceProviderReconciliationService.UnavailableCode,
+            ManagedElsaInstanceOverviewEndpoints.CustomerActivityDiagnosticCode(
+                ElsaInstanceProviderReconciliationService.UnavailableCode));
+        Assert.NotEqual(
+            ElsaInstanceProviderReconciliationService.AmbiguousCode,
+            ManagedElsaInstanceOverviewEndpoints.CustomerActivityDiagnosticCode(
+                ElsaInstanceProviderReconciliationService.AmbiguousCode));
     }
 
     [Fact]
@@ -323,34 +341,66 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
             ElsaInstanceProviderReconciliationService.UnavailableCode);
 
         Assert.Equal(ManagedElsaInstanceActivitySeverity.Informational, mapped.Severity);
+        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.DeploymentStatusCheckingCode, mapped.DiagnosticCode);
+        Assert.Equal("deployment.status-checking", mapped.DiagnosticCode);
+        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.CheckingDeploymentStatusMessage, mapped.Message);
         Assert.Equal("Checking deployment status", mapped.Message);
-        Assert.Null(mapped.DiagnosticCode);
+        Assert.NotEqual(ElsaInstanceProviderReconciliationService.UnavailableCode, mapped.DiagnosticCode);
         Assert.NotEqual(ManagedLifecycleOperationalHealthDiagnosticCodes.Failed, mapped.DiagnosticCode);
         Assert.NotEqual(ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed, mapped.DiagnosticCode);
     }
 
     [Fact]
-    public void Activity_maps_ambiguous_as_a_warning_with_status_unclear_copy()
+    public void Activity_maps_ambiguous_as_a_warning_with_unconfirmed_result_diagnostics()
     {
         AssertWarningStatusUnclear(ElsaInstanceProviderReconciliationService.AmbiguousCode);
     }
 
     [Fact]
-    public void Activity_maps_retry_safe_as_a_warning_with_status_unclear_copy()
+    public void Activity_maps_retry_safe_as_a_warning_with_unconfirmed_result_diagnostics()
     {
         AssertWarningStatusUnclear(ElsaInstanceProviderReconciliationService.RetrySafeCode);
     }
 
     [Fact]
-    public void Activity_maps_correlation_mismatch_as_a_warning_with_status_unclear_copy()
+    public void Activity_maps_correlation_mismatch_as_a_warning_with_unconfirmed_result_diagnostics()
     {
         AssertWarningStatusUnclear(ElsaInstanceProviderReconciliationService.CorrelationMismatchCode);
     }
 
     [Fact]
-    public void Activity_maps_submission_uncertain_as_a_warning_with_status_unclear_copy()
+    public void Activity_maps_submission_uncertain_as_a_warning_with_unconfirmed_result_diagnostics()
     {
         AssertWarningStatusUnclear(ManagedElsaInstanceOverviewEndpoints.SubmissionUncertainCode);
+    }
+
+    [Fact]
+    public void Activity_item_mapping_emits_stable_deployment_status_diagnostic_codes()
+    {
+        var unconfirmed = ManagedElsaInstanceOverviewProjection.ToActivityItem(
+            ActivityAudit(ElsaInstanceProviderReconciliationService.AmbiguousCode),
+            FrozenDictionary<Guid, ElsaInstanceOperationSummary>.Empty);
+        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.DeploymentResultUnconfirmedCode, unconfirmed.DiagnosticCode);
+        Assert.Equal("deployment.result-unconfirmed", unconfirmed.DiagnosticCode);
+        Assert.Equal(ManagedElsaInstanceActivitySeverity.Warning, unconfirmed.Severity);
+        Assert.Equal("Deployment result not confirmed.", unconfirmed.Message);
+        Assert.NotEqual(ElsaInstanceProviderReconciliationService.AmbiguousCode, unconfirmed.DiagnosticCode);
+
+        var checking = ManagedElsaInstanceOverviewProjection.ToActivityItem(
+            ActivityAudit(ElsaInstanceProviderReconciliationService.UnavailableCode),
+            FrozenDictionary<Guid, ElsaInstanceOperationSummary>.Empty);
+        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.DeploymentStatusCheckingCode, checking.DiagnosticCode);
+        Assert.Equal("deployment.status-checking", checking.DiagnosticCode);
+        Assert.Equal(ManagedElsaInstanceActivitySeverity.Informational, checking.Severity);
+        Assert.Equal("Checking deployment status", checking.Message);
+        Assert.NotEqual(ElsaInstanceProviderReconciliationService.UnavailableCode, checking.DiagnosticCode);
+
+        var deferred = ManagedElsaInstanceOverviewProjection.ToActivityItem(
+            ActivityAudit(ElsaInstanceProviderReconciliationService.ConvergedCode),
+            FrozenDictionary<Guid, ElsaInstanceOperationSummary>.Empty);
+        Assert.Null(deferred.DiagnosticCode);
+        Assert.Equal(ManagedElsaInstanceActivitySeverity.Informational, deferred.Severity);
+        Assert.Null(deferred.Message);
     }
 
     [Fact]
@@ -411,8 +461,11 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
             operationFailureCode: warningFailureCode);
 
         Assert.Equal(ManagedElsaInstanceActivitySeverity.Warning, mapped.Severity);
+        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.DeploymentResultUnconfirmedCode, mapped.DiagnosticCode);
+        Assert.Equal("deployment.result-unconfirmed", mapped.DiagnosticCode);
         Assert.Equal(ManagedElsaInstanceOverviewEndpoints.DeploymentStatusUnclearMessage, mapped.Message);
-        Assert.Null(mapped.DiagnosticCode);
+        Assert.Equal("Deployment result not confirmed.", mapped.Message);
+        Assert.NotEqual(warningFailureCode, mapped.DiagnosticCode);
         Assert.NotEqual(ManagedElsaInstanceActivitySeverity.Failed, mapped.Severity);
     }
 
@@ -600,6 +653,7 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
         Assert.Null(priorAccepted.Message);
         var priorChecking = Assert.Single(retryActivity.Items, item => item.Sequence == 40_002);
         Assert.Equal(ManagedElsaInstanceActivitySeverity.Informational, priorChecking.Severity);
+        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.DeploymentStatusCheckingCode, priorChecking.DiagnosticCode);
         Assert.Equal("Checking deployment status", priorChecking.Message);
         var failedRow = Assert.Single(retryActivity.Items, item => item.Sequence == 40_003);
         Assert.Equal("lifecycle.failed", failedRow.EventType);
@@ -609,6 +663,7 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
         Assert.Equal(ManagedElsaInstanceActivitySeverity.Informational, retryAccepted.Severity);
         var retryChecking = Assert.Single(retryActivity.Items, item => item.Sequence == 40_005);
         Assert.Equal(ManagedElsaInstanceActivitySeverity.Informational, retryChecking.Severity);
+        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.DeploymentStatusCheckingCode, retryChecking.DiagnosticCode);
         Assert.Equal("Checking deployment status", retryChecking.Message);
     }
 
@@ -680,44 +735,46 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
             ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed, overview.LastOperation.FailureCode);
         var failedEvent = Assert.Single(activity!.Items, item => item.Sequence == 20_001);
         Assert.Equal(ManagedElsaInstanceActivitySeverity.Warning, failedEvent.Severity);
-        Assert.Equal("Deployment status unclear. We're still confirming the result.", failedEvent.Message);
-        Assert.Null(failedEvent.DiagnosticCode);
+        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.DeploymentResultUnconfirmedCode, failedEvent.DiagnosticCode);
+        Assert.Equal("deployment.result-unconfirmed", failedEvent.DiagnosticCode);
+        Assert.Equal("Deployment result not confirmed.", failedEvent.Message);
+        Assert.NotEqual(ManagedElsaInstanceOverviewEndpoints.SubmissionUncertainCode, failedEvent.DiagnosticCode);
         Assert.NotEqual(ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed, failedEvent.DiagnosticCode);
         Assert.NotEqual(ManagedElsaInstanceActivitySeverity.Failed, failedEvent.Severity);
     }
 
     [Fact]
-    public void Activity_warning_and_informational_labels_omit_failure_and_timing_language()
+    public void Activity_warning_and_informational_diagnostics_omit_failure_and_timing_language()
     {
-        var labels = ManagedElsaInstanceOverviewEndpoints.EnumerateCustomerActivityCopyLabels()
+        var diagnostics = ManagedElsaInstanceOverviewEndpoints.EnumerateCustomerActivityCopyLabels()
             .Distinct(StringComparer.Ordinal)
             .ToArray();
 
-        Assert.Contains(ManagedElsaInstanceOverviewEndpoints.DeploymentStatusUnclearMessage, labels);
-        Assert.Contains(ManagedElsaInstanceOverviewEndpoints.CheckingDeploymentStatusMessage, labels);
-        Assert.Equal("Deployment status unclear. We're still confirming the result.",
+        Assert.Contains(ManagedElsaInstanceOverviewEndpoints.DeploymentStatusUnclearMessage, diagnostics);
+        Assert.Contains(ManagedElsaInstanceOverviewEndpoints.CheckingDeploymentStatusMessage, diagnostics);
+        Assert.Equal("Deployment result not confirmed.",
             ManagedElsaInstanceOverviewEndpoints.DeploymentStatusUnclearMessage);
         Assert.Equal("Checking deployment status",
             ManagedElsaInstanceOverviewEndpoints.CheckingDeploymentStatusMessage);
-        Assert.DoesNotContain(labels, label =>
-            label.Contains("Valence Works is checking", StringComparison.OrdinalIgnoreCase) ||
-            label.Contains("Valence Works has been alerted", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(diagnostics, diagnostic =>
+            diagnostic.Contains("Valence Works is checking", StringComparison.OrdinalIgnoreCase) ||
+            diagnostic.Contains("Valence Works has been alerted", StringComparison.OrdinalIgnoreCase));
 
         string[] forbidden = ["failed", "error", "lost"];
         string[] forbiddenTimeEstimates =
             ["minute", "minutes", "soon", "shortly", "hour", "second", "moment"];
-        foreach (var label in labels)
+        foreach (var diagnostic in diagnostics)
         {
             foreach (var term in forbidden)
-                Assert.DoesNotContain(term, label, StringComparison.OrdinalIgnoreCase);
+                Assert.DoesNotContain(term, diagnostic, StringComparison.OrdinalIgnoreCase);
             foreach (var term in forbiddenTimeEstimates)
             {
                 Assert.False(
                     Regex.IsMatch(
-                        label,
+                        diagnostic,
                         $@"\b{Regex.Escape(term)}\b",
                         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant),
-                    $"Label '{label}' contains time-estimate wording '{term}'.");
+                    $"Diagnostic '{diagnostic}' contains time-estimate wording '{term}'.");
             }
         }
     }
@@ -772,16 +829,21 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
         Assert.Null(Assert.Single(activity.Items, item => item.EventType == "lifecycle.entitlement-resumed").DiagnosticCode);
         var unavailable = Assert.Single(activity.Items, item => item.Sequence == 10_006);
         Assert.Equal(ManagedElsaInstanceActivitySeverity.Informational, unavailable.Severity);
+        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.DeploymentStatusCheckingCode, unavailable.DiagnosticCode);
+        Assert.Equal("deployment.status-checking", unavailable.DiagnosticCode);
         Assert.Equal("Checking deployment status", unavailable.Message);
-        Assert.Null(unavailable.DiagnosticCode);
+        Assert.NotEqual(ElsaInstanceProviderReconciliationService.UnavailableCode, unavailable.DiagnosticCode);
         var ambiguous = Assert.Single(activity.Items, item => item.Sequence == 10_007);
         Assert.Equal(ManagedElsaInstanceActivitySeverity.Warning, ambiguous.Severity);
-        Assert.Equal("Deployment status unclear. We're still confirming the result.", ambiguous.Message);
-        Assert.Null(ambiguous.DiagnosticCode);
+        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.DeploymentResultUnconfirmedCode, ambiguous.DiagnosticCode);
+        Assert.Equal("deployment.result-unconfirmed", ambiguous.DiagnosticCode);
+        Assert.Equal("Deployment result not confirmed.", ambiguous.Message);
+        Assert.NotEqual(ElsaInstanceProviderReconciliationService.AmbiguousCode, ambiguous.DiagnosticCode);
         var retrySafe = Assert.Single(activity.Items, item => item.Sequence == 10_008);
         Assert.Equal(ManagedElsaInstanceActivitySeverity.Warning, retrySafe.Severity);
-        Assert.Equal("Deployment status unclear. We're still confirming the result.", retrySafe.Message);
-        Assert.Null(retrySafe.DiagnosticCode);
+        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.DeploymentResultUnconfirmedCode, retrySafe.DiagnosticCode);
+        Assert.Equal("Deployment result not confirmed.", retrySafe.Message);
+        Assert.NotEqual(ElsaInstanceProviderReconciliationService.RetrySafeCode, retrySafe.DiagnosticCode);
     }
 
     public static TheoryData<ElsaObservedLifecycle, ElsaDesiredLifecycle, bool, string?> CustomerMutationAvailabilityCases =>
@@ -2294,14 +2356,35 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
             """);
     }
 
+    private static ElsaInstanceAuditEventSummary ActivityAudit(string? diagnosticCode) =>
+        new(
+            Guid.NewGuid(),
+            1,
+            "lifecycle.reconciled",
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            diagnosticCode,
+            null,
+            null,
+            DateTimeOffset.UtcNow);
+
     private static void AssertWarningStatusUnclear(string code)
     {
         var mapped = ManagedElsaInstanceOverviewEndpoints.ClassifyCustomerActivity(code);
 
         Assert.Equal(ManagedElsaInstanceActivitySeverity.Warning, mapped.Severity);
+        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.DeploymentResultUnconfirmedCode, mapped.DiagnosticCode);
+        Assert.Equal("deployment.result-unconfirmed", mapped.DiagnosticCode);
         Assert.Equal(ManagedElsaInstanceOverviewEndpoints.DeploymentStatusUnclearMessage, mapped.Message);
-        Assert.Equal("Deployment status unclear. We're still confirming the result.", mapped.Message);
-        Assert.Null(mapped.DiagnosticCode);
+        Assert.Equal("Deployment result not confirmed.", mapped.Message);
+        Assert.NotEqual(code, mapped.DiagnosticCode);
         Assert.NotEqual(ManagedLifecycleOperationalHealthDiagnosticCodes.Failed, mapped.DiagnosticCode);
         Assert.NotEqual(ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed, mapped.DiagnosticCode);
     }
