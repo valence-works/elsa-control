@@ -55,6 +55,20 @@ public interface IManagedElsaInstanceApiStore
         IReadOnlyCollection<Guid> instanceIds,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Latest completed operation per instance, using the same selection as
+    /// customer overview <c>lastOperation</c> (newest <c>AcceptedAt</c> with a
+    /// completed timestamp). One query for the page, not one per item.
+    /// Lightweight stores may return an empty map.
+    /// </summary>
+    Task<IReadOnlyDictionary<Guid, ElsaInstanceOperationSummary>> GetLastCompletedOperationsAsync(
+        Guid workspaceId,
+        IReadOnlyCollection<Guid> instanceIds,
+        CancellationToken cancellationToken = default,
+        Guid organizationId = default) =>
+        Task.FromResult<IReadOnlyDictionary<Guid, ElsaInstanceOperationSummary>>(
+            new Dictionary<Guid, ElsaInstanceOperationSummary>());
+
     Task<ElsaInstanceLifecycleTopologySnapshot?> GetLifecycleTopologyAsync(
         Guid workspaceId,
         Guid instanceId,

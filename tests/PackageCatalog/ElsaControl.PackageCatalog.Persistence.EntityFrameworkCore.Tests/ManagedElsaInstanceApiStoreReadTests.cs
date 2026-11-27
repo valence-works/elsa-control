@@ -182,6 +182,71 @@ public sealed class ManagedElsaInstanceApiStoreReadTests
     }
 
     [Fact]
+    public async Task Last_completed_operations_are_loaded_in_bulk_newest_completed_per_instance()
+    {
+        await using var connection = OpenConnection();
+        await using var db = CreateContext(connection);
+        await db.Database.EnsureCreatedAsync();
+        var workspace = await CreateWorkspaceAsync(db, "Last completed operations workspace");
+        var other = await CreateWorkspaceAsync(db, "Last completed operations other workspace");
+        var failedCreate = NewInstance(workspace, slug: "failed-create-elsa");
+        var inFlight = NewInstance(workspace, slug: "in-flight-elsa");
+        var failedAfterReady = NewInstance(workspace, slug: "failed-after-ready-elsa");
+        var foreign = NewInstance(other, slug: "foreign-elsa");
+        db.ElsaInstances.AddRange(failedCreate, inFlight, failedAfterReady, foreign);
+
+        var olderCreate = NewOperation(workspace, failedCreate, BaseTime, ElsaInstanceOperationAction.Create);
+        olderCreate.State = ElsaInstanceOperationState.Failed;
+        olderCreate.CompletedAt = BaseTime.AddMinutes(1);
+        olderCreate.FailureCode = "managed.lifecycle.failed";
+        var newerRetry = NewOperation(workspace, failedCreate, BaseTime.AddMinutes(2), ElsaInstanceOperationAction.Retry);
+        newerRetry.State = ElsaInstanceOperationState.Failed;
+        newerRetry.CompletedAt = BaseTime.AddMinutes(3);
+        newerRetry.FailureCode = "managed.lifecycle.failed";
+
+        var runningCreate = NewOperation(workspace, inFlight, BaseTime.AddMinutes(4), ElsaInstanceOperationAction.Create);
+        runningCreate.State = ElsaInstanceOperationState.Running;
+        runningCreate.CompletedAt = null;
+
+        var readyCreate = NewOperation(workspace, failedAfterReady, BaseTime, ElsaInstanceOperationAction.Create);
+        readyCreate.State = ElsaInstanceOperationState.Succeeded;
+        readyCreate.CompletedAt = BaseTime.AddMinutes(1);
+        var failedRestart = NewOperation(workspace, failedAfterReady, BaseTime.AddMinutes(5), ElsaInstanceOperationAction.Restart);
+        failedRestart.State = ElsaInstanceOperationState.Failed;
+        failedRestart.CompletedAt = BaseTime.AddMinutes(6);
+        failedRestart.FailureCode = "managed.lifecycle.failed";
+
+        var foreignCompleted = NewOperation(other, foreign, BaseTime.AddMinutes(7), ElsaInstanceOperationAction.Create);
+        foreignCompleted.State = ElsaInstanceOperationState.Succeeded;
+        foreignCompleted.CompletedAt = BaseTime.AddMinutes(8);
+        db.ElsaInstanceOperations.AddRange(
+            olderCreate, newerRetry, runningCreate, readyCreate, failedRestart, foreignCompleted);
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var store = new EfCoreManagedElsaInstanceApiStore(db);
+        var ids = new[] { failedCreate.Id, inFlight.Id, failedAfterReady.Id, foreign.Id };
+        var latest = await store.GetLastCompletedOperationsAsync(
+            workspace.Id, ids, organizationId: workspace.OrganizationId);
+        var otherWorkspace = await store.GetLastCompletedOperationsAsync(
+            other.Id, ids, organizationId: other.OrganizationId);
+        var otherOrganization = await store.GetLastCompletedOperationsAsync(
+            workspace.Id, ids, organizationId: Guid.NewGuid());
+        var empty = await store.GetLastCompletedOperationsAsync(workspace.Id, []);
+
+        Assert.Equal(2, latest.Count);
+        Assert.Equal(newerRetry.Id, latest[failedCreate.Id].Id);
+        Assert.Equal(ElsaInstanceOperationAction.Retry, latest[failedCreate.Id].Action);
+        Assert.Equal(ElsaInstanceOperationState.Failed, latest[failedCreate.Id].State);
+        Assert.False(latest.ContainsKey(inFlight.Id));
+        Assert.Equal(failedRestart.Id, latest[failedAfterReady.Id].Id);
+        Assert.Equal(ElsaInstanceOperationAction.Restart, latest[failedAfterReady.Id].Action);
+        Assert.Equal(foreignCompleted.Id, Assert.Single(otherWorkspace).Value.Id);
+        Assert.Empty(otherOrganization);
+        Assert.Empty(empty);
+    }
+
+    [Fact]
     public async Task Topology_and_finished_create_lookup_use_only_the_matching_recovery_acceptance()
     {
         await using var connection = OpenConnection();

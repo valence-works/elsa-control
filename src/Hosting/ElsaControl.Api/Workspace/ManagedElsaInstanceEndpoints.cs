@@ -66,21 +66,25 @@ public static class ManagedElsaInstanceEndpoints
             // Identity bindings are only ever surfaced when the caller can open
             // instances, so skip the lookup entirely otherwise, and resolve the
             // whole page's bindings in a single query rather than one per item.
+            var instanceIds = pageResult.Items.Select(x => x.Id).ToArray();
             var identityByInstanceId = canOpen
                 ? await identities.FindOpenableManyAsync(
                     access.OrganizationId,
-                    pageResult.Items.Select(x => x.Id).ToArray(),
+                    instanceIds,
                     cancellationToken)
                 : new Dictionary<Guid, ManagedElsaInstanceIdentity>();
             var activeOperations = await instances.GetActiveOperationsAsync(
-                workspaceId, pageResult.Items.Select(x => x.Id).ToArray(), cancellationToken);
+                workspaceId, instanceIds, cancellationToken);
+            var lastOperations = await instances.GetLastCompletedOperationsAsync(
+                workspaceId, instanceIds, cancellationToken, access.OrganizationId);
             var items = new List<ManagedElsaInstanceResponse>(pageResult.Items.Count);
             foreach (var instance in pageResult.Items)
             {
                 var operation = await GetCustomerOperationAsync(
                     instances, workspaceId, instance, activeOperations.GetValueOrDefault(instance.Id), cancellationToken);
                 items.Add(ToResponse(instance, canOpen, workspaceId,
-                    identityByInstanceId.GetValueOrDefault(instance.Id), operation));
+                    identityByInstanceId.GetValueOrDefault(instance.Id), operation,
+                    lastOperations.GetValueOrDefault(instance.Id)));
             }
             return Results.Ok(new ManagedElsaInstanceListResponse(items, currentPage, currentPageSize, pageResult.TotalCount,
                 offset + currentPageSize < pageResult.TotalCount));
@@ -238,7 +242,9 @@ public static class ManagedElsaInstanceEndpoints
             var activeOperations = await queries.GetActiveOperationsAsync(workspaceId, [instance.Id], cancellationToken);
             var operation = await GetCustomerOperationAsync(
                 queries, workspaceId, instance, activeOperations.GetValueOrDefault(instance.Id), cancellationToken);
-            var response = await ToResponseAsync(instance, canOpen, workspaceId, identities, cancellationToken, operation);
+            var response = await ToResponseAsync(
+                instance, canOpen, workspaceId, identities, queries,
+                context.GetWorkspaceAccess().OrganizationId, cancellationToken, operation);
             context.Response.Headers.ETag = response.ETag;
             return Results.Ok(response);
         }).RequireWorkspaceAccess();
@@ -795,7 +801,7 @@ public static class ManagedElsaInstanceEndpoints
             var canOpen = (await permissions.GetEffectivePermissionsAsync(
                 workspaceId, access.AccountId, cancellationToken)).Has(ManagedElsaInstancePermissions.Open);
             var instanceResponse = await ToResponseAsync(
-                instance, canOpen, workspaceId, identities, cancellationToken, summary);
+                instance, canOpen, workspaceId, identities, queries, access.OrganizationId, cancellationToken, summary);
             context.Response.Headers.ETag = instanceResponse.ETag;
             return Results.Ok(new ManagedElsaInstanceOperationReconciliationResponse(
                 instanceResponse,
@@ -1105,7 +1111,7 @@ public static class ManagedElsaInstanceEndpoints
             await ToResponseAsync(accepted.Instance,
                 (await permissions.GetEffectivePermissionsAsync(workspaceId, accountId, cancellationToken))
                 .Has(ManagedElsaInstancePermissions.Open),
-                workspaceId, identities, cancellationToken, operation),
+                workspaceId, identities, queries, accepted.Instance.OrganizationId, cancellationToken, operation),
             ToOperationResponse(workspaceId, accepted.Instance.Id, operation),
             links));
     }
@@ -1115,6 +1121,8 @@ public static class ManagedElsaInstanceEndpoints
         bool canOpen,
         Guid workspaceId,
         IManagedElsaInstanceIdentityStore identities,
+        IManagedElsaInstanceApiStore queries,
+        Guid organizationId,
         CancellationToken cancellationToken,
         ElsaInstanceOperationSummary? activeOperation = null)
     {
@@ -1124,7 +1132,11 @@ public static class ManagedElsaInstanceEndpoints
         var identity = canOpen && healthy
             ? await identities.FindOpenableAsync(instance.OrganizationId, instance.Id, cancellationToken)
             : null;
-        return ToResponse(instance, canOpen, workspaceId, identity, activeOperation);
+        var lastOperations = await queries.GetLastCompletedOperationsAsync(
+            workspaceId, [instance.Id], cancellationToken, organizationId);
+        return ToResponse(
+            instance, canOpen, workspaceId, identity, activeOperation,
+            lastOperations.GetValueOrDefault(instance.Id));
     }
 
     internal static ManagedElsaInstanceResponse ToResponse(
@@ -1132,7 +1144,8 @@ public static class ManagedElsaInstanceEndpoints
         bool canOpen,
         Guid workspaceId,
         ManagedElsaInstanceIdentity? identity = null,
-        ElsaInstanceOperationSummary? activeOperation = null)
+        ElsaInstanceOperationSummary? activeOperation = null,
+        ElsaInstanceOperationSummary? lastOperation = null)
     {
         var observedLifecycle = ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(instance, activeOperation);
         var healthy = ManagedElsaInstanceCustomerProjection.IsCustomerHealthy(
@@ -1172,6 +1185,7 @@ public static class ManagedElsaInstanceEndpoints
             ActiveOperation = activeOperation is null ? null : new ManagedElsaInstanceCurrentOperationResponse(
                 activeOperation.Id, activeOperation.Action, activeOperation.State,
                 activeOperation.AcceptedAt, activeOperation.StartedAt, activeOperation.CompletedAt),
+            LastOperation = ManagedElsaInstanceOverviewProjection.ToLastOperation(lastOperation),
             CreatedAt = instance.CreatedAt,
             UpdatedAt = instance.UpdatedAt,
             Links = new Dictionary<string, string>
@@ -1513,6 +1527,12 @@ public sealed record ManagedElsaInstanceResponse(Guid OrganizationId, Guid Insta
     public string IdentityBindingState { get; init; } = "identity-unavailable";
     public ElsaInstanceIntent? Intent { get; init; }
     public ManagedElsaInstanceCurrentOperationResponse? ActiveOperation { get; init; }
+    /// <summary>
+    /// Latest completed customer operation, same shape as overview
+    /// <c>lastOperation</c>. Null when the instance has no completed operation,
+    /// including the legacy managed-elsa list.
+    /// </summary>
+    public ManagedElsaInstanceOverviewLastOperationResponse? LastOperation { get; init; }
     public DateTimeOffset CreatedAt { get; init; }
     public DateTimeOffset UpdatedAt { get; init; }
     public IReadOnlyDictionary<string, string> Links { get; init; } = new Dictionary<string, string>();

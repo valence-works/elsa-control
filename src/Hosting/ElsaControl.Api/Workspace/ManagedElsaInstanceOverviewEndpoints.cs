@@ -915,17 +915,7 @@ internal static class ManagedElsaInstanceOverviewProjection
                     ReasonCode = ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(activeOperation)
                 }
             },
-            lastOperation is null ? null : new ManagedElsaInstanceOverviewLastOperationResponse(
-                lastOperation.Action,
-                lastOperation.State,
-                lastOperation.CompletedAt,
-                CustomerFailureCode(lastOperation))
-            {
-                ReasonCode = lastOperation.State is ElsaInstanceOperationState.Failed
-                    or ElsaInstanceOperationState.RecoveryRequired
-                    ? ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(lastOperation)
-                    : null
-            },
+            ToLastOperation(lastOperation),
             new ManagedElsaInstanceOverviewAllowedActionsResponse(
                 ActionDecision(canMutate, hasActiveOperation, mutationDenial, restartGate),
                 ActionDecision(canMutate, hasActiveOperation, mutationDenial, applyGate),
@@ -998,6 +988,23 @@ internal static class ManagedElsaInstanceOverviewProjection
             ? operation.FailureCode
             : null;
     }
+
+    /// <summary>
+    /// Customer-safe last-operation projection shared by overview and the list DTO.
+    /// </summary>
+    internal static ManagedElsaInstanceOverviewLastOperationResponse? ToLastOperation(
+        ElsaInstanceOperationSummary? lastOperation) =>
+        lastOperation is null ? null : new ManagedElsaInstanceOverviewLastOperationResponse(
+            lastOperation.Action,
+            lastOperation.State,
+            lastOperation.CompletedAt,
+            CustomerFailureCode(lastOperation))
+        {
+            ReasonCode = lastOperation.State is ElsaInstanceOperationState.Failed
+                or ElsaInstanceOperationState.RecoveryRequired
+                ? ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(lastOperation)
+                : null
+        };
 
     private static string? CustomerFailureCode(ElsaInstanceOperationSummary operation)
     {

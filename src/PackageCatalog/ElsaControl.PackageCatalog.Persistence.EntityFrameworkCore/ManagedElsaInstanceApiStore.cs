@@ -261,6 +261,47 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
         return latest;
     }
 
+    public async Task<IReadOnlyDictionary<Guid, ElsaInstanceOperationSummary>> GetLastCompletedOperationsAsync(
+        Guid workspaceId,
+        IReadOnlyCollection<Guid> instanceIds,
+        CancellationToken cancellationToken = default,
+        Guid organizationId = default)
+    {
+        if (workspaceId == Guid.Empty || instanceIds.Count == 0)
+            return new Dictionary<Guid, ElsaInstanceOperationSummary>();
+
+        var ids = instanceIds.Where(id => id != Guid.Empty).Distinct().ToArray();
+        if (ids.Length == 0)
+            return new Dictionary<Guid, ElsaInstanceOperationSummary>();
+
+        var query = dbContext.ElsaInstanceOperations
+            .AsNoTracking()
+            .Where(x => x.WorkspaceId == workspaceId &&
+                        x.InstanceId != null &&
+                        ids.Contains(x.InstanceId.Value) &&
+                        x.CompletedAt != null);
+        if (organizationId != Guid.Empty)
+            query = query.Where(x => x.OrganizationId == organizationId);
+
+        // Same order as ListOperationsAsync so the first completed row per
+        // instance matches SelectCustomerLastOperation on that instance's page.
+        var operations = await query
+            .OrderByDescending(x => x.AcceptedAt)
+            .ThenByDescending(x => x.CreatedAt)
+            .ThenByDescending(x => x.Id)
+            .ToListAsync(cancellationToken);
+
+        var latest = new Dictionary<Guid, ElsaInstanceOperationSummary>();
+        foreach (var operation in operations)
+        {
+            if (operation.InstanceId is not { } instanceId || latest.ContainsKey(instanceId))
+                continue;
+            latest[instanceId] = MapOperation(operation);
+        }
+
+        return latest;
+    }
+
     public async Task<ElsaInstanceLifecycleTopologySnapshot?> GetLifecycleTopologyAsync(
         Guid workspaceId,
         Guid instanceId,
