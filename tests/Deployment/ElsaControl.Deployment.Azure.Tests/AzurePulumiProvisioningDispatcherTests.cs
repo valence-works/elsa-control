@@ -163,6 +163,18 @@ public sealed class AzurePulumiProvisioningDispatcherTests
     }
 
     [Fact]
+    public async Task Replayed_terminal_run_returns_the_module_state()
+    {
+        var operationId = Guid.NewGuid();
+        var provisioning = new ReplayProvisioningService(operationId, ProvisioningOperationState.Succeeded);
+        var dispatcher = Dispatcher(provisioning, CompleteOptions());
+        var result = await dispatcher.DispatchAsync(Operation(), Plan());
+        Assert.True(result.Dispatched);
+        Assert.Equal(ProvisioningOperationState.Succeeded, result.State);
+        Assert.Equal(operationId, result.ProvisioningOperationId);
+    }
+
+    [Fact]
     public async Task In_memory_dispatch_skip_expires_so_a_row_can_self_heal()
     {
         var clock = new ShiftedTimeProvider();
@@ -274,6 +286,46 @@ public sealed class AzurePulumiProvisioningDispatcherTests
             throw new NotSupportedException();
         public Task<ProviderRunResult> DestroyAsync(ProvisioningOperation operation, ProvisioningRequest request, CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
+    }
+
+    private sealed class ReplayProvisioningService(Guid operationId, ProvisioningOperationState state) : IProvisioningService
+    {
+        public Task<ProvisioningEnqueueResult> PreviewAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            Enqueue();
+        public Task<ProvisioningEnqueueResult> ProvisionAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            Enqueue();
+        public Task<ProvisioningEnqueueResult> UpdateAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            Enqueue();
+        public Task<ProvisioningEnqueueResult> RefreshAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            Enqueue();
+        public Task<ProvisioningEnqueueResult> CancelAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            Enqueue();
+        public Task<ProvisioningEnqueueResult> DestroyAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            Enqueue();
+        public Task<ProvisioningOperation?> GetOperationAsync(Guid id, CancellationToken cancellationToken = default) =>
+            Task.FromResult<ProvisioningOperation?>(new(
+                operationId,
+                ProvisioningCommand.Provision,
+                state,
+                "azure",
+                ProvisioningStackKind.Engine,
+                ProvisioningStackName.ForEngine(Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd")),
+                "request-1",
+                new string('a', 64),
+                DateTimeOffset.UtcNow));
+        public Task<IReadOnlyList<ProvisioningEvent>> ListEventsAsync(Guid id, CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<ProvisioningEvent>>([]);
+        public async IAsyncEnumerable<ProvisioningEvent> WatchAsync(
+            Guid id,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await Task.CompletedTask;
+            yield break;
+        }
+
+        private Task<ProvisioningEnqueueResult> Enqueue() =>
+            Task.FromResult(new ProvisioningEnqueueResult(operationId, state, Replayed: true, LockConflict: false));
     }
 
     private sealed class RecordingProvisioningService : IProvisioningService

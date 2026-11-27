@@ -33,7 +33,10 @@ public interface IAzurePulumiProvisioningDispatcher
 
 public sealed record AzurePulumiDispatchResult(
     bool Dispatched,
-    Guid? ProvisioningOperationId = null);
+    Guid? ProvisioningOperationId = null,
+    ProvisioningOperationState? State = null,
+    string? FailureCode = null,
+    IReadOnlyDictionary<string, string>? Outputs = null);
 
 public sealed class AzurePulumiProvisioningDispatcher(
     IProvisioningService provisioning,
@@ -145,15 +148,25 @@ public sealed class AzurePulumiProvisioningDispatcher(
         var result = operation.Action == AzureProviderOperationAction.Delete
             ? await provisioning.DestroyAsync(request, cancellationToken).ConfigureAwait(false)
             : await provisioning.ProvisionAsync(request, cancellationToken).ConfigureAwait(false);
-        if (result.State is ProvisioningOperationState.Queued
+        var run = await provisioning.GetOperationAsync(result.OperationId, cancellationToken)
+            .ConfigureAwait(false);
+        var state = run?.State ?? result.State;
+        if (state is ProvisioningOperationState.Queued
             or ProvisioningOperationState.Accepted
             or ProvisioningOperationState.Running
-            or ProvisioningOperationState.Succeeded)
+            or ProvisioningOperationState.Succeeded
+            or ProvisioningOperationState.Failed
+            or ProvisioningOperationState.Cancelled
+            or ProvisioningOperationState.LockConflict)
         {
             var now = _timeProvider.GetUtcNow();
             Prune(now);
             _dispatchedAt[operation.Id] = now.UtcTicks;
-            return new AzurePulumiDispatchResult(true, result.OperationId);
+            return new AzurePulumiDispatchResult(
+                true,
+                result.OperationId,
+                state,
+                run?.FailureCode ?? result.Code);
         }
 
         return new AzurePulumiDispatchResult(false);

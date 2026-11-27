@@ -520,6 +520,93 @@ public sealed class AzureProviderOperationWorkerTests
     }
 
     [Fact]
+    public async Task Redispatch_of_a_succeeded_pulumi_run_reconciles_outputs_and_reaches_ready()
+    {
+        var lifecycleOperationId = Guid.Parse("33333333-3333-3333-3333-333333333333");
+        var instanceId = Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd");
+        var appName = ProvisioningEngineContainerApp.ForInstance(instanceId);
+        var resourceGroup = ProvisioningEngineResourceGroup.ForInstance(instanceId);
+        var endpoint = ProvisioningEngineIngress.OriginForInstance(
+            instanceId,
+            ProvisioningEngineIngress.MockEnvironmentDomain);
+        var revision = appName + "--candidate";
+        var operation = WithComputedMetadata(RunnableOperation() with
+        {
+            IdempotencyKey = AzureProviderOperationValidation.LifecycleIdempotencyKey(lifecycleOperationId),
+            TargetKey = AzureElsaInstanceProvider.WorkloadName(instanceId),
+            InstanceId = instanceId,
+            ProviderScopeFingerprint = new string('a', 64)
+        });
+        var store = new WorkerStore(operation, execute: true);
+        var runner = new CompletingRunner();
+        var dispatcher = new TerminalDispatcher(
+            ProvisioningOperationState.Succeeded,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [PulumiStepLedgerMapper.EngineEndpointOutputKey] = endpoint,
+                [PulumiStepLedgerMapper.WorkloadRevisionNameOutputKey] = revision,
+                [PulumiStepLedgerMapper.OwnedResourceGroupNameOutputKey] = resourceGroup,
+                [PulumiStepLedgerMapper.WorkloadResourceIdOutputKey] =
+                    $"/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/{resourceGroup}/providers/Microsoft.App/containerApps/{appName}"
+            });
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("--retry") && args[^1].EndsWith("/health", StringComparison.Ordinal), "Healthy");
+        process.Success(
+            args => args.Contains("containerapp") && args.Contains("show") && args.Contains(appName) && args.Contains(resourceGroup),
+            """[{"latestRevision":true,"weight":100}]""");
+        var worker = new AzureProviderOperationWorker(
+            store,
+            new AzureProviderExecutor(store, runner, assignmentStore: new OperationAssignmentStore(operation)),
+            new PersistedAzureProviderPlanSource(),
+            new FixedTimeProvider(),
+            dispatcher,
+            new StaticBackendStore(ElsaInstanceProvisioningBackend.Pulumi),
+            commercialGate: null,
+            readiness: new AzurePulumiReadinessVerifier(ReadinessOptions(), ReadinessScope(), store, process));
+
+        Assert.Equal(1, await worker.ProcessOnceAsync());
+        Assert.Single(dispatcher.Operations);
+        Assert.Empty(runner.Steps);
+        Assert.Equal(AzureProviderOperationStatus.Queued, store.Operation.Status);
+        Assert.Equal(AzureProviderOperationPhase.WorkloadReady, store.Operation.Phase);
+        Assert.Equal(endpoint, store.Operation.Endpoint);
+        Assert.Equal(resourceGroup, store.Operation.Resources.ResourceGroupName);
+        Assert.Equal(revision, store.Operation.Resources.WorkloadRevisionName);
+
+        Assert.Equal(1, await worker.ProcessOnceAsync());
+        Assert.Single(dispatcher.Operations);
+        Assert.Equal(AzureProviderOperationStatus.Succeeded, store.Operation.Status);
+        Assert.Equal(AzureProviderOperationPhase.TrafficPromoted, store.Operation.Phase);
+        Assert.Equal(AzureProviderHealth.Healthy, store.Operation.Health);
+        Assert.Equal(endpoint, store.Operation.Endpoint);
+    }
+
+    [Fact]
+    public async Task Redispatch_of_a_failed_pulumi_run_parks_needs_person_instead_of_requeueing()
+    {
+        var operation = RunnableOperation();
+        var store = new WorkerStore(operation, execute: true);
+        var runner = new CompletingRunner();
+        var dispatcher = new TerminalDispatcher(ProvisioningOperationState.Failed, failureCode: "QuotaExceeded");
+        var worker = new AzureProviderOperationWorker(
+            store,
+            new AzureProviderExecutor(store, runner, assignmentStore: new OperationAssignmentStore(operation)),
+            new PersistedAzureProviderPlanSource(),
+            new FixedTimeProvider(),
+            dispatcher,
+            new StaticBackendStore(ElsaInstanceProvisioningBackend.Pulumi));
+
+        Assert.Equal(1, await worker.ProcessOnceAsync());
+        Assert.Single(dispatcher.Operations);
+        Assert.Empty(runner.Steps);
+        Assert.Equal(AzureProviderOperationStatus.Failed, store.Operation.Status);
+        Assert.Contains(
+            store.Transitions,
+            transition => transition.Code == ManagedElsaReasonCodeCatalog.AzureDeploymentFailed);
+        Assert.Equal(AzureProviderOperationPhase.Planned, store.Operation.Phase);
+    }
+
+    [Fact]
     public async Task Pulumi_apply_success_reaches_ready_through_health_then_observation()
     {
         var lifecycleOperationId = Guid.Parse("33333333-3333-3333-3333-333333333333");
@@ -1455,6 +1542,25 @@ public sealed class AzureProviderOperationWorkerTests
         {
             Operations.Add(operation);
             return Task.FromResult(new AzurePulumiDispatchResult(true, Guid.NewGuid()));
+        }
+    }
+
+    private sealed class TerminalDispatcher(
+        ProvisioningOperationState state,
+        IReadOnlyDictionary<string, string>? outputs = null,
+        string? failureCode = null) : IAzurePulumiProvisioningDispatcher
+    {
+        public bool CanDispatch => true;
+        public List<AzureProviderOperation> Operations { get; } = [];
+        public bool HasDispatched(Guid operationId) => Operations.Exists(operation => operation.Id == operationId);
+
+        public Task<AzurePulumiDispatchResult> DispatchAsync(
+            AzureProviderOperation operation,
+            AzureWorkloadPlan plan,
+            CancellationToken cancellationToken = default)
+        {
+            Operations.Add(operation);
+            return Task.FromResult(new AzurePulumiDispatchResult(true, Guid.NewGuid(), state, failureCode, outputs));
         }
     }
 
