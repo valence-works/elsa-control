@@ -212,7 +212,7 @@ retained prior revision. Today engines route `LatestRevision=true` (`ElsaEngineS
 QA's #1033 staging proof checks whether that can reach a revision that isn't ready. If
 it can, health-gated cutover moves before the first public Hosted launch (#508).
 
-**Health and traffic ownership for Pulumi engines** (#1039): the stack is the only owner of Container Apps traffic, with no CLI weight changes; Health probes the endpoint from the stack outputs using the Bicep health contract and thresholds; Promotion is a read-only check that traffic is on the latest ready revision; stack-pinned revision traffic (#1064) is required before any non-Create Pulumi operation or turning the worker on.
+**Health and traffic ownership for Pulumi engines** (#1039): the stack is the only owner of Container Apps traffic, with no CLI weight changes; Health probes the endpoint from the stack outputs using the Bicep health contract and thresholds; Promotion is a read-only check that traffic is on the latest ready revision; stack-pinned revision traffic (#1046) is required before any non-Create Pulumi operation or turning the worker on.
 
 **Runtime versions** are not a profile option. Customers choose when to take a new
 runtime version; the default is stable (#988), and Apply release stays a separate
