@@ -283,23 +283,19 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
         if (organizationId != Guid.Empty)
             query = query.Where(x => x.OrganizationId == organizationId);
 
-        // Same order as ListOperationsAsync so the first completed row per
-        // instance matches SelectCustomerLastOperation on that instance's page.
+        // Newest completed row per instance is chosen in SQL so a list page
+        // does not materialize each instance's full completed history.
+        // Ordering matches ListOperationsAsync / SelectCustomerLastOperation.
         var operations = await query
-            .OrderByDescending(x => x.AcceptedAt)
-            .ThenByDescending(x => x.CreatedAt)
-            .ThenByDescending(x => x.Id)
+            .GroupBy(x => x.InstanceId!.Value)
+            .Select(group => group
+                .OrderByDescending(x => x.AcceptedAt)
+                .ThenByDescending(x => x.CreatedAt)
+                .ThenByDescending(x => x.Id)
+                .First())
             .ToListAsync(cancellationToken);
 
-        var latest = new Dictionary<Guid, ElsaInstanceOperationSummary>();
-        foreach (var operation in operations)
-        {
-            if (operation.InstanceId is not { } instanceId || latest.ContainsKey(instanceId))
-                continue;
-            latest[instanceId] = MapOperation(operation);
-        }
-
-        return latest;
+        return operations.ToDictionary(x => x.InstanceId!.Value, MapOperation);
     }
 
     public async Task<ElsaInstanceLifecycleTopologySnapshot?> GetLifecycleTopologyAsync(
