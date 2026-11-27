@@ -260,28 +260,28 @@ Hub control (ADR-0021).
 ### 8. Phased plan and issues
 
 Every phase starts **after #1010's staging proof (#1014 AC4)**, so #1032, #1033,
-#1034 and #1035 are not disrupted. Issues are filed under #1010, **not Ready**; the Lead
+#1034 and #1035 are not disrupted. Issues are filed under #1010 (27 Nov 2026), **not Ready**; the Lead
 arms them in phase order. Launch scope: one engine per placement, no Test-to-Prod
 promotion product.
 
 | Phase | Issue | Scope | Depends on |
 |---|---|---|---|
-| P1 | ISSUE-P1A Profile schema v1: digest-identified profile versions and allowlist mapper | Schema v1, immutable versions with `profileDigest`, invariant and placement-bound split, strict mapping, rejection codes | #1014 AC4 |
-| P1 | ISSUE-P1B Profile schema lifecycle | Published versions immutable, compatibility test, program version range (`profile.program.incompatible`) | P1A |
-| P1 | ISSUE-P1C Effective-entitlement view and lapse rules | One view per organization, the tier table, paid-lapse rules | #1014 AC4 |
-| P1 | ISSUE-P1D Split `ElsaEngineStack` into components | Engine, Database, Networking, KeyVault; no-diff test on an existing stack | #1014 AC4 |
-| P1 | ISSUE-P1E Local CrossGuard policy pack | The three v1 guardrails on preview and up via Automation API | P1D |
-| P2 | ISSUE-P2A Profile preview and change lifecycle | Draft, preview, approve, apply; undo by digest re-activation; `profile.version.not-restorable` | P1A, P1C, #1016 |
-| P2 | ISSUE-P2B Health-gated revision cutover | Traffic pinned until ready and probed; ledger `rejected` reason; rollback to retained revision. Moves pre-#508 if the #1033 proof fails | #1033 proof |
-| P2 | ISSUE-P2C Second approver for data-destructive changes | Requester ≠ second operator, domain-enforced; customer explicit confirmation | P2A |
-| P2 | ISSUE-P2D Trial lifecycle | Self-serve trial with quotas; lock at end, keep 15 days, proven delete | P1C |
-| P2 | ISSUE-P2E Cost estimate from private rate table | Control-side estimate per tier and option; table outside public repos | P2A |
-| P2 | ISSUE-P2F Scheduled drift refresh | Preview-only refresh, operator alerts, BYO reporting | #1016 |
-| P3 | ISSUE-P3A `elsa-shard` program and shard stacks | Shard provisioning from components, staging only | P1D, ADR-0019 gates |
-| P3 | ISSUE-P3B Shared placement, fill and per-tenant envelope | Least-loaded open shard, cap at about 70% of tested peak, envelope accounting, operator-approved new shard | P3A, P1C |
-| P3 | #954 Shared to Dedicated move (existing) | Pulumi target via #1033 (§3) | P3B |
-| P3 | #953 Noisy-neighbour quotas (existing) | Envelope enforcement and load test (§3) | P3B |
-| P4 | ISSUE-P4A Re-home between Pulumi Dedicated placements | Region move: data move, new stack, cutover, destroy old | P2A, ADR-0014 |
+| P1 | #1040 Profile schema v1: digest-identified profile versions and allowlist mapper | Schema v1, immutable versions with `profileDigest`, invariant and placement-bound split, strict mapping, rejection codes | #1014 AC4 |
+| P1 | #1041 Profile schema lifecycle | Published versions immutable, compatibility test, program version range (`profile.program.incompatible`) | #1040 |
+| P1 | #1042 Effective-entitlement view and lapse rules | One view per organization, the tier table, paid-lapse rules | #1014 AC4 |
+| P1 | #1043 Split `ElsaEngineStack` into components | Engine, Database, Networking, KeyVault; no-diff test on an existing stack | #1014 AC4 |
+| P1 | #1044 Local CrossGuard policy pack | The three v1 guardrails on preview and up via Automation API | #1043 |
+| P2 | #1045 Profile preview and change lifecycle | Draft, preview, approve, apply; undo by digest re-activation; `profile.version.not-restorable` | #1040, #1042, #1016 |
+| P2 | #1046 Health-gated revision cutover | Traffic pinned until ready and probed; ledger `rejected` reason; rollback to retained revision. Moves pre-#508 if the #1033 proof fails | #1033 proof |
+| P2 | #1047 Second approver for data-destructive changes | Requester ≠ second operator, domain-enforced; customer explicit confirmation | #1045 |
+| P2 | #1048 Trial lifecycle | Self-serve trial with quotas; lock at end, keep 15 days, proven delete | #1042 |
+| P2 | #1049 Cost estimate from private rate table | Control-side estimate per tier and option; table outside public repos | #1045 |
+| P2 | #1050 Scheduled drift refresh | Preview-only refresh, operator alerts, BYO reporting | #1016 |
+| P3 | #1051 `elsa-shard` program and shard stacks | Shard provisioning from components, staging only | #1043, ADR-0019 gates |
+| P3 | #1052 Shared placement, fill and per-tenant envelope | Least-loaded open shard, cap at about 70% of tested peak, envelope accounting, operator-approved new shard | #1051, #1042 |
+| P3 | #954 Shared to Dedicated move (existing) | Pulumi target via #1033 (§3) | #1052 |
+| P3 | #953 Noisy-neighbour quotas (existing) | Envelope enforcement and load test (§3) | #1052 |
+| P4 | #1053 Re-home between Pulumi Dedicated placements | Region move: data move, new stack, cutover, destroy old | #1045, ADR-0014 |
 | P4 | #1017 Bicep import (existing) | Import path with no-diff proof, second operator, audit | #1016 |
 
 Not filed (deferred): BYO options, cross-region restore, four-eyes opt-in.
