@@ -182,6 +182,21 @@ public interface IAzureProviderResourceAssignmentStore
         Guid assignmentId,
         CancellationToken cancellationToken = default) =>
         Task.FromResult<IReadOnlyList<AzureProviderAssignmentRebindRecord>>([]);
+
+    /// <summary>
+    /// Reconciles a stale assignment inventory to confirmed-absent after a fresh ARM
+    /// 404 ResourceGroupNotFound on the engine resource group. Lightweight stores
+    /// fail closed by returning null. Implementations must not mutate Azure.
+    /// </summary>
+    Task<AzureProviderResourceAssignment?> ReconcileStaleInventoryToConfirmedAbsentAsync(
+        Guid workspaceId,
+        Guid assignmentId,
+        Guid organizationId,
+        Guid instanceId,
+        Guid lifecycleOperationId,
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult<AzureProviderResourceAssignment?>(null);
 }
 
 public static class AzureProviderResourceAssignmentNaming

@@ -1,0 +1,7 @@
+{
+  "type": "https://tools.ietf.org/html/rfc9110#section-15.5.10",
+  "title": "The request conflicts with the current instance state.",
+  "status": 409,
+  "code": "instance.invalid-state",
+  "traceId": "trace"
+}

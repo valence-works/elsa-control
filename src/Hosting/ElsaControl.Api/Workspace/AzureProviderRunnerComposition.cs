@@ -119,6 +119,8 @@ internal static class AzureProviderRunnerComposition
             provider.GetRequiredService<AzureBicepProviderRunner>());
         services.AddScoped<IAzureRuntimeHealthProbe>(provider =>
             provider.GetRequiredService<AzureBicepProviderRunner>());
+        services.AddSingleton<IAzureEngineResourceGroupAbsenceObserver>(_ =>
+            new AzureArmEngineResourceGroupObserver(managedIdentity));
         return new(options, scope);
     }
 

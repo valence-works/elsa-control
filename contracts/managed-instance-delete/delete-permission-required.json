@@ -1,0 +1,7 @@
+{
+  "type": "https://tools.ietf.org/html/rfc9110#section-15.5.4",
+  "title": "Delete permission is required.",
+  "status": 403,
+  "code": "instance.delete-permission-required",
+  "traceId": "trace"
+}

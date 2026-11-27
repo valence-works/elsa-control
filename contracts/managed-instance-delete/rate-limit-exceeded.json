@@ -1,0 +1,7 @@
+{
+  "title": "Managed Elsa instance lifecycle rate limit was exceeded.",
+  "status": 429,
+  "code": "rate-limit.exceeded",
+  "correlationId": "trace",
+  "traceId": "trace"
+}

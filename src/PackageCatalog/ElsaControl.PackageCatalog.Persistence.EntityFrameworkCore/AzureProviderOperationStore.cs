@@ -857,6 +857,84 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
         return records.Select(x => x.ToRecord()).ToArray();
     }
 
+    async Task<AzureProviderResourceAssignment?> IAzureProviderResourceAssignmentStore.ReconcileStaleInventoryToConfirmedAbsentAsync(
+        Guid workspaceId,
+        Guid assignmentId,
+        Guid organizationId,
+        Guid instanceId,
+        Guid lifecycleOperationId,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        if (workspaceId == Guid.Empty || assignmentId == Guid.Empty ||
+            organizationId == Guid.Empty || instanceId == Guid.Empty ||
+            lifecycleOperationId == Guid.Empty)
+            return null;
+
+        now = now.ToUniversalTime();
+        return await db.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
+        {
+            var assignment = await db.AzureProviderResourceAssignments.SingleOrDefaultAsync(
+                x => x.Id == assignmentId &&
+                     x.WorkspaceId == workspaceId &&
+                     x.OrganizationId == organizationId &&
+                     x.InstanceId == instanceId,
+                cancellationToken);
+            if (assignment is null)
+                return null;
+            if (IsConfirmedAbsentAssignment(assignment))
+                return ToModel(assignment);
+
+            var operation = await db.ElsaInstanceOperations.SingleOrDefaultAsync(
+                x => x.Id == lifecycleOperationId &&
+                     x.WorkspaceId == workspaceId &&
+                     x.OrganizationId == organizationId &&
+                     x.InstanceId == instanceId &&
+                     x.Action == ElsaInstanceOperationAction.Delete &&
+                     x.State == ElsaInstanceOperationState.RecoveryRequired,
+                cancellationToken);
+            var instance = await db.ElsaInstances.SingleOrDefaultAsync(
+                x => x.Id == instanceId &&
+                     x.WorkspaceId == workspaceId &&
+                     x.OrganizationId == organizationId,
+                cancellationToken);
+            if (operation is null || instance is null ||
+                instance.DesiredLifecycle != ElsaDesiredLifecycle.Deleting)
+                return null;
+
+            ApplyAssignmentResources(assignment, new AzureProviderResourceReferences(assignment.ResourceGroupName));
+            assignment.State = AzureProviderAssignmentState.Deleted;
+            assignment.DeletedAt = now;
+            assignment.UpdatedAt = now;
+            assignment.Version++;
+
+            var sequence = checked((await db.ElsaInstanceAuditEvents
+                .Where(x => x.InstanceId == instance.Id)
+                .Select(x => (long?)x.Sequence)
+                .MaxAsync(cancellationToken) ?? 0) + 1);
+            db.ElsaInstanceAuditEvents.Add(new ElsaInstanceAuditEventEntity
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = instance.OrganizationId,
+                WorkspaceId = instance.WorkspaceId,
+                InstanceId = instance.Id,
+                Sequence = sequence,
+                EventType = "lifecycle.delete-out-of-band-resource-group-absent",
+                OperationId = operation.Id,
+                PriorState = instance.ObservedLifecycle.ToString(),
+                NewState = instance.ObservedLifecycle.ToString(),
+                DesiredStateRevisionId = instance.DesiredStateRevisionId,
+                DiagnosticCode = ManagedElsaReasonCodeCatalog.DeletionOutOfBandResourceGroupAbsent,
+                Summary = "The engine resource group was confirmed absent by a fresh ARM observation after out-of-band removal.",
+                RequestKeyHash = Convert.ToHexStringLower(
+                    SHA256.HashData(Encoding.UTF8.GetBytes(operation.IdempotencyKey))),
+                OccurredAt = now
+            });
+            await db.SaveChangesAsync(cancellationToken);
+            return ToModel(assignment);
+        }, cancellationToken);
+    }
+
     public async Task<IReadOnlyList<AzureProviderOperation>> ListRunnableAsync(
         DateTimeOffset now,
         int limit,
