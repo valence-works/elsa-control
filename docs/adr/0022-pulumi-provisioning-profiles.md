@@ -212,7 +212,31 @@ retained prior revision. Today engines route `LatestRevision=true` (`ElsaEngineS
 QA's #1033 staging proof checks whether that can reach a revision that isn't ready. If
 it can, health-gated cutover moves before the first public Hosted launch (#508).
 
-**Health and traffic ownership for Pulumi engines** (#1039): the stack is the only owner of Container Apps traffic, with no CLI weight changes; Health probes the endpoint from the stack outputs using the Bicep health contract and thresholds; Promotion is a read-only check that traffic is on the latest ready revision; stack-pinned revision traffic (#1046) is required before any non-Create Pulumi operation or turning the worker on.
+**Health and traffic ownership for Pulumi engines** (#1039). Pulumi-owned engines do not
+reuse the Bicep Health or Promotion steps, and the Bicep resource-group and workload scope
+check is not widened to cover them; this replaces the #1039 r2 hand-off to Bicep.
+
+- *Traffic:* the stack is the only owner of Container Apps traffic (latest revision for
+  now), with no CLI weight changes.
+- *Health:* a Pulumi-side probe of the endpoint from the stack outputs, using the Bicep
+  provisioning Health contract and thresholds: the candidate revision's
+  `properties.healthState` must read `Healthy` within `ObservationAttempts` (60) polls
+  `ObservationDelay` (5 s) apart, failing as crash-loop or timeout
+  (`AzureBicepProviderRunner.RunHealthAsync`, `AzureProviderRunnerOptions`). The Promotion
+  `/health` probe and the Ready monitor (`ElsaInstanceHealthMonitor`) have other bounds
+  and are not the contract.
+- *Promotion:* a read-only check that traffic is on the latest ready revision.
+- *Allowed operations until #1046:* Create; Retry of a Create whose instance has never
+  recorded Ready (`HasReachedReadyAsync` is false); and Delete. Every other lifecycle
+  action (Reconcile, UpdateIntent, Start, Stop, Restart, upgrades, Recover, and Retry after
+  Ready) fails closed with `provider.pulumi.operation-unsupported` (needs a person, no
+  auto-resume) and never runs `pulumi up` or Bicep. `provider.dispatch-failed` is not
+  reused because it auto-resumes.
+- *Cancel:* not a lifecycle action. Cancelling an in-flight allowed run uses the #1059
+  cancel route only: it stops the run, never destroys resources and never calls Bicep. A
+  cancelled Create stays never-Ready, so it can only be retried or deleted.
+- *#1046* (stack-pinned revision traffic, promote after health) must land before the
+  worker is enabled for any lifecycle action outside the allowed set above.
 
 **Runtime versions** are not a profile option. Customers choose when to take a new
 runtime version; the default is stable (#988), and Apply release stays a separate
