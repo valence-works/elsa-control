@@ -1,0 +1,65 @@
+{
+  "hubMustLoad": true,
+  "goldens": [
+    {
+      "file": "confirmation-success.json",
+      "httpStatus": 200,
+      "code": null,
+      "endpoint": "POST /api/workspaces/{workspaceId}/instances/{instanceId}/delete-confirmations"
+    },
+    {
+      "file": "delete-accepted.json",
+      "httpStatus": 202,
+      "code": null,
+      "endpoint": "POST /api/workspaces/{workspaceId}/instances/{instanceId}/delete"
+    },
+    {
+      "file": "delete-permission-required.json",
+      "httpStatus": 403,
+      "code": "instance.delete-permission-required",
+      "endpoint": "POST /api/workspaces/{workspaceId}/instances/{instanceId}/delete-confirmations"
+    },
+    {
+      "file": "delete-confirmation-required.json",
+      "httpStatus": 400,
+      "code": "instance.delete-confirmation-required",
+      "endpoint": "POST /api/workspaces/{workspaceId}/instances/{instanceId}/delete"
+    },
+    {
+      "file": "delete-confirmation-invalid.json",
+      "httpStatus": 409,
+      "code": "instance.delete-confirmation-invalid",
+      "endpoint": "POST /api/workspaces/{workspaceId}/instances/{instanceId}/delete"
+    },
+    {
+      "file": "operation-active.json",
+      "httpStatus": 409,
+      "code": "instance.operation-active",
+      "endpoint": "POST /api/workspaces/{workspaceId}/instances/{instanceId}/delete"
+    },
+    {
+      "file": "invalid-state.json",
+      "httpStatus": 409,
+      "code": "instance.invalid-state",
+      "endpoint": "POST /api/workspaces/{workspaceId}/instances/{instanceId}/operations"
+    },
+    {
+      "file": "changed-since-read.json",
+      "httpStatus": 412,
+      "code": "instance.changed-since-read",
+      "endpoint": "POST /api/workspaces/{workspaceId}/instances/{instanceId}/delete"
+    },
+    {
+      "file": "rate-limit-exceeded.json",
+      "httpStatus": 429,
+      "code": "rate-limit.exceeded",
+      "endpoint": "POST /api/workspaces/{workspaceId}/instances/{instanceId}/restart"
+    },
+    {
+      "file": "overview-deleting.json",
+      "httpStatus": 200,
+      "code": "instance.deleting",
+      "endpoint": "GET /api/workspaces/{workspaceId}/instances/{instanceId}/overview"
+    }
+  ]
+}

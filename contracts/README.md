@@ -7,6 +7,10 @@ equals a constant pinned in both repositories, so neither side can change the co
 Hosted billing JSON under [`hosted-subscription/`](hosted-subscription/) is a separate Hub contract. It is not copied
 to the production image. See that folder's README.
 
+Managed-instance delete JSON under [`managed-instance-delete/`](managed-instance-delete/) is a separate Hub contract
+for Cloud delete confirmation, accepted delete, and each delete refusal. It is not copied to the production image.
+Hub tests must load those goldens. See that folder's README.
+
 - `managed-elsa-studio-grants-v1.json`: Elsa 3.8 `verb:resource` permissions Control may issue to a workspace Owner
   through managed Open Studio, and the release-manifest capability that advertises support for them. The image rejects
   any other permission at redemption.

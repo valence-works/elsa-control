@@ -1,0 +1,15 @@
+{
+  "allowedActions": {
+    "delete": {
+      "allowed": false,
+      "reasonCode": "instance.deleting"
+    }
+  },
+  "activeOperation": null,
+  "lastOperation": {
+    "action": "Delete",
+    "state": "Succeeded",
+    "completedAt": "2026-01-15T12:00:00+00:00",
+    "failureCode": null
+  }
+}

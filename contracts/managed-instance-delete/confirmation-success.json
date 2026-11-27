@@ -1,0 +1,8 @@
+{
+  "confirmationId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+  "expiresAt": "2026-01-15T12:00:00+00:00",
+  "billingNotice": {
+    "code": "engine-deletion-leaves-subscription-active",
+    "message": "Deleting a managed engine does not cancel the Hosted subscription. Billing continues until the customer cancels it in the subscription portal."
+  }
+}
