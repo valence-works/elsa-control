@@ -4837,6 +4837,26 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.Equal(diagnosticCode, response.DiagnosticCode);
     }
 
+    [Theory]
+    [InlineData(ElsaInstanceProviderReconciliationService.AmbiguousCode, "deployment.result-unconfirmed")]
+    [InlineData(ElsaInstanceProviderReconciliationService.RetrySafeCode, "deployment.result-unconfirmed")]
+    [InlineData(ElsaInstanceProviderReconciliationService.CorrelationMismatchCode, "deployment.result-unconfirmed")]
+    [InlineData(ManagedElsaInstanceOverviewEndpoints.SubmissionUncertainCode, "deployment.result-unconfirmed")]
+    [InlineData(ElsaInstanceProviderReconciliationService.UnavailableCode, "deployment.status-checking")]
+    public void Customer_audit_projection_maps_classified_deployment_status_codes(
+        string internalCode,
+        string expectedCode)
+    {
+        var audit = new ElsaInstanceAuditEventSummary(
+            Guid.NewGuid(), 1, "instance.updated", null, null, null, null, null, null, null, null, null,
+            internalCode, null, null, DateTimeOffset.UtcNow);
+
+        var response = ManagedElsaInstanceEndpoints.ToAuditResponse(audit);
+
+        Assert.Equal(expectedCode, response.DiagnosticCode);
+        Assert.NotEqual(internalCode, response.DiagnosticCode);
+    }
+
     [Fact]
     public void Lifecycle_worker_poll_interval_is_clamped_to_one_second()
     {
