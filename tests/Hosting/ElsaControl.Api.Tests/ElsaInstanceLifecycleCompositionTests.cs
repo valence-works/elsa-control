@@ -74,6 +74,8 @@ public sealed class ElsaInstanceLifecycleCompositionTests : IDisposable
         Assert.DoesNotContain(services, descriptor =>
             descriptor.ServiceType == typeof(IElsaInstanceProviderHealthProbePort));
         Assert.DoesNotContain(services, descriptor =>
+            descriptor.ServiceType == typeof(IElsaInstanceDeleteStaleInventoryPort));
+        Assert.DoesNotContain(services, descriptor =>
             descriptor.ServiceType == typeof(IEngineProvisioningModule));
     }
 
@@ -98,6 +100,8 @@ public sealed class ElsaInstanceLifecycleCompositionTests : IDisposable
             descriptor.ServiceType == typeof(IElsaInstanceProviderRecoveryPort));
         Assert.Contains(services, descriptor =>
             descriptor.ServiceType == typeof(IElsaInstanceProviderHealthProbePort));
+        Assert.Contains(services, descriptor =>
+            descriptor.ServiceType == typeof(IElsaInstanceDeleteStaleInventoryPort));
         Assert.Contains(services, descriptor =>
             descriptor.ServiceType == typeof(IEngineProvisioningModule));
         using var provider = services.BuildServiceProvider();

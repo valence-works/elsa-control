@@ -18,6 +18,7 @@ public static class ElsaInstanceDeletionDiagnosticCodes
 {
     public const string LocalAbsent = ManagedElsaReasonCodeCatalog.DeletionLocalAbsent;
     public const string ProviderConfirmedAbsent = ManagedElsaReasonCodeCatalog.DeletionProviderConfirmedAbsent;
+    public const string OutOfBandResourceGroupAbsent = ManagedElsaReasonCodeCatalog.DeletionOutOfBandResourceGroupAbsent;
     public const string ProviderUnavailable = ManagedElsaReasonCodeCatalog.DeletionProviderUnavailable;
     public const string AzureProviderUnavailable = ManagedElsaReasonCodeCatalog.DeletionAzureProviderUnavailable;
     public const string ProviderCleanupPending = ManagedElsaReasonCodeCatalog.DeletionProviderCleanupPending;
