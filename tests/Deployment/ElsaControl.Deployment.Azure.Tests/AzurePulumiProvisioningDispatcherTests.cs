@@ -86,6 +86,7 @@ public sealed class AzurePulumiProvisioningDispatcherTests
     [InlineData(ElsaInstanceOperationAction.Stop)]
     [InlineData(ElsaInstanceOperationAction.Restart)]
     [InlineData(ElsaInstanceOperationAction.ApproveMinorUpgrade)]
+    [InlineData(ElsaInstanceOperationAction.MajorMigration)]
     [InlineData(ElsaInstanceOperationAction.Recover)]
     public async Task Unsupported_lifecycle_action_does_not_enqueue(ElsaInstanceOperationAction action)
     {
@@ -94,6 +95,17 @@ public sealed class AzurePulumiProvisioningDispatcherTests
         var operation = Operation() with { LifecycleAction = action };
         Assert.False((await dispatcher.DispatchAsync(operation, Plan())).Dispatched);
         Assert.Empty(provisioning.Requests);
+    }
+
+    [Fact]
+    public async Task Reconcile_without_a_lifecycle_action_does_not_enqueue()
+    {
+        var provisioning = new RecordingProvisioningService();
+        var dispatcher = Dispatcher(provisioning, CompleteOptions());
+        var operation = Operation() with { LifecycleAction = null };
+        Assert.False((await dispatcher.DispatchAsync(operation, Plan())).Dispatched);
+        Assert.Empty(provisioning.Requests);
+        Assert.False(dispatcher.HasDispatched(operation.Id));
     }
 
     [Fact]

@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using ElsaControl.Deployment.Core.Instances;
 
 namespace ElsaControl.Deployment.Azure;
@@ -21,7 +20,6 @@ public sealed class AzureProviderOperationWorker(
     IAzurePulumiReadinessVerifier? readiness = null)
 {
     public const string DispatchWorkerId = "pulumi-dispatch";
-    private readonly ConcurrentDictionary<Guid, byte> _dispatchedPulumi = new();
 
     // Keep the executor-only construction seam available to hosts that predate the persisted
     // plan source; the default source still enforces the same admission checks.
@@ -127,7 +125,8 @@ public sealed class AzureProviderOperationWorker(
                     continue;
                 }
 
-                if (_dispatchedPulumi.ContainsKey(operation.Id)
+                if (pulumi is not null
+                    && pulumi.HasDispatched(operation.Id)
                     && AzureProviderOperationPhaseOrdering.Compare(
                         operation.Phase,
                         AzureProviderOperationPhase.WorkloadReady) < 0)
@@ -223,10 +222,7 @@ public sealed class AzureProviderOperationWorker(
             dispatched = await pulumi.DispatchAsync(operation, plan, cancellationToken).ConfigureAwait(false);
 
         if (dispatched is { Dispatched: true })
-        {
-            _dispatchedPulumi.TryAdd(operation.Id, 0);
             return;
-        }
 
         await FailClosedAsync(operation, now, cancellationToken).ConfigureAwait(false);
     }

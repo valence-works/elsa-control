@@ -1,5 +1,7 @@
+using System.Collections;
 using System.Collections.Immutable;
 using System.Text.Json;
+using ElsaControl.Provisioning.Core;
 using ElsaControl.Provisioning.Providers.Azure.Programs;
 using Pulumi;
 using Pulumi.Testing;
@@ -27,8 +29,10 @@ internal sealed class EmptyMocks : IMocks
             or "azure-native:app:ManagedEnvironment")
         {
             outputs["id"] = args.Id ?? $"{args.Name}_id";
-            outputs["defaultDomain"] = "example.azurecontainerapps.io";
+            outputs["defaultDomain"] = ProvisioningEngineIngress.MockEnvironmentDomain;
         }
+
+        ContainerAppFqdnMocks.Apply(args, outputs);
 
         args.Id ??= $"{args.Name}_id";
         outputs["id"] = args.Id;
@@ -100,8 +104,10 @@ internal sealed class PlatformStackReferenceMocks(string? stamp = null) : IMocks
         if (args.Type is "azure-native:app/managedEnvironment:ManagedEnvironment"
             or "azure-native:app:ManagedEnvironment")
         {
-            outputs["defaultDomain"] = "example.azurecontainerapps.io";
+            outputs["defaultDomain"] = ProvisioningEngineIngress.MockEnvironmentDomain;
         }
+
+        ContainerAppFqdnMocks.Apply(args, outputs);
 
         if (args.Type is "azure-native:sql/server:Server" or "azure-native:sql:Server")
         {
@@ -147,6 +153,67 @@ internal sealed class PlatformStackReferenceMocks(string? stamp = null) : IMocks
         }
 
         return Task.FromResult<object>(ImmutableDictionary<string, object>.Empty);
+    }
+}
+
+internal static class ContainerAppFqdnMocks
+{
+    public static void Apply(MockResourceArgs args, ImmutableDictionary<string, object>.Builder outputs)
+    {
+        var type = args.Type ?? "";
+        if (type is not ("azure-native:app/containerApp:ContainerApp" or "azure-native:app:ContainerApp"))
+            return;
+
+        var azureName = ReadString(args.Inputs, "containerAppName", "ContainerAppName") ?? args.Name ?? "app";
+        var domain = ProvisioningEngineIngress.MockEnvironmentDomain;
+        outputs["latestRevisionFqdn"] = $"{azureName}--candidate.{domain}";
+        outputs["latestRevisionName"] = $"{azureName}--candidate";
+
+        var configuration = CopyMap(ReadObject(args.Inputs, "configuration", "Configuration"));
+        var ingress = CopyMap(ReadValue(configuration, "ingress", "Ingress"));
+        ingress["fqdn"] = $"{azureName}.{domain}";
+        configuration["ingress"] = ingress.ToImmutable();
+        outputs["configuration"] = configuration.ToImmutable();
+    }
+
+    private static string? ReadString(IReadOnlyDictionary<string, object> source, params string[] keys) =>
+        ReadObject(source, keys)?.ToString();
+
+    private static object? ReadObject(IReadOnlyDictionary<string, object> source, params string[] keys)
+    {
+        foreach (var key in keys)
+        {
+            if (source.TryGetValue(key, out var value) && value is not null)
+                return value;
+        }
+
+        return null;
+    }
+
+    private static object? ReadValue(ImmutableDictionary<string, object>.Builder source, params string[] keys)
+    {
+        foreach (var key in keys)
+        {
+            if (source.TryGetValue(key, out var value) && value is not null)
+                return value;
+        }
+
+        return null;
+    }
+
+    private static ImmutableDictionary<string, object>.Builder CopyMap(object? source)
+    {
+        var builder = ImmutableDictionary.CreateBuilder<string, object>(StringComparer.Ordinal);
+        if (source is IDictionary map)
+        {
+            foreach (DictionaryEntry entry in map)
+            {
+                if (entry.Key is string key && entry.Value is not null)
+                    builder[key] = entry.Value;
+            }
+        }
+
+        return builder;
     }
 }
 

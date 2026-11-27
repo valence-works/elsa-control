@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.Provisioning.Abstractions;
 using ElsaControl.Provisioning.Core;
@@ -20,6 +21,13 @@ public interface IAzurePulumiProvisioningDispatcher
         AzureProviderOperation operation,
         AzureWorkloadPlan plan,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Process-local skip for Azure operations already enqueued this process.
+    /// The dispatcher is a singleton; the Azure hosted service new-scopes a
+    /// worker each poll, so this cannot live on the worker.
+    /// </summary>
+    bool HasDispatched(Guid operationId) => false;
 }
 
 public sealed record AzurePulumiDispatchResult(
@@ -35,11 +43,14 @@ public sealed class AzurePulumiProvisioningDispatcher(
 {
     private readonly ILogger<AzurePulumiProvisioningDispatcher> _logger =
         logger ?? NullLogger<AzurePulumiProvisioningDispatcher>.Instance;
+    private readonly ConcurrentDictionary<Guid, byte> _dispatched = new();
 
     public bool CanDispatch =>
         provisioningOptions.Value.WorkerEnabled
         && string.Equals(provider?.ProviderId, AzurePulumiProvisioningBackendSelector.AzureProviderId, StringComparison.Ordinal)
         && options.Value.IsComplete;
+
+    public bool HasDispatched(Guid operationId) => _dispatched.ContainsKey(operationId);
 
     public async Task<AzurePulumiDispatchResult> DispatchAsync(
         AzureProviderOperation operation,
@@ -119,11 +130,15 @@ public sealed class AzurePulumiProvisioningDispatcher(
         var result = operation.Action == AzureProviderOperationAction.Delete
             ? await provisioning.DestroyAsync(request, cancellationToken).ConfigureAwait(false)
             : await provisioning.ProvisionAsync(request, cancellationToken).ConfigureAwait(false);
-        return result.State is ProvisioningOperationState.Queued
+        if (result.State is ProvisioningOperationState.Queued
             or ProvisioningOperationState.Accepted
             or ProvisioningOperationState.Running
-            or ProvisioningOperationState.Succeeded
-            ? new AzurePulumiDispatchResult(true, result.OperationId)
-            : new AzurePulumiDispatchResult(false);
+            or ProvisioningOperationState.Succeeded)
+        {
+            _dispatched.TryAdd(operation.Id, 0);
+            return new AzurePulumiDispatchResult(true, result.OperationId);
+        }
+
+        return new AzurePulumiDispatchResult(false);
     }
 }

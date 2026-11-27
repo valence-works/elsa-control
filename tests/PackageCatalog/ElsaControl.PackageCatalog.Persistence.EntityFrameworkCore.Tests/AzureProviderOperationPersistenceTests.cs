@@ -995,6 +995,99 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
     }
 
     [Fact]
+    public async Task HasReachedReady_is_true_only_for_a_succeeded_healthy_reconcile_with_a_managed_endpoint()
+    {
+        var now = DateTimeOffset.UtcNow;
+        using var db = CreateContext();
+        var store = new AzureProviderOperationStore(db);
+        var readyInstance = Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd");
+        var failedInstance = Guid.Parse("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee");
+        var noEndpointInstance = Guid.Parse("ffffffff-ffff-ffff-ffff-ffffffffffff");
+        Assert.False(await store.HasReachedReadyAsync(_workspaceId, readyInstance));
+
+        async Task<AzureProviderOperation> CreateReconcileAsync(Guid instanceId, string targetKey, string idempotencyKey)
+        {
+            var assignment = await Assignment(store, _organizationId, instanceId, now);
+            return await store.CreateOrGetAsync(Request() with
+            {
+                InstanceId = instanceId,
+                OrganizationId = _organizationId,
+                LifecycleAction = ElsaInstanceOperationAction.Reconcile,
+                ProviderAssignmentId = assignment.Id,
+                TargetKey = targetKey,
+                IdempotencyKey = idempotencyKey
+            }, now);
+        }
+
+        var ready = await CreateReconcileAsync(readyInstance, "workload-ready", "ready-healthy");
+        var readyClaimed = Assert.IsType<AzureProviderOperation>(await store.ClaimAsync(
+            _workspaceId, ready.Id, "worker", "lease-ready", TimeSpan.FromMinutes(1), now));
+        var readyCheckpoint = Assert.IsType<AzureProviderOperation>(await store.CheckpointAsync(
+            _workspaceId,
+            ready.Id,
+            "lease-ready",
+            new(
+                AzureProviderOperationPhase.TrafficPromoted,
+                "operation.succeeded",
+                "Ready.",
+                new(),
+                "https://runtime.example.test",
+                AzureProviderHealth.Healthy,
+                []),
+            now,
+            readyClaimed.Version));
+        Assert.NotNull(await store.FinalizeAsync(
+            _workspaceId,
+            ready.Id,
+            "lease-ready",
+            AzureProviderOperationStatus.Succeeded,
+            "operation.succeeded",
+            now,
+            readyCheckpoint.Version));
+        Assert.True(await store.HasReachedReadyAsync(_workspaceId, readyInstance));
+
+        var failed = await CreateReconcileAsync(failedInstance, "workload-failed", "failed-ready");
+        var failedClaimed = Assert.IsType<AzureProviderOperation>(await store.ClaimAsync(
+            _workspaceId, failed.Id, "worker", "lease-failed", TimeSpan.FromMinutes(1), now));
+        var failedCheckpoint = Assert.IsType<AzureProviderOperation>(await store.CheckpointAsync(
+            _workspaceId,
+            failed.Id,
+            "lease-failed",
+            new(
+                AzureProviderOperationPhase.TrafficPromoted,
+                "operation.failed",
+                "Failed.",
+                new(),
+                "https://runtime.example.test",
+                AzureProviderHealth.Healthy,
+                []),
+            now,
+            failedClaimed.Version));
+        Assert.NotNull(await store.FinalizeAsync(
+            _workspaceId,
+            failed.Id,
+            "lease-failed",
+            AzureProviderOperationStatus.Failed,
+            "operation.failed",
+            now,
+            failedCheckpoint.Version));
+        Assert.False(await store.HasReachedReadyAsync(_workspaceId, failedInstance));
+
+        var missingEndpoint = await CreateReconcileAsync(noEndpointInstance, "workload-no-endpoint", "no-endpoint");
+        var missingClaimed = Assert.IsType<AzureProviderOperation>(await store.ClaimAsync(
+            _workspaceId, missingEndpoint.Id, "worker", "lease-missing", TimeSpan.FromMinutes(1), now));
+        Assert.NotNull(await store.FinalizeAsync(
+            _workspaceId,
+            missingEndpoint.Id,
+            "lease-missing",
+            AzureProviderOperationStatus.Succeeded,
+            "operation.succeeded",
+            now,
+            missingClaimed.Version));
+        Assert.False(await store.HasReachedReadyAsync(_workspaceId, noEndpointInstance));
+    }
+
+    [Fact]
     public async Task Same_worker_can_reclaim_its_expired_running_lease()
     {
         var now = DateTimeOffset.UtcNow;

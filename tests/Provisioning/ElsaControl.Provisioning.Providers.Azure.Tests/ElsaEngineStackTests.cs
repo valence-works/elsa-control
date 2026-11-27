@@ -1,4 +1,5 @@
 using System.Reflection;
+using ElsaControl.Provisioning.Core;
 using ElsaControl.Provisioning.Providers.Azure;
 using ElsaControl.Provisioning.Providers.Azure.Programs;
 using Pulumi;
@@ -84,6 +85,35 @@ public sealed class ElsaEngineStackTests
             resource => resource.GetResourceType() == EngineSqlContainedUser.ResourceTypeName);
         var stackReference = resources.OfType<StackReference>().Single();
         Assert.Equal("organization/elsa-platform/staging", stackReference.GetResourceName());
+    }
+
+    [Fact]
+    public async Task Engine_endpoint_is_the_stable_ingress_fqdn_the_verifier_accepts()
+    {
+        using var config = PulumiTestConfig.Set(PulumiProjectNames.Engine, EngineTestConfig.Values());
+        var resources = await PulumiDeployment.TestAsync<ElsaEngineStack>(
+            new PlatformStackReferenceMocks(),
+            new TestOptions
+            {
+                IsPreview = false,
+                ProjectName = PulumiProjectNames.Engine,
+                StackName = "engine-" + EngineTestConfig.InstanceId.ToString("N")
+            });
+
+        var appName = ProvisioningEngineContainerApp.ForInstance(EngineTestConfig.InstanceId);
+        var endpoint = await resources.OfType<ElsaEngineStack>().Single().EngineEndpoint.GetValueAsync();
+        Assert.Equal(
+            ProvisioningEngineIngress.Origin(appName, ProvisioningEngineIngress.MockEnvironmentDomain),
+            endpoint);
+        Assert.True(ProvisioningEngineIngress.HostMatchesApp(endpoint, appName));
+        Assert.DoesNotContain("--", new Uri(endpoint).Host, StringComparison.Ordinal);
+        Assert.False(ProvisioningEngineIngress.HostMatchesApp(
+            ProvisioningEngineIngress.RevisionOrigin(
+                appName,
+                "candidate",
+                ProvisioningEngineIngress.MockEnvironmentDomain),
+            appName));
+        Assert.False(ProvisioningEngineIngress.HostMatchesApp("https://runtime.example.test", appName));
     }
 
     [Fact]

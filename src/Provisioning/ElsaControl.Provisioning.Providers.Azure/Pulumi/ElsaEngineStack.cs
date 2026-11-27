@@ -393,12 +393,8 @@ public sealed class ElsaEngineStack : Stack
         _ = database;
 
         EngineName = Output.Create(values.GetValueOrDefault("engineName") ?? $"engine-{parsed:N}");
-        EngineEndpoint = app.LatestRevisionFqdn.Apply(fqdn =>
-            string.IsNullOrWhiteSpace(fqdn)
-                ? ""
-                : fqdn.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
-                    ? fqdn.Trim().TrimEnd('/')
-                    : $"https://{fqdn.Trim().TrimEnd('/')}");
+        EngineEndpoint = app.Configuration.Apply(configuration =>
+            HttpsOrigin(configuration?.Ingress?.Fqdn));
         WorkloadRevisionName = app.LatestRevisionName.Apply(name => name ?? "");
         WorkloadResourceId = app.Id.Apply(id => id ?? "");
         PlatformEnvironmentKind = Output.Create("dedicated-container-environment");
@@ -495,6 +491,16 @@ public sealed class ElsaEngineStack : Stack
 
     private static string SqlName(Guid instanceId) =>
         "sql-engine-" + instanceId.ToString("N")[..16];
+
+    private static string HttpsOrigin(string? fqdn)
+    {
+        if (string.IsNullOrWhiteSpace(fqdn))
+            return "";
+        var trimmed = fqdn.Trim().TrimEnd('/');
+        return trimmed.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+            ? trimmed
+            : $"https://{trimmed}";
+    }
 
     private static string AppName(Guid instanceId) =>
         ProvisioningEngineContainerApp.ForInstance(instanceId);

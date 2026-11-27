@@ -52,6 +52,17 @@ public sealed class ProvisioningStackNameTests
         Assert.Equal(
             "ca-eng-aaaaaaaabbbbccccddddeeeeeeeeee"[..32],
             ProvisioningEngineContainerApp.ForInstance(instanceId));
+        var appName = ProvisioningEngineContainerApp.ForInstance(instanceId);
+        Assert.True(ProvisioningEngineIngress.HostMatchesApp(
+            ProvisioningEngineIngress.Origin(appName, ProvisioningEngineIngress.MockEnvironmentDomain),
+            appName));
+        Assert.False(ProvisioningEngineIngress.HostMatchesApp(
+            ProvisioningEngineIngress.RevisionOrigin(
+                appName,
+                "candidate",
+                ProvisioningEngineIngress.MockEnvironmentDomain),
+            appName));
+        Assert.False(ProvisioningEngineIngress.HostMatchesApp("https://runtime.example.test", appName));
     }
 
     [Fact]

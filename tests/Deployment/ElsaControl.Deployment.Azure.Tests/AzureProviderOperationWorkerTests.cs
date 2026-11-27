@@ -272,12 +272,35 @@ public sealed class AzureProviderOperationWorkerTests
     [InlineData(ElsaInstanceOperationAction.Stop)]
     [InlineData(ElsaInstanceOperationAction.Restart)]
     [InlineData(ElsaInstanceOperationAction.ApproveMinorUpgrade)]
+    [InlineData(ElsaInstanceOperationAction.MajorMigration)]
     [InlineData(ElsaInstanceOperationAction.Recover)]
     public async Task Pulumi_owned_unsupported_operation_fails_closed_without_pulumi_or_bicep(
         ElsaInstanceOperationAction action)
     {
         var operation = WithComputedMetadata(RunnableOperation() with { LifecycleAction = action });
         await AssertPulumiRejectedAsync(operation);
+    }
+
+    [Fact]
+    public async Task Pulumi_owned_reconcile_without_lifecycle_action_fails_closed_without_pulumi_or_bicep()
+    {
+        var operation = RunnableOperation() with { LifecycleAction = null };
+        var store = new WorkerStore(operation, execute: true);
+        var runner = new CompletingRunner();
+        var dispatcher = new RecordingDispatcher();
+        var worker = new AzureProviderOperationWorker(
+            store,
+            new AzureProviderExecutor(store, runner, assignmentStore: new OperationAssignmentStore(operation)),
+            new PersistedAzureProviderPlanSource(),
+            new FixedTimeProvider(),
+            dispatcher,
+            new StaticBackendStore(ElsaInstanceProvisioningBackend.Pulumi));
+
+        Assert.Equal(0, await worker.ProcessOnceAsync());
+        Assert.Empty(dispatcher.Operations);
+        Assert.Empty(runner.Steps);
+        Assert.Equal(1, store.MarkUnrestorableCount);
+        Assert.Equal(AzureProviderOperationStatus.Failed, store.Operation.Status);
     }
 
     [Fact]
@@ -426,13 +449,47 @@ public sealed class AzureProviderOperationWorkerTests
     }
 
     [Fact]
+    public async Task Dispatched_pulumi_create_is_not_re_enqueued_on_a_new_worker_scope()
+    {
+        var operation = RunnableOperation();
+        var store = new WorkerStore(operation, execute: true);
+        var runner = new CompletingRunner();
+        var dispatcher = new RecordingDispatcher();
+        var backends = new StaticBackendStore(ElsaInstanceProvisioningBackend.Pulumi);
+        var first = new AzureProviderOperationWorker(
+            store,
+            new AzureProviderExecutor(store, runner, assignmentStore: new OperationAssignmentStore(operation)),
+            new PersistedAzureProviderPlanSource(),
+            new FixedTimeProvider(),
+            dispatcher,
+            backends);
+
+        Assert.Equal(1, await first.ProcessOnceAsync());
+        Assert.Single(dispatcher.Operations);
+
+        var second = new AzureProviderOperationWorker(
+            store,
+            new AzureProviderExecutor(store, runner, assignmentStore: new OperationAssignmentStore(operation)),
+            new PersistedAzureProviderPlanSource(),
+            new FixedTimeProvider(),
+            dispatcher,
+            backends);
+        Assert.Equal(1, await second.ProcessOnceAsync());
+        Assert.Single(dispatcher.Operations);
+        Assert.Empty(runner.Steps);
+        Assert.Equal(AzureProviderOperationStatus.Accepted, store.Operation.Status);
+    }
+
+    [Fact]
     public async Task Pulumi_apply_success_reaches_ready_through_health_then_observation()
     {
         var lifecycleOperationId = Guid.Parse("33333333-3333-3333-3333-333333333333");
         var instanceId = Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd");
         var appName = ProvisioningEngineContainerApp.ForInstance(instanceId);
         var resourceGroup = ProvisioningEngineResourceGroup.ForInstance(instanceId);
-        var endpoint = $"https://{appName}.happyforest-12345.westeurope.azurecontainerapps.io";
+        var endpoint = ProvisioningEngineIngress.OriginForInstance(
+            instanceId,
+            ProvisioningEngineIngress.MockEnvironmentDomain);
         var revision = appName + "--candidate";
         var operation = WithComputedMetadata(RunnableOperation() with
         {
@@ -513,7 +570,9 @@ public sealed class AzureProviderOperationWorkerTests
         var instanceId = Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd");
         var appName = ProvisioningEngineContainerApp.ForInstance(instanceId);
         var resourceGroup = ProvisioningEngineResourceGroup.ForInstance(instanceId);
-        var endpoint = $"https://{appName}.happyforest-12345.westeurope.azurecontainerapps.io";
+        var endpoint = ProvisioningEngineIngress.OriginForInstance(
+            instanceId,
+            ProvisioningEngineIngress.MockEnvironmentDomain);
         var revision = appName + "--candidate";
         var resourceId = $"/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/{resourceGroup}/providers/Microsoft.App/containerApps/{appName}";
         var operation = WithComputedMetadata(RunnableOperation() with
@@ -592,6 +651,27 @@ public sealed class AzureProviderOperationWorkerTests
         Assert.Equal(endpoint, observation.CurrentDeploymentReference?.EndpointUri);
     }
 
+    [Fact]
+    public async Task Pulumi_revision_label_host_fails_closed_before_health()
+    {
+        var instanceId = Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd");
+        var appName = ProvisioningEngineContainerApp.ForInstance(instanceId);
+        await AssertEndpointRejectedAsync(
+            instanceId,
+            ProvisioningEngineIngress.RevisionOrigin(
+                appName,
+                "candidate",
+                ProvisioningEngineIngress.MockEnvironmentDomain));
+    }
+
+    [Fact]
+    public async Task Pulumi_non_container_apps_host_fails_closed_before_health()
+    {
+        await AssertEndpointRejectedAsync(
+            Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd"),
+            "https://runtime.example.test");
+    }
+
     private static AzureProviderOperation RunnableOperation()
     {
         var digest = "sha256:" + new string('f', 64);
@@ -652,6 +732,46 @@ public sealed class AzureProviderOperationWorkerTests
             LifecycleAction = ElsaInstanceOperationAction.Create,
             ProviderAssignmentId = Guid.Parse("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee")
         });
+    }
+
+    private static async Task AssertEndpointRejectedAsync(Guid instanceId, string endpoint)
+    {
+        var appName = ProvisioningEngineContainerApp.ForInstance(instanceId);
+        var resourceGroup = ProvisioningEngineResourceGroup.ForInstance(instanceId);
+        var operation = WithComputedMetadata(RunnableOperation() with
+        {
+            Status = AzureProviderOperationStatus.Queued,
+            Phase = AzureProviderOperationPhase.WorkloadReady,
+            Endpoint = endpoint,
+            Resources = new AzureProviderResourceReferences(
+                ResourceGroupName: resourceGroup,
+                WorkloadRevisionName: appName + "--candidate",
+                WorkloadResourceId: $"/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/{resourceGroup}/providers/Microsoft.App/containerApps/{appName}"),
+            InstanceId = instanceId,
+            ProviderScopeFingerprint = new string('a', 64)
+        });
+        var store = new WorkerStore(operation, execute: true);
+        var runner = new CompletingRunner();
+        var dispatcher = new RecordingDispatcher();
+        var process = new FakeCommandProcess();
+        var worker = new AzureProviderOperationWorker(
+            store,
+            new AzureProviderExecutor(store, runner, assignmentStore: new OperationAssignmentStore(operation)),
+            new PersistedAzureProviderPlanSource(),
+            new FixedTimeProvider(),
+            dispatcher,
+            new StaticBackendStore(ElsaInstanceProvisioningBackend.Pulumi),
+            commercialGate: null,
+            readiness: new AzurePulumiReadinessVerifier(ReadinessOptions(), ReadinessScope(), store, process));
+
+        Assert.Equal(1, await worker.ProcessOnceAsync());
+        Assert.Empty(dispatcher.Operations);
+        Assert.Empty(runner.Steps);
+        Assert.Empty(process.Calls);
+        Assert.Equal(AzureProviderOperationStatus.Failed, store.Operation.Status);
+        Assert.Contains(
+            store.Transitions,
+            transition => transition.Code == ManagedElsaReasonCodeCatalog.AzureRecoveryWorkloadOutputsInvalid);
     }
 
     private static async Task AssertPulumiRejectedAsync(
@@ -1256,6 +1376,7 @@ public sealed class AzureProviderOperationWorkerTests
     {
         public bool CanDispatch => true;
         public List<AzureProviderOperation> Operations { get; } = [];
+        public bool HasDispatched(Guid operationId) => Operations.Exists(operation => operation.Id == operationId);
 
         public Task<AzurePulumiDispatchResult> DispatchAsync(
             AzureProviderOperation operation,

@@ -14,6 +14,9 @@ public sealed class AzurePulumiReadinessVerifier : IAzurePulumiReadinessVerifier
 {
     public const string WorkerId = "pulumi-readiness";
     private const int MaximumHealthReportCharacters = 64;
+    // The store caps leases at 1 hour. Health + traffic observation can exceed
+    // that (ObservationAttempts × curl --retry 30 × delay). Renew the 1 h lease
+    // after every attempt instead of requesting a longer lease the store rejects.
     private static readonly TimeSpan LeaseDuration = TimeSpan.FromHours(1);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -80,11 +83,14 @@ public sealed class AzurePulumiReadinessVerifier : IAzurePulumiReadinessVerifier
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
+            var latest = await _store.GetAsync(claimed.WorkspaceId, claimed.Id, cancellationToken)
+                    .ConfigureAwait(false)
+                ?? claimed;
             await FinalizeAsync(
-                    claimed,
+                    latest,
                     leaseToken,
                     AzureProviderOperationStatus.Failed,
-                    ManagedElsaReasonCodeCatalog.ProviderDispatchFailed,
+                    ManagedElsaReasonCodeCatalog.AzureRecoveryWorkloadOutputsInvalid,
                     cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -101,7 +107,7 @@ public sealed class AzurePulumiReadinessVerifier : IAzurePulumiReadinessVerifier
                     operation,
                     leaseToken,
                     AzureProviderOperationStatus.Failed,
-                    ManagedElsaReasonCodeCatalog.ProviderDispatchFailed,
+                    ManagedElsaReasonCodeCatalog.AzureRecoveryWorkloadOutputsInvalid,
                     cancellationToken)
                 .ConfigureAwait(false);
             return;
@@ -120,7 +126,7 @@ public sealed class AzurePulumiReadinessVerifier : IAzurePulumiReadinessVerifier
         }
 
         var appName = ProvisioningEngineContainerApp.ForInstance(instanceId);
-        if (!HostMatchesApp(origin.Value, appName))
+        if (!ProvisioningEngineIngress.HostMatchesApp(origin.Value, appName))
         {
             await FinalizeAsync(
                     operation,
@@ -132,11 +138,14 @@ public sealed class AzurePulumiReadinessVerifier : IAzurePulumiReadinessVerifier
             return;
         }
 
-        var health = await ProbeHealthAsync(origin.Value, cancellationToken).ConfigureAwait(false);
-        if (health is null)
+        var probed = await ProbeHealthAsync(operation, leaseToken, origin.Value, cancellationToken)
+            .ConfigureAwait(false);
+        if (probed.Operation is null)
+            return;
+        if (probed.Health is null)
         {
             await FinalizeAsync(
-                    operation,
+                    probed.Operation,
                     leaseToken,
                     AzureProviderOperationStatus.Failed,
                     ManagedElsaReasonCodeCatalog.ProvisioningTimeoutHealth,
@@ -146,15 +155,15 @@ public sealed class AzurePulumiReadinessVerifier : IAzurePulumiReadinessVerifier
         }
 
         var healthVerified = await CheckpointAsync(
-                operation,
+                probed.Operation,
                 leaseToken,
                 new AzureProviderCheckpoint(
                     AzureProviderOperationPhase.HealthVerified,
                     PulumiStepLedgerMapper.HealthVerifiedCode,
                     PulumiStepLedgerMapper.HealthVerifiedMessage,
-                    operation.Resources,
+                    probed.Operation.Resources,
                     origin.Value,
-                    health.Value,
+                    probed.Health.Value,
                     []),
                 cancellationToken)
             .ConfigureAwait(false);
@@ -163,15 +172,20 @@ public sealed class AzurePulumiReadinessVerifier : IAzurePulumiReadinessVerifier
 
         var resourceGroup = healthVerified.Resources.ResourceGroupName
             ?? ProvisioningEngineResourceGroup.ForInstance(instanceId);
-        if (!await TrafficPointsAtLatestAsync(
-                    resourceGroup,
-                    appName,
-                    healthVerified.Resources.WorkloadRevisionName,
-                    cancellationToken)
-                .ConfigureAwait(false))
+        var traffic = await TrafficPointsAtLatestAsync(
+                healthVerified,
+                leaseToken,
+                resourceGroup,
+                appName,
+                healthVerified.Resources.WorkloadRevisionName,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (traffic.Operation is null)
+            return;
+        if (!traffic.Accepted)
         {
             await FinalizeAsync(
-                    healthVerified,
+                    traffic.Operation,
                     leaseToken,
                     AzureProviderOperationStatus.Failed,
                     ManagedElsaReasonCodeCatalog.AzurePromotionUncertain,
@@ -181,18 +195,18 @@ public sealed class AzurePulumiReadinessVerifier : IAzurePulumiReadinessVerifier
         }
 
         var promoted = await CheckpointAsync(
-                healthVerified,
+                traffic.Operation,
                 leaseToken,
                 new AzureProviderCheckpoint(
                     AzureProviderOperationPhase.TrafficPromoted,
                     PulumiStepLedgerMapper.TrafficRoutedCode,
                     PulumiStepLedgerMapper.TrafficRoutedMessage,
-                    healthVerified.Resources with
+                    traffic.Operation.Resources with
                     {
-                        StableTrafficRevisionName = healthVerified.Resources.WorkloadRevisionName
+                        StableTrafficRevisionName = traffic.Operation.Resources.WorkloadRevisionName
                     },
                     origin.Value,
-                    health.Value,
+                    probed.Health.Value,
                     []),
                 cancellationToken)
             .ConfigureAwait(false);
@@ -208,10 +222,19 @@ public sealed class AzurePulumiReadinessVerifier : IAzurePulumiReadinessVerifier
             .ConfigureAwait(false);
     }
 
-    private async Task<AzureProviderHealth?> ProbeHealthAsync(string endpoint, CancellationToken cancellationToken)
+    private async Task<(AzureProviderHealth? Health, AzureProviderOperation? Operation)> ProbeHealthAsync(
+        AzureProviderOperation operation,
+        string leaseToken,
+        string endpoint,
+        CancellationToken cancellationToken)
     {
+        var current = operation;
         for (var attempt = 0; attempt < _options.ObservationAttempts; attempt++)
         {
+            current = await HeartbeatAsync(current, leaseToken, cancellationToken).ConfigureAwait(false);
+            if (current is null)
+                return (null, null);
+
             var probe = await _process.ExecuteAsync(
                     new AzureCommandProcessRequest(
                         _options.CurlPath,
@@ -228,26 +251,33 @@ public sealed class AzurePulumiReadinessVerifier : IAzurePulumiReadinessVerifier
             {
                 var classified = ClassifyRuntimeHealth(probe.Value?.Value);
                 if (classified is AzureProviderHealth.Healthy or AzureProviderHealth.Degraded)
-                    return classified;
+                    return (classified, current);
             }
 
             if (probe.Status == AzureCommandProcessStatus.Cancelled || cancellationToken.IsCancellationRequested)
-                return null;
+                return (null, current);
             if (attempt + 1 < _options.ObservationAttempts)
                 await Task.Delay(_options.ObservationDelay, cancellationToken).ConfigureAwait(false);
         }
 
-        return null;
+        return (null, current);
     }
 
-    private async Task<bool> TrafficPointsAtLatestAsync(
+    private async Task<(bool Accepted, AzureProviderOperation? Operation)> TrafficPointsAtLatestAsync(
+        AzureProviderOperation operation,
+        string leaseToken,
         string resourceGroup,
         string appName,
         string? revisionName,
         CancellationToken cancellationToken)
     {
+        var current = operation;
         for (var attempt = 0; attempt < _options.ObservationAttempts; attempt++)
         {
+            current = await HeartbeatAsync(current, leaseToken, cancellationToken).ConfigureAwait(false);
+            if (current is null)
+                return (false, null);
+
             var traffic = await _process.ExecuteAsync(
                     new AzureCommandProcessRequest(
                         _options.AzureCliPath,
@@ -265,15 +295,28 @@ public sealed class AzurePulumiReadinessVerifier : IAzurePulumiReadinessVerifier
                     cancellationToken)
                 .ConfigureAwait(false);
             if (traffic.Succeeded && traffic.Value is not null && AcceptsLatest(traffic.Value.Value, revisionName))
-                return true;
+                return (true, current);
             if (traffic.Status == AzureCommandProcessStatus.Cancelled || cancellationToken.IsCancellationRequested)
-                return false;
+                return (false, current);
             if (attempt + 1 < _options.ObservationAttempts)
                 await Task.Delay(_options.ObservationDelay, cancellationToken).ConfigureAwait(false);
         }
 
-        return false;
+        return (false, current);
     }
+
+    private Task<AzureProviderOperation?> HeartbeatAsync(
+        AzureProviderOperation operation,
+        string leaseToken,
+        CancellationToken cancellationToken) =>
+        _store.HeartbeatAsync(
+            operation.WorkspaceId,
+            operation.Id,
+            leaseToken,
+            LeaseDuration,
+            _timeProvider.GetUtcNow(),
+            operation.Version,
+            cancellationToken);
 
     private async Task<AzureProviderOperation?> CheckpointAsync(
         AzureProviderOperation operation,
@@ -306,15 +349,6 @@ public sealed class AzurePulumiReadinessVerifier : IAzurePulumiReadinessVerifier
                 operation.Version,
                 cancellationToken)
             .ConfigureAwait(false);
-
-    private static bool HostMatchesApp(string endpoint, string appName)
-    {
-        if (!Uri.TryCreate(endpoint, UriKind.Absolute, out var origin) || origin.HostNameType != UriHostNameType.Dns)
-            return false;
-        if (!origin.Host.EndsWith(".azurecontainerapps.io", StringComparison.OrdinalIgnoreCase))
-            return true;
-        return origin.Host.StartsWith(appName + ".", StringComparison.OrdinalIgnoreCase);
-    }
 
     private static bool AcceptsLatest(IReadOnlyList<TrafficEntry> traffic, string? revisionName)
     {
