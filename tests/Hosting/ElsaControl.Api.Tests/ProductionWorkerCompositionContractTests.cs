@@ -61,7 +61,9 @@ public sealed class ProductionWorkerCompositionContractTests : IDisposable
         Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(AzureBicepProviderRunner));
         Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(IAzureProviderRecoveryObserver));
         Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(IAzureRuntimeHealthProbe));
+        Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(IAzureEngineResourceGroupAbsenceObserver));
         Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(IElsaInstanceProviderHealthProbePort));
+        Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(IElsaInstanceDeleteStaleInventoryPort));
         Assert.True(ElsaInstanceHealthMonitorComposition.AddHealthMonitor(
             services, configuration, providerPipelineComposed: true, runWorkers: true));
 
@@ -196,6 +198,10 @@ public sealed class ProductionWorkerCompositionContractTests : IDisposable
         var services = new ServiceCollection();
         Assert.Null(AzureProviderRunnerComposition.AddRunner(services, configuration));
         Assert.False(AzureInstanceLifecycleComposition.AddProviderPorts(services, configuration, null));
+        Assert.DoesNotContain(services, descriptor =>
+            descriptor.ServiceType == typeof(IAzureEngineResourceGroupAbsenceObserver));
+        Assert.DoesNotContain(services, descriptor =>
+            descriptor.ServiceType == typeof(IElsaInstanceDeleteStaleInventoryPort));
         // Even with a composed pipeline, the rolled-back switch alone keeps the monitor off.
         Assert.False(ElsaInstanceHealthMonitorComposition.AddHealthMonitor(
             services, configuration, providerPipelineComposed: true, runWorkers: true));

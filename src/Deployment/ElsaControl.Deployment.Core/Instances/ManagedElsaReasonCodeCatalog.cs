@@ -111,6 +111,7 @@ public static class ManagedElsaReasonCodeCatalog
     public const string StagingLeverReset = "staging.lever.reset";
     public const string DeletionLocalAbsent = "deletion.local.absent";
     public const string DeletionProviderConfirmedAbsent = "deletion.provider-confirmed-absent";
+    public const string DeletionOutOfBandResourceGroupAbsent = "deletion.out-of-band-resource-group-absent";
     public const string DeletionProviderUnavailable = "deletion.provider.unavailable";
     public const string DeletionAzureProviderUnavailable = "deletion.provider-unavailable";
     public const string DeletionProviderCleanupPending = "deletion.provider-cleanup-pending";
@@ -219,6 +220,7 @@ public static class ManagedElsaReasonCodeCatalog
             new(StagingLeverReset, ManagedElsaReasonClass.HealthyHandOff),
             new(DeletionLocalAbsent, ManagedElsaReasonClass.HealthyHandOff),
             new(DeletionProviderConfirmedAbsent, ManagedElsaReasonClass.HealthyHandOff),
+            new(DeletionOutOfBandResourceGroupAbsent, ManagedElsaReasonClass.HealthyHandOff),
             new(DeletionProviderUnavailable, ManagedElsaReasonClass.Temporary),
             new(DeletionAzureProviderUnavailable, ManagedElsaReasonClass.Temporary),
             new(DeletionProviderCleanupPending, ManagedElsaReasonClass.Temporary),

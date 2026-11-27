@@ -13,7 +13,8 @@ namespace ElsaControl.Deployment.Core.Instances;
 public sealed class ElsaInstanceLifecycleService(
     IElsaInstanceLifecycleStore store,
     TimeProvider? timeProvider = null,
-    IElsaInstanceProviderReconciliationPort? provider = null)
+    IElsaInstanceProviderReconciliationPort? provider = null,
+    IElsaInstanceDeleteStaleInventoryPort? staleDeleteInventory = null)
 {
     public const string CreateIdempotencyScope = "instances";
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
@@ -175,6 +176,7 @@ public sealed class ElsaInstanceLifecycleService(
     {
         if (request.OperatorInitiated)
             await RefreshOperatorRecoveryEvidenceAsync(request, cancellationToken);
+        await TryReconcileStaleDeleteInventoryAsync(request, cancellationToken);
         return await AcceptAsync(request.WorkspaceId, request.InstanceId, ElsaInstanceOperationAction.Recover,
             request.ExpectedVersion, request.IdempotencyKey, null, null, request.Reason, cancellationToken,
             actorAccountId: request.ActorAccountId,
@@ -235,17 +237,51 @@ public sealed class ElsaInstanceLifecycleService(
             cancellationToken);
     }
 
-    public Task<ElsaInstanceLifecycleAcceptance> RecoverDeleteAsync(
+    public async Task<ElsaInstanceLifecycleAcceptance> RecoverDeleteAsync(
         ElsaInstanceLifecycleRequest request,
         CancellationToken cancellationToken = default)
     {
         ValidateDeleteRequest(request);
-        return AcceptAsync(request.WorkspaceId, request.InstanceId, ElsaInstanceOperationAction.Recover,
+        await TryReconcileStaleDeleteInventoryAsync(request, cancellationToken);
+        return await AcceptAsync(request.WorkspaceId, request.InstanceId, ElsaInstanceOperationAction.Recover,
             request.ExpectedVersion, request.IdempotencyKey, null, null, request.Reason, cancellationToken,
             confirmationId: request.DeleteConfirmationId,
             actorAccountId: request.ActorAccountId,
             expectedOperationId: request.ExpectedOperationId,
             canonicalExpectedVersion: request.CanonicalExpectedVersion);
+    }
+
+    private async Task TryReconcileStaleDeleteInventoryAsync(
+        ElsaInstanceLifecycleRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (staleDeleteInventory is null)
+            return;
+
+        var instance = await store.GetInstanceAsync(request.WorkspaceId, request.InstanceId, cancellationToken);
+        if (instance is null || instance.Version != request.ExpectedVersion)
+            return;
+        var operation = await store.GetActiveOperationAsync(request.WorkspaceId, request.InstanceId, cancellationToken);
+        if (operation is null ||
+            operation.Action != ElsaInstanceOperationAction.Delete ||
+            operation.State != ElsaInstanceOperationState.RecoveryRequired ||
+            (request.ExpectedOperationId is { } expected && operation.Id != expected))
+            return;
+
+        try
+        {
+            await staleDeleteInventory.TryReconcileStaleDeleteInventoryFromEngineResourceGroupAbsenceAsync(
+                instance, operation, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            // Observation or reconcile faults must not change Recover acceptance.
+            // Accept then keeps today's 409 when assignment inventory is still stale.
+        }
     }
 
     public Task<ElsaInstanceLifecycleAcceptance> DeleteAsync(

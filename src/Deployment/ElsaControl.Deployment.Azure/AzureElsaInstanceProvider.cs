@@ -23,6 +23,7 @@ public sealed class AzureElsaInstanceProvider(
     IAzureProviderRecoveryObservationStore? recoveryObservationStore = null,
     IAzureRuntimeHealthProbe? runtimeHealthProbe = null,
     AzureProviderTargetScope? providerScope = null,
+    IAzureEngineResourceGroupAbsenceObserver? engineResourceGroupObserver = null,
     ILogger<AzureElsaInstanceProvider>? logger = null) :
     IElsaInstanceProviderSubmissionPort,
     IElsaInstanceProviderReconciliationPort,
@@ -30,7 +31,8 @@ public sealed class AzureElsaInstanceProvider(
     IElsaInstanceProviderRecoveryPort,
     IElsaInstanceProviderDeleteRecoveryPort,
     IElsaInstanceProviderHealthProbePort,
-    IElsaInstanceProviderAutoResumePort
+    IElsaInstanceProviderAutoResumePort,
+    IElsaInstanceDeleteStaleInventoryPort
 {
     private readonly AzureElsaInstanceProviderOptions _options = options ?? new();
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
@@ -39,6 +41,7 @@ public sealed class AzureElsaInstanceProvider(
     private readonly IAzureProviderRecoveryObservationStore? _recoveryObservationStore = recoveryObservationStore;
     private readonly IAzureRuntimeHealthProbe? _runtimeHealthProbe = runtimeHealthProbe;
     private readonly AzureProviderTargetScope? _providerScope = providerScope;
+    private readonly IAzureEngineResourceGroupAbsenceObserver? _engineResourceGroupObserver = engineResourceGroupObserver;
     private readonly ILogger _logger = logger ?? NullLogger<AzureElsaInstanceProvider>.Instance;
 
     public async Task<ElsaInstanceProviderSubmissionResult> SubmitAsync(
@@ -1144,6 +1147,108 @@ public sealed class AzureElsaInstanceProvider(
                 LastProviderProgressAt(pending),
                 CleanupProgressReceipt(pending));
         }
+    }
+
+    public async Task TryReconcileStaleDeleteInventoryFromEngineResourceGroupAbsenceAsync(
+        ElsaInstance instance,
+        ElsaInstanceOperation operation,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(instance);
+        ArgumentNullException.ThrowIfNull(operation);
+        if (_engineResourceGroupObserver is null ||
+            !_options.Enabled ||
+            instance.DesiredLifecycle != ElsaDesiredLifecycle.Deleting ||
+            operation.Action != ElsaInstanceOperationAction.Delete ||
+            operation.State != ElsaInstanceOperationState.RecoveryRequired ||
+            operation.InstanceId != instance.Id ||
+            instance.PlacementAssignmentReference is null ||
+            !Guid.TryParseExact(instance.PlacementAssignmentReference.AssignmentId, "D", out var assignmentId))
+            return;
+
+        AzureProviderResourceAssignment? assignment;
+        try
+        {
+            EnsureEnabled();
+            assignment = await assignmentStore.GetAsync(instance.WorkspaceId, assignmentId, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return;
+        }
+
+        if (assignment is null ||
+            assignment.Id != assignmentId ||
+            assignment.WorkspaceId != instance.WorkspaceId ||
+            assignment.OrganizationId != instance.OrganizationId ||
+            assignment.InstanceId != instance.Id ||
+            !string.Equals(assignment.WorkloadName, WorkloadName(instance.Id), StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(assignment.SubscriptionId, _options.SubscriptionId, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(
+                assignment.ResourceGroupName,
+                AzureProviderResourceAssignmentNaming.ResourceGroupName(
+                    _options.ResourceGroupNamePrefix, instance.Id, assignment.NamingVersion),
+                StringComparison.Ordinal) ||
+            AzureProviderDeleteRecoverySupport.IsConfirmedAbsentAssignment(assignment) ||
+            await HasCorrelatedDeleteAuthorityAsync(assignment, operation.Id, cancellationToken))
+            return;
+
+        AzureProviderFreshResourceGroupState observation;
+        try
+        {
+            observation = await _engineResourceGroupObserver.ObserveAsync(
+                assignment.SubscriptionId,
+                assignment.ResourceGroupName,
+                cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return;
+        }
+
+        if (observation != AzureProviderFreshResourceGroupState.Absent)
+            return;
+
+        await assignmentStore.ReconcileStaleInventoryToConfirmedAbsentAsync(
+            instance.WorkspaceId,
+            assignment.Id,
+            instance.OrganizationId,
+            instance.Id,
+            operation.Id,
+            _timeProvider.GetUtcNow(),
+            cancellationToken);
+    }
+
+    private async Task<bool> HasCorrelatedDeleteAuthorityAsync(
+        AzureProviderResourceAssignment assignment,
+        Guid lifecycleOperationId,
+        CancellationToken cancellationToken)
+    {
+        if (assignment.LastOperationId is not { } providerOperationId)
+            return false;
+
+        var providerOperation = await operationStore.GetAsync(assignment.WorkspaceId, providerOperationId, cancellationToken);
+        return providerOperation is not null &&
+               providerOperation.Action == AzureProviderOperationAction.Delete &&
+               providerOperation.OrganizationId == assignment.OrganizationId &&
+               providerOperation.InstanceId == assignment.InstanceId &&
+               providerOperation.LifecycleAction == ElsaInstanceOperationAction.Delete &&
+               providerOperation.ProviderAssignmentId == assignment.Id &&
+               string.Equals(providerOperation.TargetKey, assignment.WorkloadName, StringComparison.OrdinalIgnoreCase) &&
+               string.Equals(
+                   NormalizeScope(providerOperation.ProviderScopeFingerprint),
+                   NormalizeScope(assignment.ProviderScopeFingerprint),
+                   StringComparison.Ordinal) &&
+               AzureProviderOperationValidation.IsLifecycleDeleteIdempotencyKey(
+                   providerOperation.IdempotencyKey, lifecycleOperationId);
     }
 
     public async Task<ElsaInstanceCleanupObservation> RecoverDeleteAsync(
