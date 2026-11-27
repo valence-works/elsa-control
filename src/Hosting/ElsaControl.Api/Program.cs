@@ -726,7 +726,14 @@ if (provisioningWorkerEnabled && !provisioningTesting)
 
     builder.Services.AddProvisioningPersistence(builder.Configuration, requireSqlServer);
     builder.Services.AddAzureProvisioning(builder.Configuration);
-    builder.Services.Replace(ServiceDescriptor.Singleton<IProvisioningStepLedger, AzureProviderOperationStepLedger>());
+    // Factory, not implementation type: the built-in container ignores
+    // [ActivatorUtilitiesConstructor] and would otherwise treat the scope-factory
+    // and store constructors as ambiguous. The singleton must open a scope per
+    // write rather than capturing the scoped IAzureProviderOperationStore.
+    builder.Services.Replace(ServiceDescriptor.Singleton<IProvisioningStepLedger>(services =>
+        new AzureProviderOperationStepLedger(
+            services.GetRequiredService<IServiceScopeFactory>(),
+            services.GetRequiredService<TimeProvider>())));
 }
 var webhookDispatchEnabled = builder.Configuration.GetValue("Deployment:WebhookDispatch:Enabled", false);
 if (webhookDispatchEnabled && !builder.Environment.IsEnvironment("Testing"))
@@ -788,6 +795,11 @@ var runtimeImageFindings = app.Services.GetRequiredService<RuntimeImageValidator
     .Validate(app.Services.GetRequiredService<RuntimeImageCatalog>().ListImages());
 if (runtimeImageFindings.Count > 0)
     throw new InvalidOperationException($"Runtime image catalog is invalid: {string.Join(" ", runtimeImageFindings.Select(x => $"{x.Code} {x.Scope}"))}");
+
+// Composition tests build the real host to validate DI without migrations or
+// hosted workers. Development-only so an App Service setting cannot skip Run.
+if (app.Environment.IsDevelopment() && app.Configuration.GetValue("Hosting:BuildOnly", false))
+    return;
 
 if (!app.Environment.IsEnvironment("Testing"))
 {

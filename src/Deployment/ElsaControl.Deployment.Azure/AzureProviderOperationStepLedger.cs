@@ -24,7 +24,6 @@ public sealed class AzureProviderOperationStepLedger : IProvisioningStepLedger
     private readonly ConcurrentDictionary<Guid, BoundLease> _leases = new();
     private readonly ConcurrentDictionary<(Guid OperationId, int Sequence, ProvisioningEventKind Kind, string ResourceKind), byte> _seen = new();
 
-    [ActivatorUtilitiesConstructor]
     public AzureProviderOperationStepLedger(
         IServiceScopeFactory scopes,
         TimeProvider? timeProvider = null)
@@ -33,7 +32,10 @@ public sealed class AzureProviderOperationStepLedger : IProvisioningStepLedger
         ArgumentNullException.ThrowIfNull(scopes);
     }
 
-    public AzureProviderOperationStepLedger(
+    // Tests and in-process fakes. Internal so the built-in container, which ignores
+    // [ActivatorUtilitiesConstructor], cannot pick this over the scope-factory ctor
+    // and capture a scoped store in a singleton.
+    internal AzureProviderOperationStepLedger(
         IAzureProviderOperationStore store,
         TimeProvider? timeProvider = null)
         : this(() => new StoreSession(store), timeProvider)
