@@ -1190,14 +1190,24 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
         db.ChangeTracker.Clear();
         return await db.ExecuteInTransactionAsync<AzureProviderOperation?>(IsolationLevel.Unspecified, async () =>
         {
+            // The step ledger may take over a live pulumi-dispatch lease so an
+            // OperationSucceeded batch that lands during enqueue is not dropped
+            // as StaleFence. Any other worker still waits for expiry.
+            var dispatchHandoff = !allowRecovery
+                && string.Equals(workerId, AzureProviderOperationStepLedger.WorkerId, StringComparison.Ordinal);
             var changed = await db.AzureProviderOperations.Where(x => x.WorkspaceId == workspaceId && x.Id == operationId &&
                      (allowRecovery
                          ? x.Status == AzureProviderOperationStatus.RecoveryRequired
-                         : x.Status == AzureProviderOperationStatus.Accepted
-                           || x.Status == AzureProviderOperationStatus.Queued
-                           || x.Status == AzureProviderOperationStatus.EntitlementHeld
-                           || (x.Status == AzureProviderOperationStatus.Running && x.WorkerId == workerId)) &&
-                     (x.LeaseExpiresAt == null || x.LeaseExpiresAt <= now) && (!expectedVersion.HasValue || x.Version == expectedVersion.Value) &&
+                           && (x.LeaseExpiresAt == null || x.LeaseExpiresAt <= now)
+                         : (dispatchHandoff
+                            && x.Status == AzureProviderOperationStatus.Running
+                            && x.WorkerId == AzureProviderOperationWorker.DispatchWorkerId)
+                           || ((x.Status == AzureProviderOperationStatus.Accepted
+                                || x.Status == AzureProviderOperationStatus.Queued
+                                || x.Status == AzureProviderOperationStatus.EntitlementHeld
+                                || (x.Status == AzureProviderOperationStatus.Running && x.WorkerId == workerId))
+                               && (x.LeaseExpiresAt == null || x.LeaseExpiresAt <= now))) &&
+                     (!expectedVersion.HasValue || x.Version == expectedVersion.Value) &&
                      !db.AzureProviderOperations.Any(other => other.Id != operationId && other.WorkspaceId == workspaceId &&
                          other.TargetKey == x.TargetKey &&
                          (other.Status == AzureProviderOperationStatus.Accepted || other.Status == AzureProviderOperationStatus.Queued || other.Status == AzureProviderOperationStatus.EntitlementHeld ||

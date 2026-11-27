@@ -181,6 +181,8 @@ public sealed class AzureProviderOperationWorker(
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
+        // Claim serializes concurrent dispatches. The step ledger may take over
+        // this live pulumi-dispatch lease so OperationSucceeded is not dropped.
         var leaseToken = Guid.NewGuid().ToString("N");
         var claimed = await store.ClaimAsync(
                 operation.WorkspaceId,

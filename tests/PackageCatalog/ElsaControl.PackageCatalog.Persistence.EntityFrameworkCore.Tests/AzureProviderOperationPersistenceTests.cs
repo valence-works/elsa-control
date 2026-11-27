@@ -1167,6 +1167,72 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
     }
 
     [Fact]
+    public async Task Ledger_takes_over_a_live_pulumi_dispatch_lease_and_writes_workload_ready()
+    {
+        var now = DateTimeOffset.UtcNow;
+        using var db = CreateContext();
+        var store = new AzureProviderOperationStore(db);
+        var providerOperation = await store.CreateOrGetAsync(Request() with
+        {
+            TargetKey = "dispatch-lease-handoff",
+            IdempotencyKey = "dispatch-lease-handoff"
+        }, now);
+        var dispatchToken = "pulumi-dispatch-live";
+        var claimed = Assert.IsType<AzureProviderOperation>(await store.ClaimAsync(
+            _workspaceId,
+            providerOperation.Id,
+            AzureProviderOperationWorker.DispatchWorkerId,
+            dispatchToken,
+            TimeSpan.FromMinutes(1),
+            now));
+        Assert.Null(await store.ClaimAsync(
+            _workspaceId,
+            providerOperation.Id,
+            "worker-2",
+            "other-worker",
+            TimeSpan.FromMinutes(1),
+            now,
+            claimed.Version));
+
+        var ledger = new AzureProviderOperationStepLedger(store, new FixedTimeProvider(now));
+        var (operation, request) = BoundLedger(providerOperation.Id);
+        var result = await ledger.TryWriteAsync(
+            operation,
+            request,
+            [
+                LedgerEvent(operation.Id, 1, ProvisioningEventKind.ResourceStarted, "resource-group"),
+                LedgerEvent(operation.Id, 2, ProvisioningEventKind.ResourceSucceeded, "resource-group"),
+                LedgerEvent(operation.Id, 3, ProvisioningEventKind.ResourceSucceeded, ProvisioningCapability.ContainerRuntime),
+                LedgerEvent(operation.Id, 4, ProvisioningEventKind.OperationSucceeded, ProvisioningCapability.ContainerRuntime)
+            ],
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [PulumiStepLedgerMapper.EngineEndpointOutputKey] = "https://runtime.example.test",
+                [PulumiStepLedgerMapper.WorkloadRevisionNameOutputKey] = "engine-app--candidate",
+                [PulumiStepLedgerMapper.OwnedResourceGroupNameOutputKey] = "rg-engine-test"
+            });
+
+        Assert.Equal(ProvisioningStepLedgerResult.Written, result);
+        var queued = Assert.IsType<AzureProviderOperation>(await store.GetAsync(_workspaceId, providerOperation.Id));
+        Assert.Equal(AzureProviderOperationStatus.Queued, queued.Status);
+        Assert.Equal(AzureProviderOperationPhase.WorkloadReady, queued.Phase);
+        Assert.Equal("https://runtime.example.test", queued.Endpoint);
+        Assert.Null(queued.WorkerId);
+        Assert.Null(queued.LeaseExpiresAt);
+        Assert.Null(await store.ReleaseToQueueAsync(
+            _workspaceId,
+            providerOperation.Id,
+            dispatchToken,
+            now,
+            claimed.Version));
+        var unchanged = Assert.IsType<AzureProviderOperation>(await store.GetAsync(_workspaceId, providerOperation.Id));
+        Assert.Equal(AzureProviderOperationStatus.Queued, unchanged.Status);
+        Assert.Equal(AzureProviderOperationPhase.WorkloadReady, unchanged.Phase);
+        Assert.Equal("https://runtime.example.test", unchanged.Endpoint);
+        Assert.Equal(0, await store.RecoverStaleAsync(now.AddHours(1)));
+    }
+
+    [Fact]
     public async Task Ledger_reclaims_an_expired_running_lease_and_finalizes()
     {
         var now = DateTimeOffset.UtcNow;

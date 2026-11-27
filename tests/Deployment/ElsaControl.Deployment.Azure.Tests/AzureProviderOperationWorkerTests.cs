@@ -290,6 +290,18 @@ public sealed class AzureProviderOperationWorkerTests
         Assert.Throws<ArgumentException>(() =>
             WithComputedMetadata(RunnableOperation() with { LifecycleAction = null }));
 
+        var tampered = WithComputedMetadata(RunnableOperation());
+        tampered = tampered with { LifecycleAction = null };
+        var unrestorable = new WorkerStore(tampered);
+        Assert.Equal(0, await new AzureProviderOperationWorker(
+            unrestorable,
+            new AzureProviderExecutor(unrestorable, new NeverCalledRunner()),
+            new PersistedAzureProviderPlanSource(),
+            new FixedTimeProvider()).ProcessOnceAsync());
+        Assert.Equal(1, unrestorable.MarkUnrestorableCount);
+        Assert.Equal(AzureProviderOperationStatus.Failed, unrestorable.Operation.Status);
+        Assert.Contains(unrestorable.Transitions, transition => transition.Code == "azure.plan.unrestorable");
+
         // The only well-formed null-lifecycle shape is unbound identity. That row
         // has no instance id, so ReadBackendAsync never consults the backend store
         // and the Pulumi allow-list is unreachable.
@@ -301,6 +313,10 @@ public sealed class AzureProviderOperationWorkerTests
             LifecycleAction = null,
             ProviderAssignmentId = null
         });
+        var phase = operation.Phase;
+        var health = operation.Health;
+        var endpoint = operation.Endpoint;
+        var resources = operation.Resources;
         var store = new WorkerStore(operation, execute: true);
         var runner = new CompletingRunner();
         var dispatcher = new RecordingDispatcher();
@@ -316,8 +332,14 @@ public sealed class AzureProviderOperationWorkerTests
         Assert.Empty(dispatcher.Operations);
         Assert.Empty(runner.Steps);
         Assert.Equal(0, backends.Reads);
-        Assert.NotEqual(AzureProviderOperationStatus.Accepted, store.Operation.Status);
-        Assert.NotEqual(AzureProviderOperationStatus.Queued, store.Operation.Status);
+        Assert.Equal(AzureProviderOperationStatus.RecoveryRequired, store.Operation.Status);
+        Assert.Contains(
+            store.Transitions,
+            transition => transition.Code == ManagedElsaReasonCodeCatalog.ProviderIdentityBindingMissing);
+        Assert.Equal(phase, store.Operation.Phase);
+        Assert.Equal(health, store.Operation.Health);
+        Assert.Equal(endpoint, store.Operation.Endpoint);
+        Assert.Equal(resources, store.Operation.Resources);
     }
 
     [Fact]
