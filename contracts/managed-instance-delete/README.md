@@ -30,7 +30,7 @@ Assumptions:
 | `invalid-state.json` | 409 | `instance.invalid-state` | Shared lifecycle-conflict problem body (see below) |
 | `changed-since-read.json` | 412 | `instance.changed-since-read` | `POST .../delete` after a customer mutation since If-Match |
 | `rate-limit-exceeded.json` | 429 | `rate-limit.exceeded` | Lifecycle rate limiter (see below) |
-| `overview-deleting.json` | 200 | `instance.deleting` | `GET .../overview` `allowedActions.delete` |
+| `overview-deleting.json` | 200 | `instance.deleting` | `GET .../overview` field slice (`allowedActions.delete`, `activeOperation`, `lastOperation`), not the full body |
 
 `catalog.json` repeats that table in machine-readable form. Hub tests should
 load it for the HTTP status next to each body.
@@ -45,6 +45,11 @@ load it for the HTTP status next to each body.
 - `overview-deleting.json` is the overview denial, not a problem body. A
   completed tombstone has no `activeOperation`. `lastOperation` has action and
   state but no operation id.
+- `overview-deleting.json` is a **field slice** of the `GET .../overview`
+  response, not the full body. It pins only `allowedActions.delete`,
+  `activeOperation` and `lastOperation`. Hub tests should assert those fields
+  and must not compare the whole overview response against this file; other
+  overview fields can be added or changed without updating the golden.
 
 ## Notes Hub should not treat as behaviour changes
 
