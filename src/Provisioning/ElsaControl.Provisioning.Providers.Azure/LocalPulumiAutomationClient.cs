@@ -42,7 +42,12 @@ public sealed class LocalPulumiAutomationClient(
 
         try
         {
-            using var stack = await LocalWorkspace.CreateOrSelectStackAsync(args, cancellationToken).ConfigureAwait(false);
+            using var stack = await OpenStackAsync(command, args, cancellationToken).ConfigureAwait(false);
+            if (stack is null)
+            {
+                return MissingStackResult(command, operation);
+            }
+
             foreach (var pair in workspace.StackConfig)
             {
                 await stack.SetConfigAsync(pair.Key, new ConfigValue(pair.Value), cancellationToken)
@@ -80,9 +85,12 @@ public sealed class LocalPulumiAutomationClient(
                 catch (Exception exception)
                 {
                     _logger.LogError(
-                        "Provisioning live event mapping failed. OperationId={OperationId} ExceptionType={ExceptionType}",
+                        exception,
+                        "Provisioning live event mapping failed. OperationId={OperationId} ExceptionType={ExceptionType} ExceptionMessage={ExceptionMessage} PulumiStderr={PulumiStderr}",
                         operation.Id,
-                        exception.GetType().FullName);
+                        exception.GetType().FullName,
+                        ProvisioningExceptionLog.Message(exception),
+                        ProvisioningExceptionLog.StderrTail(exception));
                 }
             }
 
@@ -162,9 +170,12 @@ public sealed class LocalPulumiAutomationClient(
         catch (Exception exception) when (PulumiLockConflict.Matches(exception))
         {
             _logger.LogError(
-                "Provisioning stack lock conflict. OperationId={OperationId} ExceptionType={ExceptionType}",
+                exception,
+                "Provisioning stack lock conflict. OperationId={OperationId} ExceptionType={ExceptionType} ExceptionMessage={ExceptionMessage} PulumiStderr={PulumiStderr}",
                 operation.Id,
-                exception.GetType().FullName);
+                exception.GetType().FullName,
+                ProvisioningExceptionLog.Message(exception),
+                ProvisioningExceptionLog.StderrTail(exception));
             var locked = new ProvisioningEvent(
                 operation.Id,
                 ProvisioningEventKind.LockConflicted,
@@ -176,9 +187,12 @@ public sealed class LocalPulumiAutomationClient(
         catch (Exception exception)
         {
             _logger.LogError(
-                "Provisioning provider failed. OperationId={OperationId} ExceptionType={ExceptionType}",
+                exception,
+                "Provisioning provider failed. OperationId={OperationId} ExceptionType={ExceptionType} ExceptionMessage={ExceptionMessage} PulumiStderr={PulumiStderr}",
                 operation.Id,
-                exception.GetType().FullName);
+                exception.GetType().FullName,
+                ProvisioningExceptionLog.Message(exception),
+                ProvisioningExceptionLog.StderrTail(exception));
             var failed = new ProvisioningEvent(
                 operation.Id,
                 ProvisioningEventKind.ResourceFailed,
@@ -187,6 +201,67 @@ public sealed class LocalPulumiAutomationClient(
                 DateTimeOffset.UtcNow);
             return ProviderRunResult.Fail([failed], ProvisioningFailureCodes.ProviderFailed);
         }
+    }
+
+    private static async Task<WorkspaceStack?> OpenStackAsync(
+        ProvisioningCommand command,
+        InlineProgramArgs args,
+        CancellationToken cancellationToken)
+    {
+        if (command is ProvisioningCommand.Cancel or ProvisioningCommand.Destroy)
+        {
+            try
+            {
+                return await LocalWorkspace.SelectStackAsync(args, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (IsStackMissing(exception))
+            {
+                return null;
+            }
+        }
+
+        return await LocalWorkspace.CreateOrSelectStackAsync(args, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static ProviderRunResult MissingStackResult(ProvisioningCommand command, ProvisioningOperation operation)
+    {
+        if (command == ProvisioningCommand.Destroy)
+        {
+            var destroyed = new ProvisioningEvent(
+                operation.Id,
+                ProvisioningEventKind.ResourceSucceeded,
+                ProvisioningCapability.ContainerRuntime,
+                "Apply completed.",
+                DateTimeOffset.UtcNow);
+            return ProviderRunResult.Ok([destroyed]);
+        }
+
+        var nothing = new ProvisioningEvent(
+            operation.Id,
+            ProvisioningEventKind.OperationCancelled,
+            ProvisioningCapability.ContainerRuntime,
+            "Nothing to cancel.",
+            DateTimeOffset.UtcNow);
+        return new ProviderRunResult(true, [nothing], failureCode: ProvisioningFailureCodes.NothingToCancel);
+    }
+
+    private static bool IsStackMissing(Exception exception)
+    {
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is Pulumi.Automation.Commands.Exceptions.StackNotFoundException)
+                return true;
+            var name = current.GetType().Name;
+            if (name.Contains("StackNotFound", StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (current.Message.Contains("no stack named", StringComparison.OrdinalIgnoreCase)
+                || current.Message.Contains("stack not found", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static bool IsNothingToCancel(Exception exception, ProvisioningCommand command)

@@ -44,8 +44,11 @@ public sealed class ProvisioningOperationHostedService(
             catch (Exception exception)
             {
                 logger.LogError(
-                    "Provisioning operation processing failed. ExceptionType={ExceptionType}",
-                    exception.GetType().FullName);
+                    exception,
+                    "Provisioning operation processing failed. ExceptionType={ExceptionType} ExceptionMessage={ExceptionMessage} PulumiStderr={PulumiStderr}",
+                    exception.GetType().FullName,
+                    ProvisioningExceptionLog.Message(exception),
+                    ProvisioningExceptionLog.StderrTail(exception));
             }
 
             try

@@ -28,6 +28,35 @@ public sealed class ProvisioningOptions
     /// </summary>
     public string? SeedVaultUri { get; set; }
 
+    /// <summary>
+    /// Current provisioner workload-identity client id. Overlay wins over a
+    /// stored request snapshot after a settings fix.
+    /// </summary>
+    public string? CredentialLocator { get; set; }
+
+    /// <summary>
+    /// Current Blob state locator <c>{account}/{container}</c>.
+    /// </summary>
+    public string? StateBackendLocator { get; set; }
+
+    /// <summary>
+    /// Current Key Vault secrets-provider locator. Short
+    /// <c>{vault}/{key}</c> or the full <c>azurekeyvault://</c> URL.
+    /// </summary>
+    public string? SecretsProviderLocator { get; set; }
+
+    /// <summary>
+    /// Commercial registry login server used when the platform stack is
+    /// absent. Config wins over a <c>StackReference</c>.
+    /// </summary>
+    public string? RegistryLoginServer { get; set; }
+
+    /// <summary>
+    /// Commercial registry resource id used when the platform stack is
+    /// absent. Overlayed at run time; never stored in the request snapshot.
+    /// </summary>
+    public string? RegistryId { get; set; }
+
     public TimeSpan PollInterval { get; set; } = TimeSpan.FromSeconds(5);
 
     /// <summary>

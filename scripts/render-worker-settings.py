@@ -62,6 +62,10 @@ PULUMI_WORKER_SETTINGS = {
     "Provisioning__StateBackendLocator": "stpulumitud53zotij43k/pulumi-state",
     "Provisioning__SecretsProviderLocator": "azurekeyvault://ecseedkvtud53zotij43k.vault.azure.net/keys/pulumi-secrets",
     "Provisioning__SeedVaultUri": "https://ecseedkvtud53zotij43k.vault.azure.net/",
+    # Commercial registry locators so the first engine Create does not need an
+    # elsa-platform stack. Overlayed at run time; config wins over StackReference.
+    "Provisioning__RegistryLoginServer": "valenceruntimeimages.azurecr.io",
+    "Provisioning__RegistryId": "/subscriptions/${RegistrySubscriptionId}/resourceGroups/${RegistryResourceGroupName}/providers/Microsoft.ContainerRegistry/registries/${RegistryName}",
 }
 
 PLACEHOLDER = re.compile(r"\$\{([A-Za-z][A-Za-z0-9_]*)\}")
