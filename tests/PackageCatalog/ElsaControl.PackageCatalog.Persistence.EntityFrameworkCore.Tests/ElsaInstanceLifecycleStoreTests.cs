@@ -1897,6 +1897,94 @@ public sealed partial class ElsaInstanceLifecycleStoreTests : IClassFixture<Dele
     }
 
     [Fact]
+    public async Task Confirmed_absence_releases_leftover_provider_assignment_without_deleting_history()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Release leftover assignment");
+        await CompleteManagedRunAsync(db, accepted.Operation.Id, accepted.Instance.Id);
+        await SeedAzureProvenanceAsync(db, workspace, accepted.Instance.Id);
+        var current = await CreateStore(db).GetInstanceAsync(workspace.Id, accepted.Instance.Id);
+        var deletion = await new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now.AddMinutes(2)))
+            .DeleteAsync(await CreateConfirmedDeleteRequestAsync(
+                db, workspace.Id, accepted.Instance.Id, current!.Version, "release-assignment-delete", Now.AddMinutes(2)));
+        var store = new EfCoreElsaInstanceLifecycleStore(db, EmptyResolutionInputSource.Instance,
+            new FixedTimeProvider(Now.AddMinutes(3)));
+        var item = await store.TryClaimNextDeletionAsync("deletion-worker", Now.AddMinutes(3));
+        Assert.NotNull(item);
+        var deletedAt = Now.AddMinutes(4);
+        var evidence = new ElsaInstanceCleanupEvidence("https://evidence.example/deletions/release", Digest('e'));
+        var observation = new ElsaInstanceCleanupObservation(ElsaInstanceCleanupObservationKind.ConfirmedAbsent,
+            deletion.Operation.Id, deletion.Operation.AttemptNumber,
+            ManagedElsaReasonCodeCatalog.DeletionProviderConfirmedAbsent, evidence);
+        var commit = new ElsaInstanceDeletionCommit(workspace.Id, accepted.Instance.Id, deletion.Operation.Id,
+            item!.Outbox.Id, item.Instance.Version, item.Operation.AttemptNumber, item.CorrelatedRunId,
+            "deletion-worker", item.LeaseToken, item.LeaseVersion, observation.ComputeFingerprint(),
+            ElsaInstanceDeletionProofKind.ProviderConfirmedAbsent, observation.DiagnosticCode, evidence.Reference, evidence.Digest,
+            ElsaInstanceStateMachine.FinalizeDeletion(item.Instance, deletedAt),
+            item.Operation.TransitionTo(ElsaInstanceOperationState.Succeeded), deletedAt);
+
+        var result = await store.CommitDeletionAsync(commit);
+
+        Assert.Equal(ElsaInstanceDeletionOutcome.Deleted, result.Outcome);
+        var assignment = await db.AzureProviderResourceAssignments.AsNoTracking()
+            .SingleAsync(x => x.WorkspaceId == workspace.Id && x.InstanceId == accepted.Instance.Id);
+        Assert.Equal(AzureProviderAssignmentState.Released, assignment.State);
+        Assert.Equal(deletedAt, assignment.DeletedAt);
+        var audit = await db.ElsaInstanceAuditEvents.AsNoTracking()
+            .SingleAsync(x => x.InstanceId == accepted.Instance.Id && x.EventType == "lifecycle.deleted");
+        Assert.Equal(ManagedElsaReasonCodeCatalog.DeletionProviderConfirmedAbsent, audit.DiagnosticCode);
+    }
+
+    [Fact]
+    public async Task Confirmed_absence_leaves_verified_deleted_assignment_intact()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Preserve deleted assignment");
+        await CompleteManagedRunAsync(db, accepted.Operation.Id, accepted.Instance.Id);
+        await SeedAzureProvenanceAsync(db, workspace, accepted.Instance.Id);
+        var existing = await db.AzureProviderResourceAssignments.SingleAsync();
+        existing.State = AzureProviderAssignmentState.Deleted;
+        existing.DeletedAt = Now.AddMinutes(1);
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+        var current = await CreateStore(db).GetInstanceAsync(workspace.Id, accepted.Instance.Id);
+        var deletion = await new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now.AddMinutes(2)))
+            .DeleteAsync(await CreateConfirmedDeleteRequestAsync(
+                db, workspace.Id, accepted.Instance.Id, current!.Version, "preserve-deleted-assignment", Now.AddMinutes(2)));
+        var store = new EfCoreElsaInstanceLifecycleStore(db, EmptyResolutionInputSource.Instance,
+            new FixedTimeProvider(Now.AddMinutes(3)));
+        var item = await store.TryClaimNextDeletionAsync("deletion-worker", Now.AddMinutes(3));
+        Assert.NotNull(item);
+        var deletedAt = Now.AddMinutes(4);
+        var evidence = new ElsaInstanceCleanupEvidence("https://evidence.example/deletions/preserve", Digest('e'));
+        var observation = new ElsaInstanceCleanupObservation(ElsaInstanceCleanupObservationKind.ConfirmedAbsent,
+            deletion.Operation.Id, deletion.Operation.AttemptNumber,
+            ManagedElsaReasonCodeCatalog.DeletionProviderConfirmedAbsent, evidence);
+        var commit = new ElsaInstanceDeletionCommit(workspace.Id, accepted.Instance.Id, deletion.Operation.Id,
+            item!.Outbox.Id, item.Instance.Version, item.Operation.AttemptNumber, item.CorrelatedRunId,
+            "deletion-worker", item.LeaseToken, item.LeaseVersion, observation.ComputeFingerprint(),
+            ElsaInstanceDeletionProofKind.ProviderConfirmedAbsent, observation.DiagnosticCode, evidence.Reference, evidence.Digest,
+            ElsaInstanceStateMachine.FinalizeDeletion(item.Instance, deletedAt),
+            item.Operation.TransitionTo(ElsaInstanceOperationState.Succeeded), deletedAt);
+
+        await store.CommitDeletionAsync(commit);
+
+        var assignment = await db.AzureProviderResourceAssignments.AsNoTracking()
+            .SingleAsync(x => x.WorkspaceId == workspace.Id && x.InstanceId == accepted.Instance.Id);
+        Assert.Equal(AzureProviderAssignmentState.Deleted, assignment.State);
+        Assert.Equal(Now.AddMinutes(1), assignment.DeletedAt);
+        var audit = await db.ElsaInstanceAuditEvents.AsNoTracking()
+            .SingleAsync(x => x.InstanceId == accepted.Instance.Id && x.EventType == "lifecycle.deleted");
+        Assert.Equal(ManagedElsaReasonCodeCatalog.DeletionProviderConfirmedAbsent, audit.DiagnosticCode);
+    }
+
+    [Fact]
     public async Task Expired_deletion_claim_rotates_lease_without_provider_or_duplicate_operation()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");

@@ -2195,7 +2195,8 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
         var live = await db.AzureProviderResourceAssignments
             .Where(x => x.WorkspaceId == workspaceId &&
                         x.InstanceId == instanceId &&
-                        x.State != AzureProviderAssignmentState.Deleted)
+                        x.State != AzureProviderAssignmentState.Deleted &&
+                        x.State != AzureProviderAssignmentState.Released)
             .ToListAsync(cancellationToken);
         if (live.Count == 0)
             return null;
@@ -2271,7 +2272,7 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
         int namingVersion,
         AzureProviderResourceAssignmentRequest? createRequest)
     {
-        if (existing.State == AzureProviderAssignmentState.Deleted ||
+        if (existing.State is AzureProviderAssignmentState.Deleted or AzureProviderAssignmentState.Released ||
             existing.NamingVersion != namingVersion ||
             !string.Equals(existing.SubscriptionId, subscriptionId, StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(existing.ResourceGroupName, expectedGroup, StringComparison.Ordinal))

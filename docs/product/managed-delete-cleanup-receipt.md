@@ -22,8 +22,9 @@ A successful response requires:
   observed Deleted, with its last operation equal to the requested Delete.
 - The exact organization's successful lifecycle Delete and matching completion
   and tombstone timestamps.
-- Either the provider-backed path or the local-absent path below. There is no
-  fallback from one to the other.
+- Either the provider-backed path, the local-absent path, or the
+  confirmed-absent-without-provider-Delete path below. There is no fallback
+  from one to another.
 
 Provider-backed receipts additionally require:
 
@@ -38,17 +39,28 @@ Provider-backed receipts additionally require:
 
 Local-absent receipts (`proofKind` `local-no-owned-resources`) apply when the
 instance has no retained provider assignment and the Delete finalized with
-either:
+`deletion.local.absent` and zero `AzureProviderOperations` for that workspace
+and instance.
 
-- `deletion.local.absent` and zero `AzureProviderOperations` for that workspace
-  and instance, or
-- admin recovery (or equivalent) with `deletion.provider-confirmed-absent`.
+Confirmed-absent receipts without a provider Delete (`proofKind`
+`provider-confirmed-absent`, `providerDeleteSucceeded` false) apply when the
+instance has no retained provider assignment and the Delete finalized with
+`deletion.provider-confirmed-absent`. That includes:
+
+- never-provisioned Deletes (normal or admin-recovered) with no assignment, and
+- Deletes that left a placement assignment from a failed Create. Commit
+  marks those assignments `Released` in the same transaction. On read, a
+  leftover assignment whose instance is Deleted with the last Delete
+  Succeeded and `deletion.provider-confirmed-absent` is treated as released,
+  so existing tombstones receive a receipt without a manual SQL fix-up.
 
 They attest that no provider Delete ran: `providerDeleteSucceeded` is false
 and `providerCompletedAt` is null. `providerAbsenceVerifiedAtCompletion` is
-true because that empty assignment provenance was verified in the completion
-transaction. Any retained assignment, or any other deletion diagnostic, stays
-on the provider-backed path.
+true because that empty or released assignment provenance was verified in the
+completion transaction, or is equivalent on read. A verified `Deleted`
+assignment from terminal provider cleanup stays on the provider-backed path.
+Genuinely live assignments, or any other deletion diagnostic, stay
+fail-closed.
 
 Missing, mismatched, unfinished or ambiguous evidence returns an opaque 404,
 without a partial receipt. Unsupported lightweight stores return no receipt.
@@ -64,14 +76,16 @@ only the status class and sanitized result.
 
 `providerAbsenceVerifiedAtCompletion` attests to absence verification at Delete
 completion: the trusted provider runner's CleanupVerified result on the
-provider-backed path, or empty Azure provenance on the local-absent path.
+provider-backed path, or empty or released Azure provenance on the local-absent
+and confirmed-absent-without-provider-Delete paths.
 **It is not a fresh Azure Resource Manager observation.** The digest binds
 retained evidence; it is not a signature and does not authorize mutation or
 prove present absence by itself. Provider-backed receipts use canonical prefix
-`elsa-managed-delete-cleanup-receipt-v1`. Local receipts use
-`elsa-managed-delete-cleanup-receipt-local-v1` and set `proofKind` to
-`local-no-owned-resources`. Provider-backed receipts set `proofKind` to
-`provider-confirmed-absent`.
+`elsa-managed-delete-cleanup-receipt-v1`. Receipts without a provider Delete
+use `elsa-managed-delete-cleanup-receipt-local-v1`. `proofKind` is
+`local-no-owned-resources` for `deletion.local.absent`, and
+`provider-confirmed-absent` for `deletion.provider-confirmed-absent` and for
+terminal verified provider cleanup.
 
 A coordinator requiring fresh provider absence still needs an independently
 authorized exact-resource observation. It also needs its exact Stripe cleanup
@@ -102,7 +116,7 @@ name is accepted from the caller.
 
 Provider-backed observations independently validate the terminal provider Delete,
 lifecycle key, retained assignment and current execution authority, then issue
-one exact owned resource-group existence query. Local-absent observations issue
+one exact owned resource-group existence query. Local-absent and confirmed-absent-without-provider-Delete observations issue
 one fresh existence query for the deterministic current-version resource group
 named from the configured prefix and instance id in the configured workload
 subscription. Neither path logs in, retries deletion, runs cleanup or changes
