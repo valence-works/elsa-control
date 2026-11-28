@@ -47,7 +47,7 @@ public sealed class AzureEngineProgramPolicyTests
     public void Digit_leading_fingerprint_gets_a_letter_prefixed_revision_suffix()
     {
         var suffix = ElsaControl.Provisioning.Core.ProvisioningRevisionSuffix.FromFingerprint(new string('1', 64));
-        Assert.Equal("r" + new string('1', 23), suffix);
+        Assert.Equal("r" + new string('1', 19), suffix);
         ElsaControl.Provisioning.Core.ProvisioningRevisionSuffix.Validate(suffix);
         ElsaControl.Provisioning.Core.ProvisioningRevisionSuffix.Validate("release-a");
         Assert.Throws<InvalidOperationException>(() =>
