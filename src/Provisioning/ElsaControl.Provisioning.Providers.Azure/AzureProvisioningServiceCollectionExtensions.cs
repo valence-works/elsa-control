@@ -37,7 +37,12 @@ public static class AzureProvisioningServiceCollectionExtensions
         }
 
         services.AddSingleton<IPulumiAutomationClient, LocalPulumiAutomationClient>();
-        services.AddSingleton<IResourceGroupAbsenceProbe, AzureArmResourceGroupAbsenceProbe>();
+        // Post-Destroy absence reads must use the provisioner identity: the host's default
+        // credential is the API identity, which cannot read the workloads subscription.
+        services.AddSingleton<IResourceGroupAbsenceProbe>(provider =>
+            new AzureArmResourceGroupAbsenceProbe(
+                credentialLocator,
+                provider.GetService<Microsoft.Extensions.Logging.ILogger<AzureArmResourceGroupAbsenceProbe>>()));
         services.AddSingleton<AzureInfrastructureProvider>(provider =>
             new AzureInfrastructureProvider(
                 provider.GetRequiredService<AzurePulumiAutomationRunner>(),

@@ -705,7 +705,18 @@ builder.Services.AddProvisioning(
 builder.Services.Configure<AzurePulumiDispatchOptions>(
     builder.Configuration.GetSection(AzurePulumiDispatchOptions.ConfigurationSection));
 builder.Services.AddSingleton<IElsaInstanceProvisioningBackendSelector, AzurePulumiProvisioningBackendSelector>();
-builder.Services.AddSingleton<IAzurePulumiProvisioningDispatcher, AzurePulumiProvisioningDispatcher>();
+// The Pulumi engine program needs the same Control-owned handoff inputs as the Bicep runner;
+// without them a release that declares the managed handoff fails before any Azure call.
+var pulumiManagedHandoff = AzureProviderRunnerComposition.ManagedHandoffOptions(builder.Configuration);
+builder.Services.AddSingleton<IAzurePulumiProvisioningDispatcher>(services =>
+    new AzurePulumiProvisioningDispatcher(
+        services.GetRequiredService<IProvisioningService>(),
+        services.GetRequiredService<IOptions<AzurePulumiDispatchOptions>>(),
+        services.GetRequiredService<IOptions<ProvisioningOptions>>(),
+        services.GetService<IInfrastructureProvider>(),
+        services.GetService<ILogger<AzurePulumiProvisioningDispatcher>>(),
+        services.GetService<TimeProvider>(),
+        pulumiManagedHandoff));
 builder.Services.AddScoped<IElsaInstanceProvisioningBackendStore>(services =>
     services.GetRequiredService<EfCoreElsaInstanceLifecycleStore>());
 var provisioningWorkerEnabled = builder.Configuration.GetValue("Provisioning:WorkerEnabled", false);

@@ -196,20 +196,101 @@ public sealed class AzurePulumiProvisioningDispatcherTests
         Assert.False(dispatcher.HasDispatched(operation.Id));
     }
 
+    [Fact]
+    public async Task Managed_handoff_release_carries_control_handoff_inputs_into_the_engine_stack()
+    {
+        var provisioning = new RecordingProvisioningService();
+        var dispatcher = Dispatcher(provisioning, CompleteOptions(), handoff: Handoff());
+        var result = await dispatcher.DispatchAsync(Operation(), HandoffPlan());
+
+        Assert.True(result.Dispatched);
+        var config = Assert.Single(provisioning.Requests).StackConfig;
+        Assert.Equal("true", config["managedHandoff"]);
+        Assert.Equal("true", config["handoffConfigured"]);
+        Assert.Equal("https://control.example", config["handoffControlBaseUrl"]);
+        Assert.Equal("https://control.example/console/continue", config["handoffControlContinuationUrl"]);
+        Assert.Equal(
+            string.Join(',', ManagedElsaRuntimePermissions.SelectedFor(true, "3.10", "3.10.3")),
+            config["handoffAllowedRuntimePermissions"]);
+    }
+
+    [Fact]
+    public async Task Managed_handoff_release_without_control_inputs_fails_closed_before_enqueue()
+    {
+        var provisioning = new RecordingProvisioningService();
+        var dispatcher = Dispatcher(provisioning, CompleteOptions());
+        var result = await dispatcher.DispatchAsync(Operation(), HandoffPlan());
+
+        Assert.False(result.Dispatched);
+        Assert.Empty(provisioning.Requests);
+    }
+
+    [Fact]
+    public async Task Delete_of_a_handoff_release_still_dispatches_without_handoff_inputs()
+    {
+        var provisioning = new RecordingProvisioningService();
+        var dispatcher = Dispatcher(provisioning, CompleteOptions());
+        var operation = Operation() with { Action = AzureProviderOperationAction.Delete };
+        var result = await dispatcher.DispatchAsync(operation, HandoffPlan());
+
+        Assert.True(result.Dispatched);
+        Assert.Equal(ProvisioningCommand.Destroy, Assert.Single(provisioning.Requests).Command);
+    }
+
+    [Fact]
+    public async Task Long_delete_retry_lineage_maps_to_a_bounded_stable_provisioning_key()
+    {
+        var root = "elsa-instance-operation:" + Guid.NewGuid().ToString("D") + ":delete";
+        var key = root;
+        for (var i = 0; i < 6; i++)
+            key += ":retry:" + Guid.NewGuid().ToString("N");
+        Assert.True(key.Length > AzurePulumiProvisioningDispatcher.MaximumProvisioningIdempotencyKeyLength);
+
+        var provisioning = new RecordingProvisioningService();
+        var dispatcher = Dispatcher(provisioning, CompleteOptions());
+        var operation = Operation() with { Action = AzureProviderOperationAction.Delete, IdempotencyKey = key };
+        Assert.True((await dispatcher.DispatchAsync(operation, Plan())).Dispatched);
+
+        var mapped = Assert.Single(provisioning.Requests).IdempotencyKey;
+        Assert.True(mapped.Length <= AzurePulumiProvisioningDispatcher.MaximumProvisioningIdempotencyKeyLength);
+        Assert.StartsWith("azure-provider-operation:sha256:", mapped, StringComparison.Ordinal);
+        Assert.Equal(mapped, AzurePulumiProvisioningDispatcher.ProvisioningIdempotencyKey(key));
+        Assert.Equal(root, AzurePulumiProvisioningDispatcher.ProvisioningIdempotencyKey(root));
+    }
+
+    private static AzureManagedHandoffOptions Handoff() =>
+        new(
+            "https://control.example",
+            "https://control.example/console/continue",
+            TimeSpan.FromHours(1),
+            ["diagnostics.read"]);
+
+    private static AzureWorkloadPlan HandoffPlan() =>
+        Plan() with
+        {
+            ElsaVersion = "3.10.3",
+            ReleaseLine = "3.10",
+            Capacity = new AzureWorkloadCapacity(1, 1, 500, 1024),
+            ManagedHandoff = true,
+            ManagedHandoffStudioGrants = true
+        };
+
     private static AzurePulumiProvisioningDispatcher Dispatcher(
         IProvisioningService provisioning,
         AzurePulumiDispatchOptions options,
         bool workerEnabled = true,
         string providerId = "azure",
         Microsoft.Extensions.Logging.ILogger<AzurePulumiProvisioningDispatcher>? logger = null,
-        TimeProvider? timeProvider = null) =>
+        TimeProvider? timeProvider = null,
+        AzureManagedHandoffOptions? handoff = null) =>
         new(
             provisioning,
             Options.Create(options),
             Options.Create(new ProvisioningOptions { WorkerEnabled = workerEnabled }),
             new StubInfrastructureProvider(providerId),
             logger,
-            timeProvider);
+            timeProvider,
+            handoff);
 
     private static AzurePulumiDispatchOptions CompleteOptions() => new()
     {
