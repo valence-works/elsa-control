@@ -39,13 +39,10 @@ public sealed class ElsaEngineStack : Stack
         var instanceId = values["instanceId"];
         var parsed = Guid.Parse(instanceId);
         var location = values["location"];
-        var platformStack = values["platformStack"];
         var resourceGroupName = values.GetValueOrDefault("resourceGroupName")
                                 ?? ProvisioningEngineResourceGroup.ForInstance(parsed);
         var tags = DefaultTags(values);
-        var platform = new StackReference(platformStack);
-        var registryId = platform.RequireOutput(PulumiStackOutputs.RegistryId).Apply(static value => value.ToString() ?? "");
-        var registryLoginServer = platform.RequireOutput(PulumiStackOutputs.RegistryLoginServer).Apply(static value => value.ToString() ?? "");
+        var (registryId, registryLoginServer) = ResolveRegistry(values);
         var bootstrapObjectId = values["sqlBootstrapObjectId"];
         var bootstrapLogin = values["sqlBootstrapLogin"];
 
@@ -449,6 +446,7 @@ public sealed class ElsaEngineStack : Stack
         {
             "instanceId", "location", "isolation", "topology", "imageRepository", "imageDigest",
             "planFingerprint", "platformStack", "engineName", "organizationSlug", "engineSlug",
+            "registryLoginServer", "registryId",
             "resourceGroupName", "cpu", "memory", "minReplicas", "maxReplicas", "revisionSuffix",
             "managedHandoff", "handoffConfigured", "handoffControlBaseUrl", "handoffControlContinuationUrl",
             "handoffAudience", "handoffRuntimeMaximumLifetime", "handoffAllowedRuntimePermissions",
@@ -470,6 +468,31 @@ public sealed class ElsaEngineStack : Stack
 
         return values;
     }
+
+    /// <summary>
+    /// Config-supplied registry locators win so Create works on a fresh
+    /// environment that has never applied <c>elsa-platform</c>. Both the
+    /// login server and resource id must be set together. Otherwise the
+    /// engine stack reads them from the environment's platform stack.
+    /// </summary>
+    private static (Output<string> RegistryId, Output<string> RegistryLoginServer) ResolveRegistry(
+        IReadOnlyDictionary<string, string> values)
+    {
+        var login = Get(values, "registryLoginServer");
+        var registryId = Get(values, "registryId");
+        if (login is not null && registryId is not null)
+            return (Output.Create(registryId), Output.Create(login));
+        if (login is not null || registryId is not null)
+            throw new InvalidOperationException("Registry login server and resource id must both be set.");
+
+        var platform = new StackReference(values["platformStack"]);
+        return (
+            platform.RequireOutput(PulumiStackOutputs.RegistryId).Apply(static value => value.ToString() ?? ""),
+            platform.RequireOutput(PulumiStackOutputs.RegistryLoginServer).Apply(static value => value.ToString() ?? ""));
+    }
+
+    private static string? Get(IReadOnlyDictionary<string, string> values, string key) =>
+        values.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value) ? value.Trim() : null;
 
     private static InputMap<string> DefaultTags(IReadOnlyDictionary<string, string> values)
     {

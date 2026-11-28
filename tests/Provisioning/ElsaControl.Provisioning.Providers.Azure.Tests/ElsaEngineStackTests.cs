@@ -88,6 +88,29 @@ public sealed class ElsaEngineStackTests
     }
 
     [Fact]
+    public async Task Engine_stack_uses_configured_registry_when_the_platform_stack_is_absent()
+    {
+        var values = EngineTestConfig.Values();
+        values["registryLoginServer"] = "valenceruntimeimages.azurecr.io";
+        values["registryId"] =
+            "/subscriptions/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/resourceGroups/rg-valence-runtime/providers/Microsoft.ContainerRegistry/registries/valenceruntimeimages";
+        using var config = PulumiTestConfig.Set(PulumiProjectNames.Engine, values);
+        var resources = await PulumiDeployment.TestAsync<ElsaEngineStack>(
+            new RecordingMocks([]),
+            new TestOptions
+            {
+                IsPreview = false,
+                ProjectName = PulumiProjectNames.Engine,
+                StackName = "engine-" + EngineTestConfig.InstanceId.ToString("N")
+            });
+
+        Assert.DoesNotContain(resources, resource => resource is StackReference);
+        Assert.Contains(resources, resource => resource is RoleAssignment);
+        Assert.Contains(resources, resource => resource is ContainerApp);
+        AzureEngineProgramPolicy.Validate(values);
+    }
+
+    [Fact]
     public async Task Engine_endpoint_is_the_stable_ingress_fqdn_the_verifier_accepts()
     {
         using var config = PulumiTestConfig.Set(PulumiProjectNames.Engine, EngineTestConfig.Values());

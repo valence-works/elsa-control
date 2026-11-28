@@ -43,9 +43,17 @@ public sealed class FakeInfrastructureProvider : IInfrastructureProvider, ICrede
     /// </summary>
     public bool FailWithoutEvents { get; set; }
 
+    /// <summary>
+    /// When false, Cancel reports that the backend has no lock (or no
+    /// stack) and succeeds, even if <see cref="CancelFails"/> is true.
+    /// </summary>
+    public bool BackendHasLock { get; set; } = true;
+
     public TaskCompletionSource Started { get; } = new();
 
     public int CancelCalls { get; private set; }
+
+    public ProvisioningRequest? LastCancelRequest { get; private set; }
 
     public IReadOnlySet<string> Capabilities { get; } = new HashSet<string>(StringComparer.Ordinal)
     {
@@ -109,6 +117,21 @@ public sealed class FakeInfrastructureProvider : IInfrastructureProvider, ICrede
         lock (_gate)
         {
             CancelCalls++;
+            LastCancelRequest = request;
+            if (!BackendHasLock)
+            {
+                var released = Event(
+                    operation.Id,
+                    ProvisioningEventKind.OperationCancelled,
+                    ResourceKind(request),
+                    "Nothing to cancel.",
+                    now);
+                return Task.FromResult(new ProviderRunResult(
+                    true,
+                    [released],
+                    failureCode: ProvisioningFailureCodes.NothingToCancel));
+            }
+
             if (CancelFails)
             {
                 var failed = Event(

@@ -16,7 +16,8 @@ public sealed class AzureProvisioningCompositionTests
             {
                 ["Provisioning:WorkerEnabled"] = "true",
                 ["Provisioning:AllowFakeProvider"] = "false",
-                ["Provisioning:SeedVaultUri"] = "https://kv.example.vault.azure.net/"
+                ["Provisioning:SeedVaultUri"] = "https://kv.example.vault.azure.net/",
+                ["Provisioning:CredentialLocator"] = "d57a6279-2806-4289-9442-d862b53451a1"
             })
             .Build();
         services.AddProvisioning(configuration, runWorker: true, allowFakeProvider: false);

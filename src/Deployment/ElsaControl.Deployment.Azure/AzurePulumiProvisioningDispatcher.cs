@@ -122,8 +122,11 @@ public sealed class AzurePulumiProvisioningDispatcher(
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             _logger.LogError(
-                "Pulumi dispatch failed. ExceptionType={ExceptionType}",
-                exception.GetType().FullName);
+                exception,
+                "Pulumi dispatch failed. ExceptionType={ExceptionType} ExceptionMessage={ExceptionMessage} PulumiStderr={PulumiStderr}",
+                exception.GetType().FullName,
+                ProvisioningExceptionLog.Message(exception),
+                ProvisioningExceptionLog.StderrTail(exception));
             if (request is null)
                 return new AzurePulumiDispatchResult(false);
             try
@@ -133,8 +136,11 @@ public sealed class AzurePulumiProvisioningDispatcher(
             catch (Exception retry) when (retry is not OperationCanceledException)
             {
                 _logger.LogError(
-                    "Pulumi dispatch retry failed after commit. ExceptionType={ExceptionType}",
-                    retry.GetType().FullName);
+                    retry,
+                    "Pulumi dispatch retry failed after commit. ExceptionType={ExceptionType} ExceptionMessage={ExceptionMessage} PulumiStderr={PulumiStderr}",
+                    retry.GetType().FullName,
+                    ProvisioningExceptionLog.Message(retry),
+                    ProvisioningExceptionLog.StderrTail(retry));
                 return new AzurePulumiDispatchResult(false);
             }
         }

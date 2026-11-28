@@ -55,6 +55,18 @@ public sealed class AzureEngineProgramPolicyTests
     }
 
     [Fact]
+    public void Registry_login_server_and_id_must_both_be_set()
+    {
+        var values = EngineTestConfig.Values();
+        values["registryLoginServer"] = "valenceruntimeimages.azurecr.io";
+        var error = Assert.Throws<InvalidOperationException>(() => AzureEngineProgramPolicy.Validate(values));
+        Assert.Equal("Registry login server and resource id must both be set.", error.Message);
+        values["registryId"] =
+            "/subscriptions/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/resourceGroups/rg-valence-runtime/providers/Microsoft.ContainerRegistry/registries/valenceruntimeimages";
+        AzureEngineProgramPolicy.Validate(values);
+    }
+
+    [Fact]
     public void Missing_sql_bootstrap_identity_fails_closed()
     {
         var values = EngineTestConfig.Values();

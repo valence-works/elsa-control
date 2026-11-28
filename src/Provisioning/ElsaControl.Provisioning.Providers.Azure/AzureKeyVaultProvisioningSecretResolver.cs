@@ -1,3 +1,4 @@
+using Azure.Core;
 using Azure.Identity;
 using Azure.Security.KeyVault.Secrets;
 using ElsaControl.Provisioning.Core;
@@ -5,7 +6,7 @@ using ElsaControl.Provisioning.Core;
 namespace ElsaControl.Provisioning.Providers.Azure;
 
 /// <summary>
-/// Resolves allowlisted secret locators from Key Vault using the runtime
+/// Resolves allowlisted secret locators from Key Vault using the provisioner
 /// identity. Engine seeds are generated per stack and are never loaded from
 /// the shared vault. Fail closed if a locator cannot be fetched or if a
 /// shared seed key is present.
@@ -15,16 +16,27 @@ public sealed class AzureKeyVaultProvisioningSecretResolver : IProvisioningSecre
     private readonly Uri? _vaultUri;
     private readonly Func<SecretClient> _client;
 
-    public AzureKeyVaultProvisioningSecretResolver(string? vaultUri)
-        : this(vaultUri, () => new SecretClient(new Uri(vaultUri!), new DefaultAzureCredential()))
+    public AzureKeyVaultProvisioningSecretResolver(string? vaultUri, string? credentialLocator)
+        : this(vaultUri, CreateClientFactory(vaultUri, credentialLocator), CreateCredential(vaultUri, credentialLocator))
     {
     }
 
     internal AzureKeyVaultProvisioningSecretResolver(string? vaultUri, Func<SecretClient> client)
+        : this(vaultUri, client, credential: null)
+    {
+    }
+
+    internal AzureKeyVaultProvisioningSecretResolver(
+        string? vaultUri,
+        Func<SecretClient> client,
+        TokenCredential? credential)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
+        Credential = credential;
         _vaultUri = TryParseVault(vaultUri);
     }
+
+    internal TokenCredential? Credential { get; }
 
     public bool IsReady => _vaultUri is not null;
 
@@ -71,6 +83,18 @@ public sealed class AzureKeyVaultProvisioningSecretResolver : IProvisioningSecre
 
         return resolved;
     }
+
+    internal static TokenCredential CreateCredential(string? vaultUri, string? credentialLocator)
+    {
+        if (string.IsNullOrWhiteSpace(vaultUri))
+            throw new InvalidOperationException("Provisioning seed vault is not configured.");
+        if (string.IsNullOrWhiteSpace(credentialLocator))
+            throw new InvalidOperationException("Provisioning credential locator is required.");
+        return new ManagedIdentityCredential(ManagedIdentityId.FromUserAssignedClientId(credentialLocator.Trim()));
+    }
+
+    private static Func<SecretClient> CreateClientFactory(string? vaultUri, string? credentialLocator) =>
+        () => new SecretClient(new Uri(vaultUri!), CreateCredential(vaultUri, credentialLocator));
 
     private static Uri? TryParseVault(string? vaultUri)
     {

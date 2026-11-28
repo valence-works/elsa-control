@@ -504,6 +504,55 @@ public sealed class ProvisioningServiceTests
     }
 
     [Fact]
+    public async Task Reconcile_rebuilds_provider_settings_and_clears_a_stale_lock_when_the_backend_has_none()
+    {
+        var store = new InMemoryProvisioningStore();
+        var provider = new FakeInfrastructureProvider { CancelFails = true, BackendHasLock = false };
+        var options = new ProvisioningOptions
+        {
+            SecretsProviderLocator = "ecseedkvtud53zotij43k/pulumi-secrets",
+            CredentialLocator = "d57a6279-2806-4289-9442-d862b53451a1",
+            StateBackendLocator = "stpulumitud53zotij43k/pulumi-state"
+        };
+        var worker = new ProvisioningOperationWorker(store, store, provider, options: options);
+        var stale = new ProvisioningTarget(
+            FakeInfrastructureProvider.Id,
+            ProvisioningStackKind.Platform,
+            "stale-lock",
+            new CredentialReference(CredentialReference.InMemoryKind, "old-client"),
+            new StateBackendReference(StateBackendReference.InMemoryKind, "memory://stale"),
+            new SecretsProviderReference(
+                SecretsProviderReference.InMemoryKind,
+                "azurekeyvault://azurekeyvault:.vault.azure.net/keys/stale"));
+        var request = ProvisioningFixtures.Request(
+            ProvisioningCommand.Provision,
+            stale,
+            ProvisioningFixtures.PlatformSpec("stale-lock"),
+            "stale-lock");
+        var enqueued = await store.CreateOrGetAsync(
+            request,
+            ProvisioningRequestHash.Compute(request),
+            DateTimeOffset.UtcNow);
+        var claimed = await store.ClaimAsync(enqueued.OperationId, DateTimeOffset.UtcNow);
+        var completed = await store.CompleteAsync(
+            claimed!.Id,
+            ProvisioningOperationState.Failed,
+            DateTimeOffset.UtcNow,
+            ProvisioningFailureCodes.ProviderFailed,
+            stateLockMayBeHeld: true,
+            fencingToken: claimed.FencingToken);
+        Assert.True(completed!.StateLockMayBeHeld);
+
+        await worker.ReconcileInterruptedAsync();
+        Assert.Equal(1, provider.CancelCalls);
+        Assert.Equal("ecseedkvtud53zotij43k/pulumi-secrets", provider.LastCancelRequest!.Target.SecretsProvider.Locator);
+        Assert.Equal("d57a6279-2806-4289-9442-d862b53451a1", provider.LastCancelRequest.Target.Credentials.Locator);
+        Assert.Equal("stpulumitud53zotij43k/pulumi-state", provider.LastCancelRequest.Target.StateBackend.Locator);
+        var cleared = await store.GetAsync(claimed.Id);
+        Assert.False(cleared!.StateLockMayBeHeld);
+    }
+
+    [Fact]
     public async Task Cancel_of_a_queued_create_does_not_run_the_provider()
     {
         var store = new InMemoryProvisioningStore();

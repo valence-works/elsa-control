@@ -37,6 +37,20 @@ Staging (`rg-valence-control-staging`) therefore uses:
 | `Provisioning__StateBackendLocator` | `stpulumitud53zotij43k/pulumi-state` |
 | `Provisioning__SecretsProviderLocator` | `azurekeyvault://ecseedkvtud53zotij43k.vault.azure.net/keys/pulumi-secrets` |
 | `Provisioning__SeedVaultUri` | `https://ecseedkvtud53zotij43k.vault.azure.net/` |
+| `Provisioning__RegistryLoginServer` | `valenceruntimeimages.azurecr.io` |
+| `Provisioning__RegistryId` | `/subscriptions/{RegistrySubscriptionId}/resourceGroups/{RegistryResourceGroupName}/providers/Microsoft.ContainerRegistry/registries/{RegistryName}` |
+
+`Provisioning__SecretsProviderLocator` is the full Pulumi Key Vault URL. The
+worker accepts that form and the short `{vault}/{key}` form and normalizes both
+to the same `azurekeyvault://{vault}.vault.azure.net/keys/{key}` URL.
+
+The engine stack reads the commercial registry from these two settings when they
+are both set, so the first Create works on a fresh environment that has never
+applied the `elsa-platform` stack. Config wins over a `StackReference`. The
+resource id is overlayed at run time from host settings and is not stored in the
+provisioning request snapshot (stack config must not carry ARM identifiers).
+The platform stack remains the shared-registry program for environments that
+apply it; staging does not need that extra resource group for the first engine.
 
 Those staging-only values live in the worker-settings overlay, not in
 production parameter files. The overlay is applied only when

@@ -120,6 +120,12 @@ class CompositionFilesTests(unittest.TestCase):
         self.assertEqual(
             "https://ecseedkvtud53zotij43k.vault.azure.net/",
             renderer.PULUMI_WORKER_SETTINGS["Provisioning__SeedVaultUri"])
+        self.assertEqual(
+            "valenceruntimeimages.azurecr.io",
+            renderer.PULUMI_WORKER_SETTINGS["Provisioning__RegistryLoginServer"])
+        self.assertEqual(
+            "/subscriptions/${RegistrySubscriptionId}/resourceGroups/${RegistryResourceGroupName}/providers/Microsoft.ContainerRegistry/registries/${RegistryName}",
+            renderer.PULUMI_WORKER_SETTINGS["Provisioning__RegistryId"])
 
     def test_pulumi_overlay_applies_only_when_the_staging_flag_is_on(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -401,6 +407,10 @@ class RenderTests(unittest.TestCase):
             "azurekeyvault://ecseedkvtud53zotij43k.vault.azure.net/keys/pulumi-secrets",
             settings["Provisioning__SecretsProviderLocator"])
         self.assertEqual("https://ecseedkvtud53zotij43k.vault.azure.net/", settings["Provisioning__SeedVaultUri"])
+        self.assertEqual("valenceruntimeimages.azurecr.io", settings["Provisioning__RegistryLoginServer"])
+        self.assertEqual(
+            "/subscriptions/8e23037a-420f-4ad0-9594-9d194de29e84/resourceGroups/rg-valence-runtime/providers/Microsoft.ContainerRegistry/registries/valenceruntimeimages",
+            settings["Provisioning__RegistryId"])
         self.assertNotRegex(settings["Provisioning__StateBackendLocator"], r"(?i)key|sas|sig=")
         self.assertNotRegex(settings["Provisioning__SecretsProviderLocator"], r"(?i)sas|sig=")
 

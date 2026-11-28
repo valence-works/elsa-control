@@ -62,6 +62,10 @@ public static class AzureEngineProgramPolicy
             throw new InvalidOperationException("Plan fingerprint is invalid.");
 
         Require(config, "platformStack", out _);
+        var registryLogin = Get(config, "registryLoginServer");
+        var registryId = Get(config, "registryId");
+        if (registryLogin is not null ^ registryId is not null)
+            throw new InvalidOperationException("Registry login server and resource id must both be set.");
         Require(config, "sqlBootstrapObjectId", out var bootstrapObjectId);
         if (!Guid.TryParse(bootstrapObjectId, out var bootstrap) || bootstrap == Guid.Empty)
             throw new InvalidOperationException("SQL bootstrap identity is invalid.");

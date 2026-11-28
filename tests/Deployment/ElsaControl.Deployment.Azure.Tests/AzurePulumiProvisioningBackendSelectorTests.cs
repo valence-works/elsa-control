@@ -66,7 +66,9 @@ public sealed class AzurePulumiProvisioningBackendSelectorTests
         CredentialLocator = "workload-identity",
         SqlBootstrapObjectId = Guid.NewGuid().ToString("D"),
         SqlBootstrapLogin = "sql-bootstrap",
-        SeedVaultUri = "https://kv.example.vault.azure.net/"
+        SeedVaultUri = "https://kv.example.vault.azure.net/",
+        RegistryLoginServer = "valenceruntimeimages.azurecr.io",
+        RegistryId = "/subscriptions/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/resourceGroups/rg-valence-runtime/providers/Microsoft.ContainerRegistry/registries/valenceruntimeimages"
     };
 
     private sealed class StubProvider(string providerId) : IInfrastructureProvider

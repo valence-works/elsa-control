@@ -13,11 +13,13 @@ public sealed class AzureInfrastructureProvider(
     IPulumiAutomationClient automation,
     IResourceGroupAbsenceProbe? absence = null,
     IProvisioningSecretResolver? secrets = null,
-    TimeProvider? timeProvider = null) : IInfrastructureProvider
+    TimeProvider? timeProvider = null,
+    ProvisioningOptions? options = null) : IInfrastructureProvider
 {
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
     private readonly IResourceGroupAbsenceProbe _absence = absence ?? new UnknownResourceGroupAbsenceProbe();
     private readonly IProvisioningSecretResolver _secrets = secrets ?? new EmptyProvisioningSecretResolver();
+    private readonly ProvisioningOptions _options = options ?? new ProvisioningOptions();
 
     public string ProviderId => AzurePulumiAutomationRunner.ProviderId;
 
@@ -175,9 +177,12 @@ public sealed class AzureInfrastructureProvider(
 
         var environment = await credentials.ResolveEnvironmentAsync(request.Target.Credentials, cancellationToken)
             .ConfigureAwait(false);
-        var secretConfig = await _secrets.ResolveSecretConfigAsync(request.StackConfig, cancellationToken)
+        var stackConfig = request.Target.StackKind == ProvisioningStackKind.Engine
+            ? ProvisioningRequestRefresh.OverlayRegistry(request.StackConfig, _options)
+            : request.StackConfig;
+        var secretConfig = await _secrets.ResolveSecretConfigAsync(stackConfig, cancellationToken)
             .ConfigureAwait(false);
-        var workspace = runner.CreateWorkspace(request.Target, request.StackConfig, environment, secretConfig);
+        var workspace = runner.CreateWorkspace(request.Target, stackConfig, environment, secretConfig);
         var program = runner.CreateProgram(request.Target.StackKind);
         return (null, workspace, program);
     }

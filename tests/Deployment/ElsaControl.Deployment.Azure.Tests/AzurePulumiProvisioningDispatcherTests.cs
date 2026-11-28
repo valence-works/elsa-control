@@ -21,6 +21,14 @@ public sealed class AzurePulumiProvisioningDispatcherTests
         Assert.False(options.IsComplete);
         options.SeedVaultUri = "https://kv.example.vault.azure.net/";
         Assert.True(options.IsComplete);
+
+        options.RegistryLoginServer = null;
+        Assert.False(options.IsComplete);
+        options.RegistryLoginServer = "valenceruntimeimages.azurecr.io";
+        options.RegistryId = null;
+        Assert.False(options.IsComplete);
+        options.RegistryId = "/subscriptions/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/resourceGroups/rg-valence-runtime/providers/Microsoft.ContainerRegistry/registries/valenceruntimeimages";
+        Assert.True(options.IsComplete);
     }
 
     [Fact]
@@ -158,8 +166,10 @@ public sealed class AzurePulumiProvisioningDispatcherTests
         var result = await dispatcher.DispatchAsync(Operation(), Plan());
         Assert.True(result.Dispatched);
         Assert.Equal(2, provisioning.Attempts);
-        Assert.Contains(logger.Messages, message => message.Contains("InvalidOperationException", StringComparison.Ordinal));
-        Assert.DoesNotContain(logger.Messages, message => message.Contains("enqueue failed", StringComparison.Ordinal));
+        Assert.Contains(
+            logger.Messages,
+            message => message.Contains("InvalidOperationException", StringComparison.Ordinal)
+                       && message.Contains("enqueue failed", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -209,7 +219,9 @@ public sealed class AzurePulumiProvisioningDispatcherTests
         CredentialLocator = "workload-identity",
         SqlBootstrapObjectId = Guid.NewGuid().ToString("D"),
         SqlBootstrapLogin = "sql-bootstrap",
-        SeedVaultUri = "https://kv.example.vault.azure.net/"
+        SeedVaultUri = "https://kv.example.vault.azure.net/",
+        RegistryLoginServer = "valenceruntimeimages.azurecr.io",
+        RegistryId = "/subscriptions/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/resourceGroups/rg-valence-runtime/providers/Microsoft.ContainerRegistry/registries/valenceruntimeimages"
     };
 
     private static AzureProviderOperation Operation() =>

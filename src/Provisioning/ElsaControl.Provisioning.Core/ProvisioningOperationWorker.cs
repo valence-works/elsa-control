@@ -19,11 +19,13 @@ public sealed class ProvisioningOperationWorker(
     TimeProvider? timeProvider = null,
     ILogger<ProvisioningOperationWorker>? logger = null,
     TimeSpan? heartbeat = null,
-    IProvisioningLiveEventSink? liveEvents = null)
+    IProvisioningLiveEventSink? liveEvents = null,
+    ProvisioningOptions? options = null)
 {
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
     private readonly ProvisioningRunRegistry _runs = runs ?? new ProvisioningRunRegistry();
     private readonly ILogger<ProvisioningOperationWorker> _logger = logger ?? NullLogger<ProvisioningOperationWorker>.Instance;
+    private readonly ProvisioningOptions _options = options ?? new ProvisioningOptions();
     private readonly TimeSpan _heartbeat = heartbeat is { } value && value > TimeSpan.Zero
         ? value
         : TimeSpan.FromSeconds(ProvisioningReplicaIdentity.DefaultHeartbeatSeconds);
@@ -62,7 +64,8 @@ public sealed class ProvisioningOperationWorker(
             }
 
             processed++;
-            var request = await operations.GetRequestAsync(claimed.Id, cancellationToken).ConfigureAwait(false);
+            var request = Refresh(
+                await operations.GetRequestAsync(claimed.Id, cancellationToken).ConfigureAwait(false));
             if (request is null)
             {
                 await FailAsync(
@@ -169,9 +172,12 @@ public sealed class ProvisioningOperationWorker(
             catch (Exception exception)
             {
                 _logger.LogError(
-                    "Provisioning provider failed. OperationId={OperationId} ExceptionType={ExceptionType}",
+                    exception,
+                    "Provisioning provider failed. OperationId={OperationId} ExceptionType={ExceptionType} ExceptionMessage={ExceptionMessage} PulumiStderr={PulumiStderr}",
                     claimed.Id,
-                    exception.GetType().FullName);
+                    exception.GetType().FullName,
+                    ProvisioningExceptionLog.Message(exception),
+                    ProvisioningExceptionLog.StderrTail(exception));
                 var pulumiReleased = await TryCancelProviderAsync(claimed, request).ConfigureAwait(false);
                 await FailAsync(
                         claimed,
@@ -201,8 +207,9 @@ public sealed class ProvisioningOperationWorker(
             if (_stateLockRetryAfter.TryGetValue(operation.Id, out var retryAfter) && retryAfter > now)
                 continue;
 
-            var request = await operations.GetRequestAsync(operation.Id, CancellationToken.None)
-                .ConfigureAwait(false);
+            var request = Refresh(
+                await operations.GetRequestAsync(operation.Id, CancellationToken.None)
+                    .ConfigureAwait(false));
             var pulumiReleased = request is not null
                 && await TryCancelProviderAsync(operation, request).ConfigureAwait(false);
             if (!pulumiReleased)
@@ -354,12 +361,18 @@ public sealed class ProvisioningOperationWorker(
         catch (Exception exception)
         {
             _logger.LogError(
-                "Provisioning state-lock release failed. OperationId={OperationId} ExceptionType={ExceptionType}",
+                exception,
+                "Provisioning state-lock release failed. OperationId={OperationId} ExceptionType={ExceptionType} ExceptionMessage={ExceptionMessage} PulumiStderr={PulumiStderr}",
                 operation.Id,
-                exception.GetType().FullName);
+                exception.GetType().FullName,
+                ProvisioningExceptionLog.Message(exception),
+                ProvisioningExceptionLog.StderrTail(exception));
             return false;
         }
     }
+
+    private ProvisioningRequest? Refresh(ProvisioningRequest? request) =>
+        request is null ? null : ProvisioningRequestRefresh.Apply(request, _options);
 
     private static ProvisioningEvent TerminalEvent(
         ProvisioningOperation operation,

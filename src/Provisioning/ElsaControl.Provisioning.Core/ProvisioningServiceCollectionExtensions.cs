@@ -75,15 +75,19 @@ public static class ProvisioningServiceCollectionExtensions
                 provider.GetRequiredService<IProvisioningEventStore>(),
                 provider.GetRequiredService<ProvisioningRunRegistry>()));
         services.AddSingleton<ProvisioningOperationWorker>(provider =>
-            new ProvisioningOperationWorker(
+        {
+            var configured = provider.GetRequiredService<IOptions<ProvisioningOptions>>().Value;
+            return new ProvisioningOperationWorker(
                 provider.GetRequiredService<IProvisioningOperationStore>(),
                 provider.GetRequiredService<IProvisioningEventStore>(),
                 provider.GetRequiredService<IInfrastructureProvider>(),
                 provider.GetRequiredService<ProvisioningRunRegistry>(),
                 provider.GetRequiredService<TimeProvider>(),
                 provider.GetService<ILogger<ProvisioningOperationWorker>>(),
-                provider.GetRequiredService<IOptions<ProvisioningOptions>>().Value.HeartbeatInterval,
-                provider.GetRequiredService<IProvisioningLiveEventSink>()));
+                configured.HeartbeatInterval,
+                provider.GetRequiredService<IProvisioningLiveEventSink>(),
+                configured);
+        });
         services.AddSingleton<ProvisioningProviderGuard>();
 
         if (runWorker && configured.WorkerEnabled)

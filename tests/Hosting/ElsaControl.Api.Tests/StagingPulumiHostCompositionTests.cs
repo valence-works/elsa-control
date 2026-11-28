@@ -11,6 +11,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Options;
 
 namespace ElsaControl.Api.Tests;
 
@@ -42,6 +43,28 @@ public sealed class StagingPulumiHostCompositionTests : IDisposable
         Assert.Contains(hosted, service => service is ProvisioningProviderGuard);
         Assert.Contains(hosted, service => service is AzureProvisioningSecretGuard);
         Assert.Contains(hosted, service => service is AzureProviderOperationHostedService);
+
+        var dispatch = services.GetRequiredService<IOptions<AzurePulumiDispatchOptions>>().Value;
+        Assert.True(dispatch.IsComplete);
+        var secrets = AzureKeyVaultSecretsProvider.From(
+            new SecretsProviderReference(
+                SecretsProviderReference.AzureKeyVaultKind,
+                dispatch.SecretsProviderLocator!));
+        Assert.Equal("ecseedkvtud53zotij43k", secrets.VaultName);
+        Assert.Equal("pulumi-secrets", secrets.KeyName);
+        Assert.Equal(dispatch.SecretsProviderLocator, secrets.SecretsProviderUrl);
+
+        var resolver = Assert.IsType<AzureKeyVaultProvisioningSecretResolver>(
+            services.GetRequiredService<IProvisioningSecretResolver>());
+        Assert.True(resolver.IsReady);
+        Assert.Equal("valenceruntimeimages.azurecr.io", dispatch.RegistryLoginServer);
+        Assert.Contains("/registries/valenceruntimeimages", dispatch.RegistryId, StringComparison.Ordinal);
+
+        var overlayed = ProvisioningRequestRefresh.OverlayRegistry(
+            new Dictionary<string, string>(StringComparer.Ordinal),
+            services.GetRequiredService<IOptions<ProvisioningOptions>>().Value);
+        Assert.Equal(dispatch.RegistryLoginServer, overlayed["registryLoginServer"]);
+        Assert.Equal(dispatch.RegistryId, overlayed["registryId"]);
     }
 
     private Dictionary<string, string?> HostValues()
@@ -127,7 +150,9 @@ public sealed class StagingPulumiHostCompositionTests : IDisposable
             ["Provisioning:SqlBootstrapLogin"] = Parameter("ProvisionerIdentityName"),
             ["Provisioning:StateBackendLocator"] = "stpulumitud53zotij43k/pulumi-state",
             ["Provisioning:SecretsProviderLocator"] = "azurekeyvault://ecseedkvtud53zotij43k.vault.azure.net/keys/pulumi-secrets",
-            ["Provisioning:SeedVaultUri"] = "https://ecseedkvtud53zotij43k.vault.azure.net/"
+            ["Provisioning:SeedVaultUri"] = "https://ecseedkvtud53zotij43k.vault.azure.net/",
+            ["Provisioning:RegistryLoginServer"] = "valenceruntimeimages.azurecr.io",
+            ["Provisioning:RegistryId"] = $"/subscriptions/{Parameter("RegistrySubscriptionId")}/resourceGroups/{Parameter("RegistryResourceGroupName")}/providers/Microsoft.ContainerRegistry/registries/{Parameter("RegistryName")}"
         };
     }
 
