@@ -48,6 +48,8 @@ public static class PulumiStepLedgerMapper
     public const string OperationSucceededMessage = "Azure workload reconciliation completed.";
     public const string CleanupSucceededMessage = "Exact owned-resource cleanup was verified.";
     public const string ResourceFailedMessage = "The provider step failed.";
+    /// <summary>Message the Pulumi engine event mapper gives a non-terminal engine error observation.</summary>
+    public const string EngineResourceFailedMessage = "Resource failed.";
     public const string UpdateCancelledMessage = "The provider update was cancelled.";
 
     public static bool TryReadCorrelation(
@@ -105,6 +107,18 @@ public static class PulumiStepLedgerMapper
                 ManagedElsaReasonCodeCatalog.AzureDeploymentCanceled,
                 UpdateCancelledMessage,
                 Finalize: true);
+        }
+
+        // A Pulumi engine diagnostic or resource-operation error is an observation, not the end of the
+        // run: Pulumi may keep deleting or retrying other resources, and a Container Apps environment
+        // delete can run for 15+ minutes after such a diagnostic. Only the terminal OperationFailed /
+        // OperationCancelled event (or the provider-level "Provider failed." result) finalizes the
+        // provider operation; finalizing early let the lifecycle retry a Delete against a stack whose
+        // Destroy was still running.
+        if (value.Kind == ProvisioningEventKind.ResourceFailed
+            && string.Equals(value.Message, EngineResourceFailedMessage, StringComparison.Ordinal))
+        {
+            return null;
         }
 
         if (value.Kind is ProvisioningEventKind.ResourceFailed or ProvisioningEventKind.OperationFailed)
