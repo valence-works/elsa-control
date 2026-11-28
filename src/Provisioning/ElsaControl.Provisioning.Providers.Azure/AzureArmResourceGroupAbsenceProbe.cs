@@ -3,13 +3,16 @@ using System.Net.Http.Headers;
 using System.Text.Json;
 using Azure.Core;
 using Azure.Identity;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ElsaControl.Provisioning.Providers.Azure;
 
 /// <summary>
-/// Fresh ARM read after Destroy. Tests inject a handler; production uses
-/// workload identity and the process subscription environment. Absent only
-/// on ResourceGroupNotFound in that subscription.
+/// Fresh ARM read after Destroy. Tests inject a handler; production uses the
+/// provisioner managed identity (the same identity Pulumi deploys with) and the
+/// process subscription environment. Absent only on ResourceGroupNotFound in
+/// that subscription. Anything else is Unknown and logged with its ARM status.
 /// </summary>
 public sealed class AzureArmResourceGroupAbsenceProbe : IResourceGroupAbsenceProbe, IDisposable
 {
@@ -19,29 +22,36 @@ public sealed class AzureArmResourceGroupAbsenceProbe : IResourceGroupAbsencePro
     private readonly bool _ownsHttp;
     private readonly Func<string?> _subscription;
     private readonly Func<CancellationToken, Task<string>> _token;
+    private readonly ILogger _logger;
 
     public AzureArmResourceGroupAbsenceProbe()
+        : this(credentialLocator: null)
+    {
+    }
+
+    /// <summary>
+    /// Production probe. <paramref name="credentialLocator"/> is the provisioner
+    /// user-assigned identity client id. A bare DefaultAzureCredential resolves to
+    /// the host's AZURE_CLIENT_ID (the API identity), which has no read on the
+    /// workloads subscription, so every post-Destroy read would be Unknown.
+    /// </summary>
+    public AzureArmResourceGroupAbsenceProbe(string? credentialLocator, ILogger? logger = null)
         : this(
             new HttpClient(),
             ownsHttp: true,
             () => Environment.GetEnvironmentVariable("ARM_SUBSCRIPTION_ID")
                   ?? Environment.GetEnvironmentVariable("AZURE_SUBSCRIPTION_ID"),
-            static async cancellationToken =>
-            {
-                var credential = new DefaultAzureCredential();
-                var token = await credential
-                    .GetTokenAsync(new TokenRequestContext([ArmScope]), cancellationToken)
-                    .ConfigureAwait(false);
-                return token.Token;
-            })
+            CreateTokenSource(CreateCredential(credentialLocator)),
+            logger)
     {
     }
 
     public AzureArmResourceGroupAbsenceProbe(
         HttpMessageHandler handler,
         Func<string?> subscription,
-        Func<CancellationToken, Task<string>> token)
-        : this(new HttpClient(handler), ownsHttp: true, subscription, token)
+        Func<CancellationToken, Task<string>> token,
+        ILogger? logger = null)
+        : this(new HttpClient(handler), ownsHttp: true, subscription, token, logger)
     {
     }
 
@@ -49,13 +59,29 @@ public sealed class AzureArmResourceGroupAbsenceProbe : IResourceGroupAbsencePro
         HttpClient http,
         bool ownsHttp,
         Func<string?> subscription,
-        Func<CancellationToken, Task<string>> token)
+        Func<CancellationToken, Task<string>> token,
+        ILogger? logger)
     {
         _http = http;
         _ownsHttp = ownsHttp;
         _subscription = subscription;
         _token = token;
+        _logger = logger ?? NullLogger.Instance;
     }
+
+    internal static TokenCredential CreateCredential(string? credentialLocator) =>
+        string.IsNullOrWhiteSpace(credentialLocator)
+            ? new DefaultAzureCredential()
+            : new ManagedIdentityCredential(ManagedIdentityId.FromUserAssignedClientId(credentialLocator.Trim()));
+
+    private static Func<CancellationToken, Task<string>> CreateTokenSource(TokenCredential credential) =>
+        async cancellationToken =>
+        {
+            var token = await credential
+                .GetTokenAsync(new TokenRequestContext([ArmScope]), cancellationToken)
+                .ConfigureAwait(false);
+            return token.Token;
+        };
 
     public async Task<ResourceGroupPresence> ObserveAsync(
         string resourceGroupName,
@@ -69,7 +95,13 @@ public sealed class AzureArmResourceGroupAbsenceProbe : IResourceGroupAbsencePro
 
         var subscription = string.IsNullOrWhiteSpace(subscriptionId) ? _subscription() : subscriptionId;
         if (string.IsNullOrWhiteSpace(subscription) || !Guid.TryParse(subscription, out _))
+        {
+            _logger.LogWarning(
+                "Resource group presence unknown. ResourceGroup={ResourceGroup} Reason={Reason}",
+                resourceGroupName,
+                "subscription-missing");
             return ResourceGroupPresence.Unknown;
+        }
 
         try
         {
@@ -78,18 +110,39 @@ public sealed class AzureArmResourceGroupAbsenceProbe : IResourceGroupAbsencePro
                 $"https://management.azure.com/subscriptions/{subscription}/resourcegroups/{resourceGroupName}?api-version={ArmApiVersion}");
             var token = await _token(cancellationToken).ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(token))
+            {
+                _logger.LogWarning(
+                    "Resource group presence unknown. ResourceGroup={ResourceGroup} Reason={Reason}",
+                    resourceGroupName,
+                    "token-empty");
                 return ResourceGroupPresence.Unknown;
+            }
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
             using var response = await _http.SendAsync(request, cancellationToken).ConfigureAwait(false);
             var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-            return MapResponse(response.StatusCode, body);
+            var presence = MapResponse(response.StatusCode, body);
+            if (presence == ResourceGroupPresence.Unknown)
+            {
+                _logger.LogWarning(
+                    "Resource group presence unknown. ResourceGroup={ResourceGroup} Reason={Reason} StatusCode={StatusCode} ArmErrorCode={ArmErrorCode}",
+                    resourceGroupName,
+                    "arm-response",
+                    (int)response.StatusCode,
+                    ReadErrorCode(body) ?? "(none)");
+            }
+            return presence;
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            _logger.LogWarning(
+                "Resource group presence unknown. ResourceGroup={ResourceGroup} Reason={Reason} ExceptionType={ExceptionType}",
+                resourceGroupName,
+                "probe-exception",
+                exception.GetType().FullName);
             return ResourceGroupPresence.Unknown;
         }
     }
@@ -114,25 +167,32 @@ public sealed class AzureArmResourceGroupAbsenceProbe : IResourceGroupAbsencePro
             _http.Dispose();
     }
 
-    private static bool HasResourceGroupNotFound(string? body)
+    private static bool HasResourceGroupNotFound(string? body) =>
+        string.Equals(ReadErrorCode(body), "ResourceGroupNotFound", StringComparison.Ordinal);
+
+    /// <summary>ARM error code only (bounded, value-free); never the message.</summary>
+    internal static string? ReadErrorCode(string? body)
     {
         if (string.IsNullOrWhiteSpace(body))
-            return false;
+            return null;
         try
         {
             using var document = JsonDocument.Parse(body);
-            if (!document.RootElement.TryGetProperty("error", out var error)
+            if (document.RootElement.ValueKind != JsonValueKind.Object
+                || !document.RootElement.TryGetProperty("error", out var error)
+                || error.ValueKind != JsonValueKind.Object
                 || !error.TryGetProperty("code", out var code)
                 || code.ValueKind != JsonValueKind.String)
             {
-                return false;
+                return null;
             }
 
-            return string.Equals(code.GetString(), "ResourceGroupNotFound", StringComparison.Ordinal);
+            var value = code.GetString();
+            return value is { Length: > 0 and <= 128 } && value.All(char.IsAsciiLetterOrDigit) ? value : null;
         }
         catch (JsonException)
         {
-            return false;
+            return null;
         }
     }
 

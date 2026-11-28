@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.Provisioning.Abstractions;
 using ElsaControl.Provisioning.Core;
@@ -44,9 +45,13 @@ public sealed class AzurePulumiProvisioningDispatcher(
     IOptions<ProvisioningOptions> provisioningOptions,
     IInfrastructureProvider? provider = null,
     ILogger<AzurePulumiProvisioningDispatcher>? logger = null,
-    TimeProvider? timeProvider = null) : IAzurePulumiProvisioningDispatcher
+    TimeProvider? timeProvider = null,
+    AzureManagedHandoffOptions? managedHandoff = null) : IAzurePulumiProvisioningDispatcher
 {
     internal static readonly TimeSpan DispatchSkipTtl = TimeSpan.FromMinutes(2);
+
+    /// <summary>Column bound of <c>provisioning.Operations.IdempotencyKey</c>.</summary>
+    internal const int MaximumProvisioningIdempotencyKeyLength = 256;
 
     private readonly ILogger<AzurePulumiProvisioningDispatcher> _logger =
         logger ?? NullLogger<AzurePulumiProvisioningDispatcher>.Instance;
@@ -90,11 +95,33 @@ public sealed class AzurePulumiProvisioningDispatcher(
         try
         {
             var configured = options.Value;
+            // Same handoff inputs as the Bicep runner: Control's own origin and session ceiling,
+            // with the runtime permissions selected for this plan's release line.
+            var handoff = plan.ManagedHandoff && managedHandoff is not null
+                ? managedHandoff with
+                {
+                    AllowedRuntimePermissions = ManagedElsaRuntimePermissions.SelectedFor(
+                        plan.ManagedHandoffStudioGrants,
+                        plan.ReleaseLine,
+                        plan.ElsaVersion)
+                }
+                : null;
+            if (plan.ManagedHandoff && handoff is null && operation.Action != AzureProviderOperationAction.Delete)
+            {
+                _logger.LogError(
+                    "Pulumi dispatch refused. OperationId={OperationId} Reason={Reason}",
+                    operation.Id,
+                    "The release declares the managed handoff but Control's handoff inputs (ControlPlane:Origin) are not configured.");
+                return new AzurePulumiDispatchResult(false);
+            }
+
             var config = new Dictionary<string, string>(
                 AzureWorkloadPlanProvisioningMapper.StackConfig(
                     plan,
                     instanceId,
-                    AzureWorkloadPlanProvisioningMapper.PlatformStackReference(configured.EnvironmentName!.Trim())),
+                    AzureWorkloadPlanProvisioningMapper.PlatformStackReference(configured.EnvironmentName!.Trim()),
+                    handoffConfigured: handoff is not null,
+                    handoff: handoff),
                 StringComparer.Ordinal)
             {
                 [PulumiStepLedgerMapper.ControlWorkspaceIdKey] = operation.WorkspaceId.ToString("D"),
@@ -115,7 +142,7 @@ public sealed class AzurePulumiProvisioningDispatcher(
                     new StateBackendReference(StateBackendReference.AzureBlobKind, configured.StateBackendLocator!.Trim()),
                     new SecretsProviderReference(SecretsProviderReference.AzureKeyVaultKind, configured.SecretsProviderLocator!.Trim()),
                     configured.EnvironmentName.Trim()),
-                operation.IdempotencyKey,
+                ProvisioningIdempotencyKey(operation.IdempotencyKey),
                 config);
             return await EnqueueAsync(operation, request, cancellationToken).ConfigureAwait(false);
         }
@@ -176,6 +203,22 @@ public sealed class AzurePulumiProvisioningDispatcher(
         }
 
         return new AzurePulumiDispatchResult(false);
+    }
+
+    /// <summary>
+    /// Provider keys may grow to 512 characters through the bounded Delete retry lineage, but the
+    /// provisioning ledger column holds 256. Keys that fit are used verbatim so existing
+    /// provisioning rows still replay; longer keys map to a stable digest of the full key.
+    /// </summary>
+    internal static string ProvisioningIdempotencyKey(string providerIdempotencyKey)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(providerIdempotencyKey);
+        if (providerIdempotencyKey.Length <= MaximumProvisioningIdempotencyKeyLength)
+            return providerIdempotencyKey;
+        var digest = Convert.ToHexString(
+                System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(providerIdempotencyKey)))
+            .ToLowerInvariant();
+        return $"azure-provider-operation:sha256:{digest}";
     }
 
     private void Prune(DateTimeOffset now)
