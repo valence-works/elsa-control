@@ -93,10 +93,12 @@ internal static class ManagedElsaCleanupEvidenceReader
             !IsHistoricalDeleteTombstone(instance, operation, operationId))
             return null;
 
-        var hasAzureProvenance =
-            await assignments.HasAnyForInstanceAsync(workspaceId, instanceId, cancellationToken) ||
+        var hasAssignment =
+            await assignments.HasAnyForInstanceAsync(workspaceId, instanceId, cancellationToken);
+        var hasAzureProvenance = hasAssignment ||
             await providerOperations.HasAnyForInstanceAsync(workspaceId, instanceId, cancellationToken);
-        if (IsLocalNoOwnedResourcesTombstone(operation, hasAzureProvenance))
+        if (IsLocalNoOwnedResourcesTombstone(operation, hasAzureProvenance) ||
+            IsNeverProvisionedRecoveredTombstone(operation, hasAssignment))
         {
             return new(instance, operation, null, null,
                 ComputeLocalCleanupReceiptDigest(
@@ -197,6 +199,17 @@ internal static class ManagedElsaCleanupEvidenceReader
         string.Equals(
             operation.DeletionDiagnosticCode,
             ManagedElsaReasonCodeCatalog.DeletionLocalAbsent,
+            StringComparison.Ordinal);
+
+    // Admin-recovered never-provisioned Deletes finish with provider-confirmed-absent
+    // and no assignment. Any retained assignment stays on the provider-backed path.
+    private static bool IsNeverProvisionedRecoveredTombstone(
+        ElsaInstanceOperationSummary operation,
+        bool hasAssignment) =>
+        !hasAssignment &&
+        string.Equals(
+            operation.DeletionDiagnosticCode,
+            ManagedElsaReasonCodeCatalog.DeletionProviderConfirmedAbsent,
             StringComparison.Ordinal);
 
     private static bool IsHistoricalCleanupReceiptEligible(
