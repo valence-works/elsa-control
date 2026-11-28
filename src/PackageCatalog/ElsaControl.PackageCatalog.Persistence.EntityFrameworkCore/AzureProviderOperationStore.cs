@@ -791,9 +791,11 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
         if (workspaceId == Guid.Empty || organizationId == Guid.Empty || instanceId == Guid.Empty)
             throw new ArgumentException("The Azure assignment owner identity is invalid.");
 
+        // Same owner scope as HasAnyForInstanceAsync (workspace + instance). The
+        // organization argument identifies the caller; row org is checked on the
+        // provider-backed receipt path so a mismatched org cannot hide a leftover.
         var entities = await db.AzureProviderResourceAssignments.AsNoTracking()
             .Where(x => x.WorkspaceId == workspaceId &&
-                        x.OrganizationId == organizationId &&
                         x.InstanceId == instanceId)
             .OrderByDescending(x => x.UpdatedAt)
             .ThenByDescending(x => x.Id)
