@@ -278,6 +278,7 @@ public sealed class ElsaEngineStack : Stack
         var maxReplicas = int.Parse(values.GetValueOrDefault("maxReplicas") ?? "1");
         var revisionSuffix = values.GetValueOrDefault("revisionSuffix")
                              ?? ProvisioningRevisionSuffix.FromFingerprint(values["planFingerprint"]);
+        ProvisioningRevisionSuffix.RevisionName(AppName(parsed), revisionSuffix);
         var image = AzureEngineProgramPolicy.ImmutableImage(values);
         var handoffEnabled = string.Equals(
             values.GetValueOrDefault("managedHandoff"),
