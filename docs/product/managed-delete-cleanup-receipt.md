@@ -36,14 +36,19 @@ Provider-backed receipts additionally require:
 - Terminal successful provider cleanup with CleanupVerified, no attempted step
   or endpoint, and both persisted inventories reduced to the owned group name.
 
-Local-absent receipts (`proofKind` `local-no-owned-resources`) apply only when
-the Delete finalized locally (`deletion.local.absent`) and the instance has
-zero `AzureProviderResourceAssignments` and zero `AzureProviderOperations` for
-that workspace and instance. They attest that no provider Delete ran:
-`providerDeleteSucceeded` is false and `providerCompletedAt` is null.
-`providerAbsenceVerifiedAtCompletion` is true because that empty provenance
-was verified in the completion transaction. Any Azure provenance, or any other
-deletion diagnostic, stays on the provider-backed path.
+Local-absent receipts (`proofKind` `local-no-owned-resources`) apply when the
+instance has no retained provider assignment and the Delete finalized with
+either:
+
+- `deletion.local.absent` and zero `AzureProviderOperations` for that workspace
+  and instance, or
+- admin recovery (or equivalent) with `deletion.provider-confirmed-absent`.
+
+They attest that no provider Delete ran: `providerDeleteSucceeded` is false
+and `providerCompletedAt` is null. `providerAbsenceVerifiedAtCompletion` is
+true because that empty assignment provenance was verified in the completion
+transaction. Any retained assignment, or any other deletion diagnostic, stays
+on the provider-backed path.
 
 Missing, mismatched, unfinished or ambiguous evidence returns an opaque 404,
 without a partial receipt. Unsupported lightweight stores return no receipt.

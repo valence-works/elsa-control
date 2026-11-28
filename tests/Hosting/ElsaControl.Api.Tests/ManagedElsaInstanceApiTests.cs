@@ -2386,7 +2386,7 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     }
 
     [Fact]
-    public async Task CleanupReceipt_ReturnsLocalNoOwnedResourcesReceipt_ForNeverSubmittedSupersededCreate()
+    public async Task CleanupReceipt_ReturnsLocalNoOwnedResourcesReceipt_ForNeverProvisionedDelete()
     {
         var app = await PrepareApplicationAsync([]);
         const string slug = "local-absent-cleanup-receipt";
@@ -2426,6 +2426,81 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.Equal(ManagedElsaCleanupEvidenceReader.LocalNoOwnedResourcesProofKind, adminBody.ProofKind);
         Assert.False(adminBody.ProviderDeleteSucceeded);
         Assert.Null(adminBody.ProviderCompletedAt);
+    }
+
+    [Fact]
+    public async Task CleanupReceipt_ReturnsLocalNoOwnedResourcesReceipt_ForNeverProvisionedAdminRecoveredDelete()
+    {
+        var app = await PrepareApplicationAsync([]);
+        const string slug = "recovered-absent-cleanup-receipt";
+        var fixture = await SeedLocalAbsentCleanupTombstoneAsync(
+            app, slug, diagnosticCode: ManagedElsaReasonCodeCatalog.DeletionProviderConfirmedAbsent);
+        await app.AddWorkspaceMemberAsync(fixture.WorkspaceId, $"{slug}-reader", WorkspaceRole.Reader);
+        var reader = app.CreateTrustedWorkspaceClient($"{slug}-reader");
+        var path = $"/api/workspaces/{fixture.WorkspaceId:D}/instances/{fixture.InstanceId:D}" +
+                   $"/operations/{fixture.LifecycleOperationId:D}/cleanup-receipt";
+
+        using var response = await reader.GetAsync(path);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = (await response.Content.ReadControlJsonAsync<ManagedElsaCleanupReceiptResponse>())!;
+        Assert.True(body.InstanceTombstonePresent);
+        Assert.True(body.LifecycleDeleteSucceeded);
+        Assert.False(body.ProviderDeleteSucceeded);
+        Assert.True(body.ProviderAbsenceVerifiedAtCompletion);
+        Assert.Null(body.ProviderCompletedAt);
+        Assert.Equal(fixture.LifecycleCompletedAt, body.LifecycleCompletedAt);
+        Assert.Equal(body.LifecycleCompletedAt, body.TombstoneDeletedAt);
+        Assert.Equal(ManagedElsaCleanupEvidenceReader.LocalNoOwnedResourcesProofKind, body.ProofKind);
+        Assert.Equal(ManagedElsaReasonCodeCatalog.DeletionProviderConfirmedAbsent, fixture.DiagnosticCode);
+        Assert.Equal(ComputeLocalCleanupReceiptDigest(fixture), body.ReceiptDigest);
+        Assert.NotEqual(
+            ComputeLocalCleanupReceiptDigest(fixture with
+            {
+                DiagnosticCode = ManagedElsaReasonCodeCatalog.DeletionLocalAbsent
+            }),
+            body.ReceiptDigest);
+
+        using var admin = app.CreateClient();
+        admin.DefaultRequestHeaders.Add(ApiKeyAuthenticationDefaults.HeaderName, "local-dev-key");
+        using var adminResponse = await admin.GetAsync(
+            $"/api/admin/workspaces/{fixture.WorkspaceId:D}/instances/{fixture.InstanceId:D}" +
+            $"/operations/{fixture.LifecycleOperationId:D}/cleanup-receipt/{fixture.OrganizationId:D}");
+        Assert.Equal(HttpStatusCode.OK, adminResponse.StatusCode);
+        var adminBody = (await adminResponse.Content.ReadControlJsonAsync<ManagedElsaCleanupReceiptResponse>())!;
+        Assert.Equal(body.ReceiptDigest, adminBody.ReceiptDigest);
+        Assert.Equal(ManagedElsaCleanupEvidenceReader.LocalNoOwnedResourcesProofKind, adminBody.ProofKind);
+        Assert.False(adminBody.ProviderDeleteSucceeded);
+        Assert.Null(adminBody.ProviderCompletedAt);
+
+        var observer = _fixture.FreshCleanupObserver;
+        observer.State = AzureProviderFreshResourceGroupState.Absent;
+        using var observation = await reader.GetAsync(
+            $"/api/workspaces/{fixture.WorkspaceId:D}/instances/{fixture.InstanceId:D}" +
+            $"/operations/{fixture.LifecycleOperationId:D}/cleanup-observation");
+        Assert.Equal(HttpStatusCode.OK, observation.StatusCode);
+        var observationBody = (await observation.Content
+            .ReadControlJsonAsync<ManagedElsaFreshCleanupObservationResponse>())!;
+        Assert.Equal(AzureProviderFreshResourceGroupState.Absent, observationBody.State);
+        Assert.Equal(body.ReceiptDigest, observationBody.HistoricalReceiptDigest);
+        Assert.True(observer.ObservedDeterministicGroup);
+    }
+
+    [Fact]
+    public async Task CleanupReceipt_StaysNotFound_ForUnknownDiagnosticOnNeverProvisionedDelete()
+    {
+        var app = await PrepareApplicationAsync([]);
+        const string slug = "unknown-absent-cleanup-receipt";
+        var fixture = await SeedLocalAbsentCleanupTombstoneAsync(
+            app, slug, diagnosticCode: ManagedElsaReasonCodeCatalog.DeletionProviderUnknown);
+        await app.AddWorkspaceMemberAsync(fixture.WorkspaceId, $"{slug}-reader", WorkspaceRole.Reader);
+        var reader = app.CreateTrustedWorkspaceClient($"{slug}-reader");
+
+        using var response = await reader.GetAsync(
+            $"/api/workspaces/{fixture.WorkspaceId:D}/instances/{fixture.InstanceId:D}" +
+            $"/operations/{fixture.LifecycleOperationId:D}/cleanup-receipt");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
     [Fact]
@@ -2482,6 +2557,24 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
             .ReadControlJsonAsync<ManagedElsaFreshCleanupObservationResponse>())!;
         Assert.Equal(AzureProviderFreshResourceGroupState.Absent, adminBody.State);
         Assert.Equal(receipt.ReceiptDigest, adminBody.HistoricalReceiptDigest);
+    }
+
+    [Fact]
+    public async Task CleanupReceipt_StaysNotFound_ForNeverProvisionedRecoveredDeleteWithAzureAssignment()
+    {
+        var app = await PrepareApplicationAsync([]);
+        const string slug = "recovered-absent-with-azure-assignment";
+        var fixture = await SeedLocalAbsentCleanupTombstoneAsync(
+            app, slug, withAzureAssignment: true,
+            diagnosticCode: ManagedElsaReasonCodeCatalog.DeletionProviderConfirmedAbsent);
+        await app.AddWorkspaceMemberAsync(fixture.WorkspaceId, $"{slug}-reader", WorkspaceRole.Reader);
+        var reader = app.CreateTrustedWorkspaceClient($"{slug}-reader");
+
+        using var response = await reader.GetAsync(
+            $"/api/workspaces/{fixture.WorkspaceId:D}/instances/{fixture.InstanceId:D}" +
+            $"/operations/{fixture.LifecycleOperationId:D}/cleanup-receipt");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
     [Fact]
@@ -5749,7 +5842,8 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Guid OrganizationId,
         Guid InstanceId,
         Guid LifecycleOperationId,
-        DateTimeOffset LifecycleCompletedAt);
+        DateTimeOffset LifecycleCompletedAt,
+        string DiagnosticCode);
 
     private static string ComputeLocalCleanupReceiptDigest(LocalAbsentCleanupFixture fixture)
     {
@@ -5761,7 +5855,7 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
             fixture.InstanceId.ToString("D"),
             fixture.LifecycleOperationId.ToString("D"),
             fixture.LifecycleCompletedAt.UtcTicks.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            ManagedElsaReasonCodeCatalog.DeletionLocalAbsent
+            fixture.DiagnosticCode
         ]);
         return Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(
             System.Text.Encoding.UTF8.GetBytes(canonical)));
@@ -5770,7 +5864,8 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     private static async Task<LocalAbsentCleanupFixture> SeedLocalAbsentCleanupTombstoneAsync(
         ControlApiTestApplication app,
         string slug,
-        bool withAzureAssignment = false)
+        bool withAzureAssignment = false,
+        string? diagnosticCode = null)
     {
         var customer = app.CreateTrustedWorkspaceClient($"{slug}-owner");
         var workspaceId = await customer.GetDefaultWorkspaceIdAsync();
@@ -5813,6 +5908,7 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         var deletionBody = (await deletion.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteAcceptedResponse>())!;
 
         var lifecycleCompletedAt = DateTimeOffset.UtcNow;
+        var deletionDiagnostic = diagnosticCode ?? ManagedElsaReasonCodeCatalog.DeletionLocalAbsent;
         await using (var scope = app.Services.CreateAsyncScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
@@ -5837,7 +5933,7 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
                 SET State = {ElsaInstanceOperationState.Succeeded.ToString()},
                     CompletedAt = {lifecycleCompletedAt.UtcTicks},
                     FailureCode = NULL,
-                    DeletionDiagnosticCode = {ManagedElsaReasonCodeCatalog.DeletionLocalAbsent}
+                    DeletionDiagnosticCode = {deletionDiagnostic}
                 WHERE WorkspaceId = {workspaceId} AND InstanceId = {created.Instance.InstanceId}
                   AND Id = {deletionBody.OperationId}
                 """);
@@ -5862,7 +5958,8 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
             organizationId,
             created.Instance.InstanceId,
             deletionBody.OperationId,
-            lifecycleCompletedAt);
+            lifecycleCompletedAt,
+            deletionDiagnostic);
     }
 
     private static async Task ParkApplyReleaseForRecoverAsync(
