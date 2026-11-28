@@ -151,9 +151,11 @@ public interface IAzureProviderResourceAssignmentStore
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Reads the bounded historical assignments for one exact managed-instance owner.
-    /// Callers must fail closed when more than one row is returned. The default keeps
-    /// lightweight stores from accidentally claiming historical assignment authority.
+    /// Reads the bounded historical assignments for one workspace and instance.
+    /// Organization identifies the caller; implementations must not hide a leftover
+    /// row behind an assignment-org mismatch. Callers fail closed when more than
+    /// one row is returned. The default keeps lightweight stores from accidentally
+    /// claiming historical assignment authority.
     /// </summary>
     Task<IReadOnlyList<AzureProviderResourceAssignment>> ListForInstanceAsync(
         Guid workspaceId,

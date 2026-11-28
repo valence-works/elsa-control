@@ -22,9 +22,9 @@ A successful response requires:
   observed Deleted, with its last operation equal to the requested Delete.
 - The exact organization's successful lifecycle Delete and matching completion
   and tombstone timestamps.
-- Either the provider-backed path, the local-absent path, or the
-  confirmed-absent-without-provider-Delete path below. There is no fallback
-  from one to another.
+- Either the provider-backed path or the no-provider-Delete local path
+  below. A leftover `Deleted` assignment on a confirmed-absent tombstone
+  that is not terminal verified cleanup uses the local path.
 
 Provider-backed receipts additionally require:
 
@@ -42,29 +42,36 @@ instance has no retained provider assignment and the Delete finalized with
 `deletion.local.absent` and zero `AzureProviderOperations` for that workspace
 and instance.
 
-Confirmed-absent receipts without a provider Delete (`proofKind`
-`provider-confirmed-absent`, `providerDeleteSucceeded` false) apply when the
-instance has no retained provider assignment and the Delete finalized with
-`deletion.provider-confirmed-absent`. That includes:
+Deletes that completed without a provider Delete use `proofKind`
+`local-no-owned-resources` (`providerDeleteSucceeded` false,
+`providerCompletedAt` null). That is the shape the elsa-cloud staging harness
+already accepts for this case. It applies when the instance has no retained
+provider assignment and the Delete finalized with either:
 
-- never-provisioned Deletes (normal or admin-recovered) with no assignment, and
-- Deletes that left a placement assignment from a failed Create. Commit
-  marks those assignments `Released` in the same transaction. On read, a
-  leftover assignment whose instance is Deleted with the last Delete
-  Succeeded and `deletion.provider-confirmed-absent` is treated as released,
-  so existing tombstones receive a receipt without a manual SQL fix-up.
+- `deletion.local.absent` and zero `AzureProviderOperations`, or
+- `deletion.provider-confirmed-absent` (normal or admin-recovered), including
+  leftover placement from a failed Create.
 
-They attest that no provider Delete ran: `providerDeleteSucceeded` is false
-and `providerCompletedAt` is null. `providerAbsenceVerifiedAtCompletion` is
-true because that empty or released assignment provenance was verified in the
-completion transaction, or is equivalent on read. A verified `Deleted`
-assignment from terminal provider cleanup stays on the provider-backed path.
-Genuinely live assignments, or any other deletion diagnostic, stay
-fail-closed.
+Commit marks leftover live assignments `Released` in the same transaction.
+On read, a leftover live or `Deleted` assignment whose instance is Deleted
+with the last Delete Succeeded and `deletion.provider-confirmed-absent` is
+treated as released unless that `Deleted` row is terminal verified cleanup.
+Existing tombstones receive a receipt without a manual SQL fix-up.
+`HasAnyForInstance` and `ListForInstance` share workspace+instance scope so
+an assignment-org mismatch cannot hide a leftover row.
 
-Missing, mismatched, unfinished or ambiguous evidence returns an opaque 404,
-without a partial receipt. Unsupported lightweight stores return no receipt.
-Provider-scope configuration rotation does not rewrite historical evidence.
+A verified `Deleted` assignment from terminal provider cleanup stays on the
+provider-backed path (`proofKind` `provider-confirmed-absent`,
+`providerDeleteSucceeded` true). Genuinely live assignments, or any other
+deletion diagnostic, stay fail-closed.
+
+Workspace and owner routes return an opaque 404 without a partial receipt.
+Admin cleanup-receipt and observation 404s include a structured `reason`
+(`no-tombstone`, `deletedAt-mismatch`, `diagnostic-mismatch`,
+`hasany-list-mismatch`, `retained-assignment:<state>`,
+`retained-assignment:ambiguous`) and log that code at Information.
+Unsupported lightweight stores return no receipt. Provider-scope
+configuration rotation does not rewrite historical evidence.
 
 ## Receipt meaning
 
@@ -83,9 +90,8 @@ retained evidence; it is not a signature and does not authorize mutation or
 prove present absence by itself. Provider-backed receipts use canonical prefix
 `elsa-managed-delete-cleanup-receipt-v1`. Receipts without a provider Delete
 use `elsa-managed-delete-cleanup-receipt-local-v1`. `proofKind` is
-`local-no-owned-resources` for `deletion.local.absent`, and
-`provider-confirmed-absent` for `deletion.provider-confirmed-absent` and for
-terminal verified provider cleanup.
+`local-no-owned-resources` when no provider Delete ran, and
+`provider-confirmed-absent` for terminal verified provider cleanup.
 
 A coordinator requiring fresh provider absence still needs an independently
 authorized exact-resource observation. It also needs its exact Stripe cleanup

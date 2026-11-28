@@ -813,7 +813,7 @@ public static class ManagedElsaInstanceEndpoints
             IAzureProviderResourceAssignmentStore assignments,
             CancellationToken cancellationToken) =>
         {
-            var evidence = await ManagedElsaCleanupEvidenceReader.ReadHistoricalAsync(
+            var historical = await ManagedElsaCleanupEvidenceReader.ReadHistoricalAsync(
                 workspaceId,
                 context.GetWorkspaceAccess().OrganizationId,
                 instanceId,
@@ -823,10 +823,10 @@ public static class ManagedElsaInstanceEndpoints
                 providerOperations,
                 assignments,
                 cancellationToken);
-            if (evidence is null)
+            if (historical.Evidence is null)
                 return Results.NotFound();
 
-            return Results.Ok(ManagedElsaCleanupEvidenceReader.ToReceiptResponse(evidence));
+            return Results.Ok(ManagedElsaCleanupEvidenceReader.ToReceiptResponse(historical.Evidence));
         }).RequireWorkspaceAccess().AllowCloudBff().AllowHubBff();
 
         group.MapGet("/{instanceId:guid}/operations/{operationId:guid}/cleanup-observation", async (

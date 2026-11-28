@@ -3,6 +3,8 @@ using ElsaControl.Api.Workspace;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.Deployment.Azure;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace ElsaControl.Api.Admin.Workspaces;
 
@@ -255,15 +257,18 @@ public static class AdminManagedElsaRecoveryEndpoints
             IManagedElsaInstanceApiStore queries,
             IAzureProviderOperationStore providerOperations,
             IAzureProviderResourceAssignmentStore assignments,
+            ILoggerFactory loggerFactory,
             CancellationToken cancellationToken) =>
         {
-            var evidence = await ManagedElsaCleanupEvidenceReader.ReadHistoricalAsync(
+            var historical = await ManagedElsaCleanupEvidenceReader.ReadHistoricalAsync(
                 workspaceId, organizationId, instanceId, operationId,
                 lifecycle, queries, providerOperations, assignments, cancellationToken);
-            if (evidence is null)
-                return Results.NotFound();
+            if (historical.Evidence is null)
+                return AdminCleanupNotFound(
+                    loggerFactory, "receipt", workspaceId, instanceId, operationId,
+                    historical.NotFoundReason);
 
-            return Results.Ok(ManagedElsaCleanupEvidenceReader.ToReceiptResponse(evidence));
+            return Results.Ok(ManagedElsaCleanupEvidenceReader.ToReceiptResponse(historical.Evidence));
         });
 
         group.MapGet("/{operationId:guid}/cleanup-observation/{organizationId:guid}", async (
@@ -285,7 +290,9 @@ public static class AdminManagedElsaRecoveryEndpoints
                 lifecycle, queries, providerOperations, assignments,
                 services.GetService<IAzureProviderFreshResourceGroupObserver>(), cancellationToken);
             if (result.Failure == ManagedElsaCleanupEvidenceReader.FreshObservationFailure.NotFound)
-                return Results.NotFound();
+                return AdminCleanupNotFound(
+                    services.GetRequiredService<ILoggerFactory>(), "observation",
+                    workspaceId, instanceId, operationId, result.NotFoundReason);
             if (result.Failure == ManagedElsaCleanupEvidenceReader.FreshObservationFailure.EvidenceChanged)
                 return CleanupObservationUnavailable("instance.cleanup-observation.evidence-changed");
             if (result.Failure != ManagedElsaCleanupEvidenceReader.FreshObservationFailure.None)
@@ -377,6 +384,23 @@ public static class AdminManagedElsaRecoveryEndpoints
         return endpoints;
     }
 
+    private static IResult AdminCleanupNotFound(
+        ILoggerFactory loggerFactory,
+        string surface,
+        Guid workspaceId,
+        Guid instanceId,
+        Guid operationId,
+        string? reason)
+    {
+        var code = string.IsNullOrWhiteSpace(reason)
+            ? ManagedElsaCleanupEvidenceReader.NotFoundNoTombstone
+            : reason;
+        loggerFactory.CreateLogger("ElsaControl.Api.Admin.CleanupReceipt").LogInformation(
+            "Admin cleanup {Surface} not found for workspace {WorkspaceId} instance {InstanceId} operation {OperationId}: {Reason}",
+            surface, workspaceId, instanceId, operationId, code);
+        return Results.Json(new AdminManagedElsaCleanupNotFoundResponse(code), statusCode: StatusCodes.Status404NotFound);
+    }
+
     private static IResult CleanupObservationUnavailable(string code) =>
         ManagedElsaInstanceEndpoints.Problem(
             code,
@@ -389,6 +413,8 @@ public static class AdminManagedElsaRecoveryEndpoints
             "The provider operation cannot be correlated with the current managed instance.",
             StatusCodes.Status404NotFound);
 }
+
+public sealed record AdminManagedElsaCleanupNotFoundResponse(string Reason);
 
 public sealed record AdminManagedElsaRecoveryRequest(string? Reason = null);
 
