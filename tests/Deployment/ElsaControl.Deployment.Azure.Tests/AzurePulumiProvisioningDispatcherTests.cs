@@ -87,6 +87,82 @@ public sealed class AzurePulumiProvisioningDispatcherTests
         Assert.Equal(AzureWorkloadPlanProvisioningMapper.EngineStackName(operation.InstanceId!.Value), request.Target.StackName);
     }
 
+    [Fact]
+    public async Task A_stack_lock_held_by_a_running_destroy_defers_the_delete_instead_of_failing_it()
+    {
+        var provisioning = new LockAwareProvisioningService { LockHeld = true };
+        var dispatcher = Dispatcher(provisioning, CompleteOptions());
+        var operation = Operation() with { Action = AzureProviderOperationAction.Delete };
+
+        var deferred = await dispatcher.DispatchAsync(operation, Plan());
+
+        Assert.True(deferred.Dispatched);
+        Assert.Equal(ProvisioningOperationState.Queued, deferred.State);
+        Assert.Equal(ProvisioningFailureCodes.LockConflict, deferred.FailureCode);
+        Assert.Single(provisioning.Requests);
+
+        // The in-flight Destroy finishes; the next dispatch uses a fresh generation key rather than
+        // replaying the terminal LockConflict row, and no further conflict rows are created.
+        provisioning.LockHeld = false;
+        var resumed = await dispatcher.DispatchAsync(operation, Plan());
+
+        Assert.True(resumed.Dispatched);
+        Assert.Equal(ProvisioningOperationState.Queued, resumed.State);
+        Assert.Equal(2, provisioning.Requests.Count);
+        Assert.Equal(ProvisioningCommand.Destroy, provisioning.Requests[1].Command);
+        Assert.Contains(":lock-wait:1", provisioning.Requests[1].IdempotencyKey, StringComparison.Ordinal);
+        Assert.Equal(1, provisioning.ConflictRows);
+    }
+
+    [Fact]
+    public async Task A_restarted_process_fast_forwards_past_replayed_lock_conflicts()
+    {
+        var provisioning = new LockAwareProvisioningService { LockHeld = true };
+        var operation = Operation() with { Action = AzureProviderOperationAction.Delete };
+        await Dispatcher(provisioning, CompleteOptions()).DispatchAsync(operation, Plan());
+
+        provisioning.LockHeld = false;
+        var restarted = await Dispatcher(provisioning, CompleteOptions()).DispatchAsync(operation, Plan());
+
+        Assert.True(restarted.Dispatched);
+        Assert.Equal(ProvisioningOperationState.Queued, restarted.State);
+        Assert.Contains(":lock-wait:1", provisioning.Requests[^1].IdempotencyKey, StringComparison.Ordinal);
+        Assert.Equal(1, provisioning.ConflictRows);
+    }
+
+    [Fact]
+    public async Task A_lock_that_never_clears_is_reported_as_a_conflict_after_the_bounded_wait()
+    {
+        var provisioning = new LockAwareProvisioningService { LockHeld = true };
+        var dispatcher = Dispatcher(provisioning, CompleteOptions());
+        var operation = Operation() with { Action = AzureProviderOperationAction.Delete };
+
+        AzurePulumiDispatchResult last = new(false);
+        for (var i = 0; i <= AzurePulumiProvisioningDispatcher.MaximumLockWaitGenerations; i++)
+            last = await dispatcher.DispatchAsync(operation, Plan());
+
+        Assert.True(last.Dispatched);
+        Assert.Equal(ProvisioningOperationState.LockConflict, last.State);
+    }
+
+    [Fact]
+    public async Task Long_delete_retry_keys_get_a_bounded_lock_wait_key()
+    {
+        var provisioning = new LockAwareProvisioningService { LockHeld = true };
+        var dispatcher = Dispatcher(provisioning, CompleteOptions());
+        var operation = Operation() with
+        {
+            Action = AzureProviderOperationAction.Delete,
+            IdempotencyKey = new string('k', 500)
+        };
+
+        await dispatcher.DispatchAsync(operation, Plan());
+        provisioning.LockHeld = false;
+        await dispatcher.DispatchAsync(operation, Plan());
+
+        Assert.All(provisioning.Requests, request => Assert.True(request.IdempotencyKey.Length <= 256));
+    }
+
     [Theory]
     [InlineData(ElsaInstanceOperationAction.Reconcile)]
     [InlineData(ElsaInstanceOperationAction.UpdateIntent)]
@@ -419,6 +495,78 @@ public sealed class AzurePulumiProvisioningDispatcherTests
 
         private Task<ProvisioningEnqueueResult> Enqueue() =>
             Task.FromResult(new ProvisioningEnqueueResult(operationId, state, Replayed: true, LockConflict: false));
+    }
+
+    private sealed class LockAwareProvisioningService : IProvisioningService
+    {
+        private readonly Dictionary<string, ProvisioningOperation> _byKey = new(StringComparer.Ordinal);
+        private readonly Dictionary<Guid, ProvisioningOperation> _byId = [];
+
+        public bool LockHeld { get; set; }
+        public List<ProvisioningRequest> Requests { get; } = [];
+        public int ConflictRows { get; private set; }
+
+        public Task<ProvisioningEnqueueResult> PreviewAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            Enqueue(request);
+        public Task<ProvisioningEnqueueResult> ProvisionAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            Enqueue(request);
+        public Task<ProvisioningEnqueueResult> UpdateAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            Enqueue(request);
+        public Task<ProvisioningEnqueueResult> RefreshAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            Enqueue(request);
+        public Task<ProvisioningEnqueueResult> CancelAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            Enqueue(request);
+        public Task<ProvisioningEnqueueResult> DestroyAsync(ProvisioningRequest request, CancellationToken cancellationToken = default) =>
+            Enqueue(request);
+        public Task<ProvisioningOperation?> GetOperationAsync(Guid operationId, CancellationToken cancellationToken = default) =>
+            Task.FromResult(_byId.GetValueOrDefault(operationId));
+        public Task<IReadOnlyList<ProvisioningEvent>> ListEventsAsync(Guid operationId, CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<ProvisioningEvent>>([]);
+        public async IAsyncEnumerable<ProvisioningEvent> WatchAsync(
+            Guid operationId,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await Task.CompletedTask;
+            yield break;
+        }
+
+        private Task<ProvisioningEnqueueResult> Enqueue(ProvisioningRequest request)
+        {
+            Requests.Add(request);
+            if (_byKey.TryGetValue(request.IdempotencyKey, out var existing))
+            {
+                return Task.FromResult(new ProvisioningEnqueueResult(
+                    existing.Id,
+                    existing.State,
+                    Replayed: true,
+                    LockConflict: existing.State == ProvisioningOperationState.LockConflict,
+                    existing.FailureCode));
+            }
+
+            var conflict = LockHeld;
+            if (conflict)
+                ConflictRows++;
+            var operation = new ProvisioningOperation(
+                Guid.NewGuid(),
+                request.Command,
+                conflict ? ProvisioningOperationState.LockConflict : ProvisioningOperationState.Queued,
+                "azure",
+                ProvisioningStackKind.Engine,
+                request.Target.StackName,
+                request.IdempotencyKey,
+                new string('a', 64),
+                DateTimeOffset.UtcNow,
+                failureCode: conflict ? ProvisioningFailureCodes.LockConflict : null);
+            _byKey[request.IdempotencyKey] = operation;
+            _byId[operation.Id] = operation;
+            return Task.FromResult(new ProvisioningEnqueueResult(
+                operation.Id,
+                operation.State,
+                Replayed: false,
+                LockConflict: conflict,
+                operation.FailureCode));
+        }
     }
 
     private sealed class RecordingProvisioningService : IProvisioningService

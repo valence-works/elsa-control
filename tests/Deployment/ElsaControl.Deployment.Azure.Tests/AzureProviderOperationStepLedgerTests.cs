@@ -331,6 +331,26 @@ public sealed class AzureProviderOperationStepLedgerTests
     }
 
     [Fact]
+    public async Task An_engine_error_observation_leaves_the_operation_running()
+    {
+        var providerOperation = Operation();
+        var store = new LedgerStore(providerOperation);
+        var ledger = new AzureProviderOperationStepLedger(store);
+        var (operation, request) = Bound(providerOperation.WorkspaceId, providerOperation.Id);
+
+        await ledger.TryWriteAsync(
+            operation,
+            request,
+            [
+                Event(operation.Id, 1, ProvisioningEventKind.ResourceStarted, "resource-group"),
+                Event(operation.Id, 2, ProvisioningEventKind.ResourceFailed, ProvisioningCapability.ContainerRuntime)
+            ]);
+
+        Assert.NotEqual(AzureProviderOperationStatus.Failed, store.Operation.Status);
+        Assert.DoesNotContain(store.Transitions, item => item.Code == ManagedElsaReasonCodeCatalog.AzureDeploymentFailed);
+    }
+
+    [Fact]
     public async Task A_failure_finalizes_the_ledger_with_the_phase_zero_reason()
     {
         var providerOperation = Operation();
@@ -343,7 +363,7 @@ public sealed class AzureProviderOperationStepLedgerTests
             request,
             [
                 Event(operation.Id, 1, ProvisioningEventKind.ResourceStarted, "resource-group"),
-                Event(operation.Id, 2, ProvisioningEventKind.ResourceFailed, ProvisioningCapability.ContainerRuntime)
+                Event(operation.Id, 2, ProvisioningEventKind.OperationFailed, ProvisioningCapability.ContainerRuntime, "Operation failed.")
             ]);
 
         Assert.Equal(ProvisioningStepLedgerResult.Written, result);

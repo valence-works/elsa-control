@@ -69,11 +69,38 @@ public sealed class PulumiStepLedgerMapperTests
         AssertDoesNotLeak(progress, "/subscriptions/", "resourceGroups", "password", "pulumi");
     }
 
+    [Theory]
+    [InlineData(AzureProviderOperationPhase.WorkloadSubmitted)]
+    [InlineData(AzureProviderOperationPhase.CleanupVerified)]
+    public void An_engine_error_observation_does_not_finalize_the_provider_operation(AzureProviderOperationPhase phase)
+    {
+        // Pulumi can keep working (for example a Container Apps environment delete that takes 15+
+        // minutes) after an engine diagnostic; only the terminal event ends the operation.
+        var mapped = PulumiStepLedgerMapper.TryMap(
+            Event(
+                ProvisioningEventKind.ResourceFailed,
+                ProvisioningCapability.ContainerRuntime,
+                PulumiStepLedgerMapper.EngineResourceFailedMessage),
+            phase);
+        Assert.Null(mapped);
+    }
+
+    [Fact]
+    public void The_provider_failed_result_still_finalizes_the_provider_operation()
+    {
+        var mapped = PulumiStepLedgerMapper.TryMap(
+            Event(ProvisioningEventKind.ResourceFailed, ProvisioningCapability.ContainerRuntime, "Provider failed."),
+            AzureProviderOperationPhase.WorkloadSubmitted);
+        Assert.NotNull(mapped);
+        Assert.True(mapped.Finalize);
+        Assert.Equal(AzureProviderOperationStatus.Failed, mapped.Status);
+    }
+
     [Fact]
     public void A_mid_up_failure_blocks_the_matching_stage_with_the_phase_zero_reason()
     {
         var mapped = PulumiStepLedgerMapper.TryMap(
-            Event(ProvisioningEventKind.ResourceFailed, ProvisioningCapability.ContainerRuntime, "Resource failed."),
+            Event(ProvisioningEventKind.OperationFailed, ProvisioningCapability.ContainerRuntime, "Operation failed."),
             AzureProviderOperationPhase.WorkloadSubmitted);
         Assert.NotNull(mapped);
         Assert.True(mapped.Finalize);

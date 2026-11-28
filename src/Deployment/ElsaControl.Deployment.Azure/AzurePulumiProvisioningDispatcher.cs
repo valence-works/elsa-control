@@ -50,6 +50,12 @@ public sealed class AzurePulumiProvisioningDispatcher(
 {
     internal static readonly TimeSpan DispatchSkipTtl = TimeSpan.FromMinutes(2);
 
+    /// <summary>
+    /// Bounded number of lock-wait generations (about two hours at the dispatch skip interval)
+    /// before a still-conflicting dispatch is reported as a LockConflict failure again.
+    /// </summary>
+    internal const int MaximumLockWaitGenerations = 60;
+
     /// <summary>Column bound of <c>provisioning.Operations.IdempotencyKey</c>.</summary>
     internal const int MaximumProvisioningIdempotencyKeyLength = 256;
 
@@ -57,6 +63,7 @@ public sealed class AzurePulumiProvisioningDispatcher(
         logger ?? NullLogger<AzurePulumiProvisioningDispatcher>.Instance;
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
     private readonly ConcurrentDictionary<Guid, long> _dispatchedAt = new();
+    private readonly ConcurrentDictionary<Guid, int> _lockWaitGeneration = new();
 
     public bool CanDispatch =>
         provisioningOptions.Value.WorkerEnabled
@@ -178,31 +185,73 @@ public sealed class AzurePulumiProvisioningDispatcher(
         ProvisioningRequest request,
         CancellationToken cancellationToken)
     {
-        var result = operation.Action == AzureProviderOperationAction.Delete
-            ? await provisioning.DestroyAsync(request, cancellationToken).ConfigureAwait(false)
-            : await provisioning.ProvisionAsync(request, cancellationToken).ConfigureAwait(false);
-        var run = await provisioning.GetOperationAsync(result.OperationId, cancellationToken)
-            .ConfigureAwait(false);
-        var state = run?.State ?? result.State;
-        if (state is ProvisioningOperationState.Queued
-            or ProvisioningOperationState.Accepted
-            or ProvisioningOperationState.Running
-            or ProvisioningOperationState.Succeeded
-            or ProvisioningOperationState.Failed
-            or ProvisioningOperationState.Cancelled
-            or ProvisioningOperationState.LockConflict)
+        // A provisioning operation that lost the stack lock to a still-running run (for example a
+        // Destroy waiting on a 15-minute Container Apps environment delete) is recorded terminal as
+        // LockConflict and replays forever under the same idempotency key. Treating that as a
+        // provider failure made the lifecycle retry every minute until the Delete retry key chain
+        // overflowed. Instead the provider operation waits: the conflict is remembered, the provider
+        // operation is released to the queue, and the next dispatch uses a fresh generation key.
+        var generation = _lockWaitGeneration.GetValueOrDefault(operation.Id);
+        for (var replays = 0; ; replays++)
         {
-            var now = _timeProvider.GetUtcNow();
-            Prune(now);
-            _dispatchedAt[operation.Id] = now.UtcTicks;
-            return new AzurePulumiDispatchResult(
-                true,
-                result.OperationId,
-                state,
-                run?.FailureCode ?? result.Code);
-        }
+            var keyed = generation == 0
+                ? request
+                : new ProvisioningRequest(
+                    request.Command,
+                    request.Spec,
+                    request.Target,
+                    ProvisioningIdempotencyKey($"{operation.IdempotencyKey}:lock-wait:{generation}"),
+                    request.StackConfig);
+            var result = request.Command == ProvisioningCommand.Destroy
+                ? await provisioning.DestroyAsync(keyed, cancellationToken).ConfigureAwait(false)
+                : await provisioning.ProvisionAsync(keyed, cancellationToken).ConfigureAwait(false);
+            var run = await provisioning.GetOperationAsync(result.OperationId, cancellationToken)
+                .ConfigureAwait(false);
+            var state = run?.State ?? result.State;
+            if (state == ProvisioningOperationState.LockConflict && generation < MaximumLockWaitGenerations)
+            {
+                generation++;
+                if (result.Replayed && replays < MaximumLockWaitGenerations)
+                    continue;
+                _lockWaitGeneration[operation.Id] = generation;
+                _logger.LogInformation(
+                    "Pulumi dispatch deferred behind a running stack operation. OperationId={OperationId} Generation={Generation}",
+                    operation.Id,
+                    generation);
+                MarkDispatched(operation.Id);
+                return new AzurePulumiDispatchResult(
+                    true,
+                    result.OperationId,
+                    ProvisioningOperationState.Queued,
+                    run?.FailureCode ?? result.Code);
+            }
 
-        return new AzurePulumiDispatchResult(false);
+            _lockWaitGeneration.TryRemove(operation.Id, out _);
+            if (state is ProvisioningOperationState.Queued
+                or ProvisioningOperationState.Accepted
+                or ProvisioningOperationState.Running
+                or ProvisioningOperationState.Succeeded
+                or ProvisioningOperationState.Failed
+                or ProvisioningOperationState.Cancelled
+                or ProvisioningOperationState.LockConflict)
+            {
+                MarkDispatched(operation.Id);
+                return new AzurePulumiDispatchResult(
+                    true,
+                    result.OperationId,
+                    state,
+                    run?.FailureCode ?? result.Code);
+            }
+
+            return new AzurePulumiDispatchResult(false);
+        }
+    }
+
+    private void MarkDispatched(Guid operationId)
+    {
+        var now = _timeProvider.GetUtcNow();
+        Prune(now);
+        _dispatchedAt[operationId] = now.UtcTicks;
     }
 
     /// <summary>

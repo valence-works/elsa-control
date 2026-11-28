@@ -139,11 +139,27 @@ internal sealed class EngineSqlContainedUser : ComponentResource
             throw new InvalidOperationException("Engine database name is invalid.");
 
         using var connection = new SqlConnection(
-            $"Server={fullyQualifiedDomainName};Database={databaseName};Encrypt=True;TrustServerCertificate=False;Authentication=Active Directory Default;");
+            ConnectionString(fullyQualifiedDomainName, databaseName, Environment.GetEnvironmentVariable("ARM_CLIENT_ID")));
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = sql;
         command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// The inline Pulumi program runs inside the Control API process, so a bare
+    /// <c>Active Directory Default</c> credential resolves to the API identity, which is not the
+    /// SQL Entra admin of the engine server. The grant must authenticate as the provisioner
+    /// identity (the same identity Pulumi deploys with, published to the process as ARM_CLIENT_ID).
+    /// Without a valid provisioner client id the previous default credential is kept.
+    /// </summary>
+    internal static string ConnectionString(string fullyQualifiedDomainName, string databaseName, string? provisionerClientId)
+    {
+        var baseString =
+            $"Server={fullyQualifiedDomainName};Database={databaseName};Encrypt=True;TrustServerCertificate=False;";
+        return Guid.TryParse(provisionerClientId?.Trim(), out var id) && id != Guid.Empty
+            ? $"{baseString}Authentication=Active Directory Managed Identity;User Id={id:D};"
+            : $"{baseString}Authentication=Active Directory Default;";
     }
 
     private static bool IsPreview()
