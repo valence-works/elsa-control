@@ -1913,6 +1913,8 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 var priorState = instance.ObservedLifecycle;
                 ApplyAggregate(instance, commit.Instance);
                 await RetireCountingAssignmentsAsync(instance.Id, cancellationToken);
+                var releasedAssignments = await ReleaseAzureProviderAssignmentsForConfirmedAbsenceAsync(
+                    instance, commit, cancellationToken);
                 instance.UpdatedAt = commit.DeletedAt.ToUniversalTime();
                 operation.State = ElsaInstanceOperationState.Succeeded;
                 operation.CompletedAt = commit.DeletedAt.ToUniversalTime();
@@ -1936,9 +1938,12 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                     environment.DeploymentStatus = DeploymentStatus.Blocked;
                     environment.UpdatedAt = commit.DeletedAt.ToUniversalTime();
                 }
+                var deletionSummary = releasedAssignments > 0
+                    ? "Instance deletion was positively confirmed. Provider resource assignments were released."
+                    : "Instance deletion was positively confirmed.";
                 await dbContext.ElsaInstanceAuditEvents.AddAsync(await CreateAuditEventAsync(instance, operation, priorState,
                     commit.DeletedAt, cancellationToken, "lifecycle.deleted", commit.ExpectedRunId,
-                    diagnosticCode: commit.DiagnosticCode, summary: "Instance deletion was positively confirmed."), cancellationToken);
+                    diagnosticCode: commit.DiagnosticCode, summary: deletionSummary), cancellationToken);
                 await dbContext.SaveChangesAsync(cancellationToken);
                 return DeletionResult(operation, instance, false);
             }, cancellationToken);
@@ -4392,6 +4397,38 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         operation.LeaseTokenHash = null;
         operation.LeaseExpiresAt = null;
         operation.HeartbeatAt = null;
+    }
+
+    private async Task<int> ReleaseAzureProviderAssignmentsForConfirmedAbsenceAsync(
+        ElsaInstanceEntity instance,
+        ElsaInstanceDeletionCommit commit,
+        CancellationToken cancellationToken)
+    {
+        if (!string.Equals(
+                commit.DiagnosticCode,
+                ManagedElsaReasonCodeCatalog.DeletionProviderConfirmedAbsent,
+                StringComparison.Ordinal))
+            return 0;
+
+        var assignments = await dbContext.AzureProviderResourceAssignments
+            .Where(x => x.WorkspaceId == instance.WorkspaceId &&
+                        x.InstanceId == instance.Id &&
+                        x.State != AzureProviderAssignmentState.Deleted &&
+                        x.State != AzureProviderAssignmentState.Released)
+            .ToListAsync(cancellationToken);
+        if (assignments.Count == 0)
+            return 0;
+
+        var releasedAt = commit.DeletedAt.ToUniversalTime();
+        foreach (var assignment in assignments)
+        {
+            assignment.State = AzureProviderAssignmentState.Released;
+            assignment.DeletedAt = releasedAt;
+            assignment.UpdatedAt = releasedAt;
+            assignment.Version++;
+        }
+
+        return assignments.Count;
     }
 
     private async Task<bool> HasAzureProvenanceAsync(

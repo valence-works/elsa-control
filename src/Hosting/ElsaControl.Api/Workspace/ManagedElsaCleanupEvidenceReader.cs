@@ -37,7 +37,7 @@ internal static class ManagedElsaCleanupEvidenceReader
         AzureProviderFreshResourceGroupObservation? Observation = null);
 
     internal static ManagedElsaCleanupReceiptResponse ToReceiptResponse(HistoricalEvidence evidence) =>
-        evidence.ProofKind == LocalNoOwnedResourcesProofKind
+        evidence.ProviderOperation is null
             ? new(
                 InstanceTombstonePresent: true,
                 LifecycleDeleteSucceeded: true,
@@ -47,13 +47,13 @@ internal static class ManagedElsaCleanupEvidenceReader
                 LifecycleCompletedAt: evidence.LifecycleOperation.CompletedAt!.Value,
                 TombstoneDeletedAt: evidence.Instance.DeletedAt!.Value,
                 ReceiptDigest: evidence.Digest,
-                ProofKind: LocalNoOwnedResourcesProofKind)
+                ProofKind: evidence.ProofKind)
             : new(
                 InstanceTombstonePresent: true,
                 LifecycleDeleteSucceeded: true,
                 ProviderDeleteSucceeded: true,
                 ProviderAbsenceVerifiedAtCompletion: true,
-                ProviderCompletedAt: evidence.ProviderOperation!.CompletedAt!.Value,
+                ProviderCompletedAt: evidence.ProviderOperation.CompletedAt!.Value,
                 LifecycleCompletedAt: evidence.LifecycleOperation.CompletedAt!.Value,
                 TombstoneDeletedAt: evidence.Instance.DeletedAt!.Value,
                 ReceiptDigest: evidence.Digest,
@@ -93,26 +93,46 @@ internal static class ManagedElsaCleanupEvidenceReader
             !IsHistoricalDeleteTombstone(instance, operation, operationId))
             return null;
 
-        var hasAssignment =
+        var hasAssignmentRow =
             await assignments.HasAnyForInstanceAsync(workspaceId, instanceId, cancellationToken);
-        var hasAzureProvenance = hasAssignment ||
+        var hasAzureOperations =
             await providerOperations.HasAnyForInstanceAsync(workspaceId, instanceId, cancellationToken);
-        if (IsLocalNoOwnedResourcesTombstone(operation, hasAzureProvenance) ||
-            IsNeverProvisionedRecoveredTombstone(operation, hasAssignment))
+        var ownerAssignments = await assignments.ListForInstanceAsync(
+            workspaceId, organizationId, instanceId, cancellationToken);
+        // Lightweight stores claim provenance without listing rows. Fail closed.
+        if (hasAssignmentRow && ownerAssignments.Count == 0)
+            return null;
+
+        var retained = ownerAssignments
+            .Where(assignment => !IsReleasedForReceipt(assignment, operation))
+            .ToList();
+        if (retained.Count == 0)
         {
-            return new(instance, operation, null, null,
-                ComputeLocalCleanupReceiptDigest(
-                    workspaceId, organizationId, instanceId, operationId,
-                    operation.CompletedAt!.Value, operation.DeletionDiagnosticCode!),
-                LocalNoOwnedResourcesProofKind);
+            if (IsLocalNoOwnedResourcesTombstone(operation, hasAzureOperations))
+            {
+                return new(instance, operation, null, null,
+                    ComputeLocalCleanupReceiptDigest(
+                        workspaceId, organizationId, instanceId, operationId,
+                        operation.CompletedAt!.Value, operation.DeletionDiagnosticCode!),
+                    LocalNoOwnedResourcesProofKind);
+            }
+
+            if (IsProviderConfirmedAbsentTombstone(operation))
+            {
+                return new(instance, operation, null, null,
+                    ComputeLocalCleanupReceiptDigest(
+                        workspaceId, organizationId, instanceId, operationId,
+                        operation.CompletedAt!.Value, operation.DeletionDiagnosticCode!),
+                    ProviderConfirmedAbsentProofKind);
+            }
+
+            return null;
         }
 
         // Deletion clears the placement reference: require one exact retained owner.
-        var ownerAssignments = await assignments.ListForInstanceAsync(
-            workspaceId, organizationId, instanceId, cancellationToken);
-        if (ownerAssignments.Count != 1)
+        if (retained.Count != 1)
             return null;
-        var assignment = ownerAssignments[0];
+        var assignment = retained[0];
         if (assignment.LastOperationId is not { } providerOperationId)
             return null;
         var providerOperation = await providerOperations.GetAsync(
@@ -152,11 +172,11 @@ internal static class ManagedElsaCleanupEvidenceReader
         AzureProviderFreshResourceGroupObservation observation;
         try
         {
-            observation = evidence.ProofKind == LocalNoOwnedResourcesProofKind
+            observation = evidence.ProviderOperation is null
                 ? await observer.ObserveDeterministicResourceGroupAsync(
                     workspaceId, organizationId, instanceId, operationId, cancellationToken)
                 : await observer.ObserveAsync(
-                    evidence.ProviderOperation!, operationId, evidence.Assignment!, cancellationToken);
+                    evidence.ProviderOperation, operationId, evidence.Assignment!, cancellationToken);
         }
         catch (Exception) when (!cancellationToken.IsCancellationRequested)
         {
@@ -194,23 +214,29 @@ internal static class ManagedElsaCleanupEvidenceReader
 
     private static bool IsLocalNoOwnedResourcesTombstone(
         ElsaInstanceOperationSummary operation,
-        bool hasAzureProvenance) =>
-        !hasAzureProvenance &&
+        bool hasAzureOperations) =>
+        !hasAzureOperations &&
         string.Equals(
             operation.DeletionDiagnosticCode,
             ManagedElsaReasonCodeCatalog.DeletionLocalAbsent,
             StringComparison.Ordinal);
 
-    // Admin-recovered never-provisioned Deletes finish with provider-confirmed-absent
-    // and no assignment. Any retained assignment stays on the provider-backed path.
-    private static bool IsNeverProvisionedRecoveredTombstone(
-        ElsaInstanceOperationSummary operation,
-        bool hasAssignment) =>
-        !hasAssignment &&
+    private static bool IsProviderConfirmedAbsentTombstone(
+        ElsaInstanceOperationSummary operation) =>
         string.Equals(
             operation.DeletionDiagnosticCode,
             ManagedElsaReasonCodeCatalog.DeletionProviderConfirmedAbsent,
             StringComparison.Ordinal);
+
+    // Released rows, and leftover live rows on a confirmed-absent Deleted
+    // tombstone, are not retained. Verified Deleted assignments stay on the
+    // provider-backed path.
+    private static bool IsReleasedForReceipt(
+        AzureProviderResourceAssignment assignment,
+        ElsaInstanceOperationSummary operation) =>
+        assignment.State == AzureProviderAssignmentState.Released ||
+        AzureProviderAssignmentStates.IsLive(assignment.State) &&
+        IsProviderConfirmedAbsentTombstone(operation);
 
     private static bool IsHistoricalCleanupReceiptEligible(
         ElsaInstance instance,

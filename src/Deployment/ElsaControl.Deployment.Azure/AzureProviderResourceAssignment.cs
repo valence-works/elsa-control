@@ -13,7 +13,22 @@ public enum AzureProviderAssignmentState
     Active,
     Deleting,
     Unknown,
-    Deleted
+    Deleted,
+    /// <summary>
+    /// Soft-retired leftover placement after a Delete confirmed provider absence
+    /// without a terminal verified provider cleanup. History is retained.
+    /// </summary>
+    Released
+}
+
+/// <summary>
+/// Live assignments still occupy the instance's provider placement. Deleted
+/// (verified cleanup) and Released (confirmed-absent leftover) do not.
+/// </summary>
+public static class AzureProviderAssignmentStates
+{
+    public static bool IsLive(AzureProviderAssignmentState state) =>
+        state is not (AzureProviderAssignmentState.Deleted or AzureProviderAssignmentState.Released);
 }
 
 /// <summary>
